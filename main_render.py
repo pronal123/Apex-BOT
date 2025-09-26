@@ -1,6 +1,10 @@
 # ====================================================================================
 # Apex BOT v6.0 - Render Coinglass選定・最終安定版 (main_render.py)
 # ====================================================================================
+#
+# 目的: Renderの無料Webサービスで稼働させるための定義順序を修正し、NameErrorを解消。
+#
+# ====================================================================================
 
 # 1. 必要なライブラリをインポート
 import os
@@ -29,30 +33,66 @@ import uvicorn
 JST = timezone(timedelta(hours=9))
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "LTC", "ADA", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "BCH", "FIL", "TRX", "XLM", "ICP", "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", "NEO", "VET", "DASH", "QTUM"] 
 
-# Render 環境変数から設定を読み込む
+# Render 環境変数から設定を読み込む (未設定時のデフォルト値)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '7904380124:AAE2AuRITmgBw5OECTELF5151D3pRz4K9JM')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '5890119671')
 COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', '1d6a02becd6146a2b09ea5e424b41b6e')
 
 # --- 動作設定 ---
-LOOP_INTERVAL = 30       # メイン分析ループの実行間隔を30秒に設定
-DYNAMIC_UPDATE_INTERVAL = 300 # 出来高ランキング更新間隔を300秒 (5分) に設定
+LOOP_INTERVAL = 30       
+DYNAMIC_UPDATE_INTERVAL = 300 
 
 # --- APIエンドポイント ---
 COINGLASS_API_HEADERS = {'accept': 'application/json', 'coinglass-api-key': COINGLASS_API_KEY}
 
 # ====================================================================================
-#                               UTILITIES & CLIENTS
+#                               UTILITIES & CLIENTS (関数の定義開始)
 # ====================================================================================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# CCXTはOHLCV取得用としてBinanceに固定し、銘柄選定には使用しない
 CCXT_CLIENT_NAME = 'Binance Futures' 
 CCXT_CLIENT = None 
 LAST_UPDATE_TIME = 0.0 
 CURRENT_MONITOR_SYMBOLS = []
 PROXY_LIST = [] 
+
+def get_proxy_list_from_web() -> List[str]:
+    """外部Webサイトから無料のSOCKS5プロキシリストを取得する"""
+    logging.info("外部プロキシリストの取得試行中...")
+    proxies = []
+    sources = [
+        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+        'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5',
+    ]
+
+    for url in sources:
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                new_proxies = [f"socks5://{p}" for p in response.text.splitlines() if re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+', p.strip())]
+                proxies.extend(new_proxies)
+        except Exception:
+            continue
+    
+    unique_proxies = list(set(proxies))
+    if len(unique_proxies) < 5:
+        logging.warning(f"外部プロキシの取得に失敗または数が不足({len(unique_proxies)}個)。ダミープロキシを使用します。")
+        unique_proxies.extend(['socks5://104.248.169.176:1080', 'socks5://159.203.111.9:1080'])
+        
+    logging.info(f"✅ {len(unique_proxies)} 個のユニークなSOCKS5プロキシを取得しました。")
+    return unique_proxies
+
+def get_proxy_options(proxy_url: Optional[str]) -> Dict:
+    """CCXTオプション形式でプロキシ設定を返す"""
+    if proxy_url:
+        return {
+            'proxies': {
+                'http': proxy_url,
+                'https': proxy_url
+            }
+        }
+    return {}
 
 def initialize_ccxt_client():
     """BOT実行時にCCXTクライアントを初期化する"""
@@ -78,13 +118,12 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[str], str]:
     """
-    Coinglass APIからOIに基づいて出来高上位銘柄を動的に取得する (CCXT依存を排除)
+    Coinglass APIからOIに基づいて出来高上位銘柄を動的に取得する
     """
     oi_rank_url = "https://open-api.coinglass.com/public/v2/open_interest/list"
     logging.info("銘柄選定をCoinglass API (OIランキング) から取得試行中...")
 
     try:
-        # Coinglass APIキーが設定されていない場合は失敗
         if 'YOUR' in COINGLASS_API_KEY:
             raise Exception("COINGLASS_API_KEYが設定されていません。")
             
@@ -125,14 +164,28 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
     try:
         return await CCXT_CLIENT.fetch_ohlcv(market_symbol, timeframe, limit=limit)
     except Exception:
-        # OHLCV取得は頻度が高いため、失敗時の警告は出さない
         return []
 
 async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
     """OIデータ取得をスキップし、ダミーデータを返す"""
     return {"oi_change_24h": 0} 
 
-# --- ANALYSIS ENGINE (変更なし) ---
+def get_tradfi_macro_context() -> str:
+    try:
+        es = yf.Ticker("ES=F")
+        hist = es.history(period="5d", interval="1h")
+        if hist.empty: return "不明"
+        prices = hist['Close']
+        kama_fast = calculate_kama(prices, period=10)
+        kama_slow = calculate_kama(prices, period=21)
+        if kama_fast.iloc[-1] > kama_slow.iloc[-1] and prices.iloc[-1] > kama_fast.iloc[-1]:
+            return "リスクオン (株高)"
+        if kama_fast.iloc[-1] < kama_slow.iloc[-1] and prices.iloc[-1] < kama_fast.iloc[-1]:
+            return "リスクオフ (株安)"
+        return "中立"
+    except Exception:
+        return "不明"
+
 def calculate_kama(prices: pd.Series, period: int = 10, fast_ema: int = 2, slow_ema: int = 30) -> pd.Series:
     change = prices.diff(period).abs()
     volatility = prices.diff().abs().rolling(window=period).sum().replace(0, 1e-9)
@@ -305,8 +358,8 @@ async def main_loop():
                 macro_context = get_tradfi_macro_context() # マクロコンテクストを更新
                 logging.info(f"マクロ経済コンテクスト: {macro_context}")
                 
-                # 出来高TOP30取得試行 (プロキシリトライロジックを使用)
-                symbols_to_monitor, source_exchange = await fetch_top_symbols_binance_or_default(30)
+                # 出来高TOP30取得試行 (Coinglassへの変更)
+                symbols_to_monitor, source_exchange = await fetch_top_symbols_from_coinglass_async(30)
                 
                 CURRENT_MONITOR_SYMBOLS = symbols_to_monitor
                 LAST_UPDATE_TIME = current_time
@@ -315,7 +368,7 @@ async def main_loop():
                 logging.info(f"監視対象 (TOP30): {', '.join(CURRENT_MONITOR_SYMBOLS[:5])} ...")
                 logging.info("--------------------------------------------------")
             
-            # --- メイン分析実行 (10秒ごと) ---
+            # --- メイン分析実行 (30秒ごと) ---
             
             # 分析の実行
             tasks = [analyze_symbol_and_notify(sym, macro_context, notified_symbols) for sym in CURRENT_MONITOR_SYMBOLS]
@@ -327,7 +380,7 @@ async def main_loop():
                 logging.info(f"分析サイクル完了。{LOOP_INTERVAL}秒待機します。")
                 logging.info("==================================================")
             
-            # 10秒待機
+            # 30秒待機
             await asyncio.sleep(LOOP_INTERVAL)
             
         except asyncio.CancelledError:
@@ -347,17 +400,13 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     """サーバー起動時にクライアントを初期化し、バックグラウンドタスクを開始する"""
-    global PROXY_LIST
     
     logging.info("Starting Apex BOT Web Service...")
     
-    # 1. プロキシリストの初期化 (同期実行)
-    PROXY_LIST = get_proxy_list_from_web()
+    # 1. CCXTクライアントの初期化 (プロキシは不要、Binanceに固定)
+    initialize_ccxt_client() 
 
-    # 2. CCXTクライアントの初期化 (最初の試行はプロキシなし)
-    initialize_ccxt_client(get_proxy_options(None)) 
-
-    # 3. バックグラウンドタスクとしてメインループを起動
+    # 2. バックグラウンドタスクとしてメインループを起動
     asyncio.create_task(main_loop())
     
 @app.on_event("shutdown")
@@ -370,7 +419,6 @@ async def shutdown_event():
 @app.get("/")
 def read_root():
     """Renderのスリープを防ぐためのヘルスチェックエンドポイント"""
-    # RenderのLive Tailが見やすいように、現在の状態をログに出力
     logging.info(f"Health Check Ping Received. Analyzing: {CURRENT_MONITOR_SYMBOLS[0]}...")
     return {
         "status": "Running",
