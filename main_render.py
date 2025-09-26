@@ -1,5 +1,9 @@
 # ====================================================================================
-# Apex BOT v6.0 - Webshare認証情報管理版 (main_render.py)
+# Apex BOT v6.0 - Render .env & インポートエラー修正版 (main_render.py)
+# ====================================================================================
+#
+# 目的: Pythonモジュール読み込み時の NameError を解消し、Renderでのデプロイを完了させる。
+#
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -7,7 +11,7 @@ import os
 import time
 import logging
 import requests
-import ccxt.async_support as ccxt_async
+import ccxt.async_support as ccxt_async  # 👈 ccxt_async エイリアスを使用
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -63,11 +67,11 @@ CURRENT_MONITOR_SYMBOLS = []
 def get_webshare_proxy_url() -> Optional[str]:
     """Webshareの環境変数からプロキシURL文字列を構築する"""
     if WS_USER and WS_PASS and WS_HOST and WS_PORT:
-        # WebshareはSOCKS5またはHTTPを使用。ccxtは両方対応。ここではHTTP形式で構築する
         return f"http://{WS_USER}:{WS_PASS}@{WS_HOST}:{WS_PORT}"
     return None
 
 def get_proxy_options(proxy_url: Optional[str]) -> Dict:
+    """CCXTオプション形式でプロキシ設定を返す"""
     if proxy_url:
         return {
             'proxies': {
@@ -91,7 +95,7 @@ def initialize_clients_with_proxy(proxy_url: Optional[str] = None):
         'Binance': ccxt_async.binance({**base_options, **proxy_options, "options": {"defaultType": "future"}}),
     }
 
-def set_current_client(client_name: str, client: ccxt.async_support.Exchange):
+def set_current_client(client_name: str, client: ccxt_async.Exchange): # 👈 ccxt_async.Exchange に修正
     """現在のクライアントと名前をグローバル設定に反映する"""
     global CCXT_CLIENT, CCXT_CLIENT_NAME
     CCXT_CLIENT_NAME = client_name
@@ -113,7 +117,7 @@ def send_telegram_html(text: str, is_emergency: bool = False):
     except requests.exceptions.RequestException as e:
         logging.error(f"Telegram送信エラー: {e}")
 
-async def fetch_tickers_from_exchange(client_name: str, client: ccxt.async_support.Exchange, limit: int = 30) -> List[str]:
+async def fetch_tickers_from_exchange(client_name: str, client: ccxt_async.Exchange, limit: int = 30) -> List[str]: # 👈 ccxt_async.Exchange に修正
     """特定の取引所から出来高上位銘柄を取得するコアロジック"""
     logging.info(f"出来高TOP30銘柄を {client_name} から取得試行中...")
     
@@ -189,12 +193,11 @@ async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[
         return [], ""
 
 async def fetch_top_symbols_with_hybrid_fallback(limit: int) -> Tuple[List[str], str]:
-    """取引所順序 -> Coinglass -> 静的リスト の順で銘柄取得を試行する"""
+    """Coinglass -> CCXT取引所順序 -> 静的リスト の順で銘柄取得を試行する"""
     
     # 1. Coinglass API (プライマリとして最優先で試行)
     symbols_coinglass, source_coinglass = await fetch_top_symbols_from_coinglass_async(limit)
     if symbols_coinglass:
-        # 成功時、OHLCV用にBinanceをネイティブIPで再設定
         initialize_clients_with_proxy(None) 
         set_current_client('Binance', CLIENTS['Binance'])
         return symbols_coinglass, source_coinglass
@@ -208,7 +211,7 @@ async def fetch_top_symbols_with_hybrid_fallback(limit: int) -> Tuple[List[str],
     
     # a. Webshareプロキシで試行 (設定されている場合のみ)
     if proxy_url:
-        logging.info(f"--- CCXT: Webshareプロキシ で試行中 ---")
+        logging.info(f"--- CCXT: Webshareプロキシ ({WS_HOST}:{WS_PORT}) で試行中 ---")
         initialize_clients_with_proxy(proxy_url)
         for name in exchange_chain:
              symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
@@ -227,7 +230,7 @@ async def fetch_top_symbols_with_hybrid_fallback(limit: int) -> Tuple[List[str],
             
     # 3. 最終フォールバック
     logging.error("🚨 全ての動的銘柄取得手段が失敗しました。静的リストを使用します。")
-    initialize_clients_with_proxy(None) # OHLCV用にBinanceをネイティブIPで初期化
+    initialize_clients_with_proxy(None) 
     set_current_client('Binance', CLIENTS['Binance']) 
     return DEFAULT_SYMBOLS[:limit], "Static List (Failure Avoided)"
 
@@ -236,7 +239,7 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
     """OHLCVは現在設定されているCCXTクライアントから取得する"""
     if CCXT_CLIENT is None: return []
     
-    client_name = CCXT_CLIENT_NAME.split(' ')[0] # Bybit (Proxy) -> Bybit
+    client_name = CCXT_CLIENT_NAME.split(' ')[0]
     market_symbol = f"{symbol}/USDT" 
     
     # 取引所ごとのシンボル調整
@@ -476,50 +479,6 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
 
 
-async def fetch_top_symbols_with_hybrid_fallback(limit: int) -> Tuple[List[str], str]:
-    """Coinglass -> CCXT取引所順序 -> 静的リスト の順で銘柄取得を試行する"""
-    
-    # 1. Coinglass API (プライマリとして最優先で試行)
-    symbols_coinglass, source_coinglass = await fetch_top_symbols_from_coinglass_async(limit)
-    if symbols_coinglass:
-        # Coinglass成功時、OHLCV用にBinanceをネイティブIPで再設定
-        initialize_clients_with_proxy(None) 
-        set_current_client('Binance', CLIENTS['Binance'])
-        return symbols_coinglass, source_coinglass
-
-    # 2. CCXT取引所フォールバック
-    
-    proxy_url = get_webshare_proxy_url()
-    
-    # 優先順位: Bybit -> Bitget -> MEXC -> OKX -> Binance
-    exchange_chain = ['Bybit', 'Bitget', 'MEXC', 'OKX', 'Binance']
-    
-    # a. Webshareプロキシで試行 (設定されている場合のみ)
-    if proxy_url:
-        logging.info(f"--- CCXT: Webshareプロキシ ({WS_HOST}:{WS_PORT}) で試行中 ---")
-        initialize_clients_with_proxy(proxy_url)
-        for name in exchange_chain:
-             symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
-             if symbols:
-                 set_current_client(name + ' (Proxy)', CLIENTS[name])
-                 return symbols, name + ' (Proxy)'
-    
-    # b. ネイティブIPで試行 (最後の砦)
-    logging.info("--- CCXT: ネイティブIPで試行中 ---")
-    initialize_clients_with_proxy(None)
-    for name in exchange_chain:
-        symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
-        if symbols:
-            set_current_client(name, CLIENTS[name])
-            return symbols, name
-            
-    # 3. 最終フォールバック
-    logging.error("🚨 全ての動的銘柄取得手段が失敗しました。静的リストを使用します。")
-    initialize_clients_with_proxy(None) # OHLCV用にBinanceをネイティブIPで初期化
-    set_current_client('Binance', CLIENTS['Binance']) 
-    return DEFAULT_SYMBOLS[:limit], "Static List (Failure Avoided)"
-
-
 # ------------------------------------------------------------------------------------
 # FASTAPI WEB SERVER SETUP
 # ------------------------------------------------------------------------------------
@@ -532,7 +491,7 @@ async def startup_event():
     
     logging.info("Starting Apex BOT Web Service...")
     
-    # 1. CCXTクライアントの初期化 (初期設定: Binance)
+    # 1. 全てのCCXTクライアントを初期化 (初期設定: ネイティブIP)
     initialize_clients_with_proxy(None) 
     # 初期化後、CCXTクライアントを一つ設定
     set_current_client('Binance', CLIENTS['Binance'])
@@ -560,3 +519,7 @@ def read_root():
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
+
+# ------------------------------------------------------------------------------------
+# RENDER ENTRY POINT (Uvicorn configuration)
+# ------------------------------------------------------------------------------------
