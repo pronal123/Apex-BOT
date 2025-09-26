@@ -1,9 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.0 - Render 無料Webサービス対応版 (main_render.py)
-# ====================================================================================
-#
-# 目的: Renderの無料枠でWebサービスとして稼働させ、バックグラウンドで分析を継続する。
-#
+# Apex BOT v6.0 - Render Coinglass選定・最終安定版 (main_render.py)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -20,7 +16,7 @@ import yfinance as yf
 import asyncio
 import random
 import re 
-from io import StringIO # pandasのread_csv用
+from io import StringIO 
 
 # サーバーフレームワークのインポート
 from fastapi import FastAPI
@@ -51,62 +47,18 @@ COINGLASS_API_HEADERS = {'accept': 'application/json', 'coinglass-api-key': COIN
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# CCXTはOHLCV取得用としてBinanceに固定し、銘柄選定には使用しない
 CCXT_CLIENT_NAME = 'Binance Futures' 
 CCXT_CLIENT = None 
 LAST_UPDATE_TIME = 0.0 
 CURRENT_MONITOR_SYMBOLS = []
-PROXY_LIST = []
+PROXY_LIST = [] 
 
-def get_proxy_list_from_web() -> List[str]:
-    """外部Webサイトから無料のSOCKS5プロキシリストを取得する"""
-    logging.info("外部プロキシリストの取得試行中...")
-    proxies = []
-    sources = [
-        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
-        'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5',
-    ]
-
-    for url in sources:
-        try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                # IP:PORT 形式を抽出
-                new_proxies = [f"socks5://{p}" for p in response.text.splitlines() if re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+', p.strip())]
-                proxies.extend(new_proxies)
-        except Exception:
-            continue
-    
-    unique_proxies = list(set(proxies))
-    if len(unique_proxies) < 5:
-        logging.warning(f"外部プロキシの取得に失敗または数が不足({len(unique_proxies)}個)。ダミープロキシを使用します。")
-        unique_proxies.extend(['socks5://104.248.169.176:1080', 'socks5://159.203.111.9:1080'])
-        
-    logging.info(f"✅ {len(unique_proxies)} 個のユニークなSOCKS5プロキシを取得しました。")
-    return unique_proxies
-
-def get_proxy_options(proxy_url: Optional[str]) -> Dict:
-    """CCXTオプション形式でプロキシ設定を返す"""
-    if proxy_url:
-        return {
-            'proxies': {
-                'http': proxy_url,
-                'https': proxy_url
-            }
-        }
-    return {}
-
-def initialize_ccxt_client(proxy_options: Dict = {}):
-    """プロキシオプションを適用してBinanceクライアントを初期化/再初期化する"""
+def initialize_ccxt_client():
+    """BOT実行時にCCXTクライアントを初期化する"""
     global CCXT_CLIENT
-    
-    if CCXT_CLIENT:
-        try:
-             asyncio.create_task(CCXT_CLIENT.close())
-        except Exception:
-             pass
-
-    base_options = {"enableRateLimit": True, "timeout": 15000}
-    CCXT_CLIENT = ccxt_async.binance({**base_options, **proxy_options, "options": {"defaultType": "future"}})
+    # プロキシは不要（BinanceへのOHLCVアクセスもブロックされる可能性はあるが、銘柄選定よりは負荷が低い）
+    CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
 def send_telegram_html(text: str, is_emergency: bool = False):
     if 'YOUR' in TELEGRAM_TOKEN:
@@ -124,88 +76,63 @@ def send_telegram_html(text: str, is_emergency: bool = False):
     except requests.exceptions.RequestException as e:
         logging.error(f"Telegram送信エラー: {e}")
 
-async def fetch_top_symbols_binance_or_default(limit: int = 30) -> Tuple[List[str], str]:
+async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[str], str]:
     """
-    Binance Futuresから出来高TOP30を取得する。プロキシを切り替えながら最大5回リトライする。
+    Coinglass APIからOIに基づいて出来高上位銘柄を動的に取得する (CCXT依存を排除)
     """
-    logging.info("出来高TOP30銘柄の取得試行を開始 (最大5回リトライ)...")
-    
-    proxy_urls_to_try = [None] + random.sample(PROXY_LIST, min(len(PROXY_LIST), 4))
-    
-    for attempt, proxy_url in enumerate(proxy_urls_to_try):
-        
-        source_info = "Native IP" if proxy_url is None else f"Proxy {attempt + 1} ({proxy_url.split('//')[1]})"
-        logging.info(f"--- 試行 {attempt + 1}/5 ({source_info}) ---")
-        
-        proxy_options = get_proxy_options(proxy_url)
-        initialize_ccxt_client(proxy_options)
-        
-        try:
-            tickers = await CCXT_CLIENT.fetch_tickers()
-            
-            swap_markets = [
-                 ticker for ticker in tickers.values() 
-                 if 'USDT' in ticker['symbol'] and '/USDT' in ticker['symbol']
-            ]
+    oi_rank_url = "https://open-api.coinglass.com/public/v2/open_interest/list"
+    logging.info("銘柄選定をCoinglass API (OIランキング) から取得試行中...")
 
-            sorted_markets = sorted(
-                swap_markets, 
-                key=lambda x: x.get('quoteVolume', 0) if x.get('quoteVolume') is not None else 0,
-                reverse=True
-            )
+    try:
+        # Coinglass APIキーが設定されていない場合は失敗
+        if 'YOUR' in COINGLASS_API_KEY:
+            raise Exception("COINGLASS_API_KEYが設定されていません。")
             
-            top_symbols = []
-            stablecoins = ["USDT", "USDC", "DAI", "TUSD", "FDUSD"]
-            for market in sorted_markets:
-                base_currency = market['symbol'].split('/')[0]
-                if base_currency not in stablecoins and base_currency not in top_symbols:
-                    top_symbols.append(base_currency)
-                if len(top_symbols) >= limit:
-                    break
-                    
-            if len(top_symbols) < limit / 2: 
-                 raise Exception(f"出来高リストが空でした (取得数 {len(top_symbols)}個)。")
-                    
-            logging.info(f"✅ {CCXT_CLIENT_NAME} から {len(top_symbols)} 銘柄を取得成功 (方法: {source_info})。")
-            return top_symbols, CCXT_CLIENT_NAME
-            
-        except Exception as e:
-            logging.warning(f"❌ 試行 {attempt + 1} 失敗: {e}")
-            if attempt < len(proxy_urls_to_try) - 1:
-                await asyncio.sleep(2)
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, lambda: requests.get(
+            oi_rank_url, headers=COINGLASS_API_HEADERS, params={"timeType": "h1"}, timeout=10
+        ).json())
+        
+        data = res.get('data', {}).get('list', [])
+        
+        top_symbols = []
+        stablecoins = ["USDT", "USDC", "DAI", "TUSD", "FDUSD"]
+        
+        for item in data:
+            symbol = item.get('symbol')
+            if symbol and symbol not in stablecoins and symbol not in top_symbols:
+                top_symbols.append(symbol)
+            if len(top_symbols) >= limit:
+                break
+                
+        if len(top_symbols) < limit / 2:
+             raise Exception(f"Coinglassから取得できた銘柄数が少なすぎます ({len(top_symbols)}個)。")
+        
+        logging.info(f"✅ Coinglass API から {len(top_symbols)} 銘柄を取得成功 (OI TOP)。")
+        return top_symbols, "Coinglass (OI Rank)"
 
-    logging.error("🚨 出来高ランキングの取得が全試行で失敗しました。静的リストに切り替えます。")
-    return DEFAULT_SYMBOLS[:limit], "Static List (Failed to get Dynamic Data)"
+    except Exception as e:
+        logging.error(f"❌ Coinglassからの銘柄取得に失敗: {e}。静的リストを使用します。")
+        return DEFAULT_SYMBOLS[:limit], "Static List (Failure Avoided)"
 
 
 async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[list]:
+    """OHLCVは固定のCCXTクライアント (Binance) から取得する"""
     if CCXT_CLIENT is None: return []
+    
     market_symbol = f"{symbol}/USDT" 
+
     try:
         return await CCXT_CLIENT.fetch_ohlcv(market_symbol, timeframe, limit=limit)
     except Exception:
+        # OHLCV取得は頻度が高いため、失敗時の警告は出さない
         return []
 
 async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
+    """OIデータ取得をスキップし、ダミーデータを返す"""
     return {"oi_change_24h": 0} 
 
-def get_tradfi_macro_context() -> str:
-    try:
-        es = yf.Ticker("ES=F")
-        # yfinanceはpandasを使用するため、Renderで動作確認済みのライブラリを使用
-        hist = es.history(period="5d", interval="1h")
-        if hist.empty: return "不明"
-        prices = hist['Close']
-        kama_fast = calculate_kama(prices, period=10)
-        kama_slow = calculate_kama(prices, period=21)
-        if kama_fast.iloc[-1] > kama_slow.iloc[-1] and prices.iloc[-1] > kama_fast.iloc[-1]:
-            return "リスクオン (株高)"
-        if kama_fast.iloc[-1] < kama_slow.iloc[-1] and prices.iloc[-1] < kama_fast.iloc[-1]:
-            return "リスクオフ (株安)"
-        return "中立"
-    except Exception:
-        return "不明"
-
+# --- ANALYSIS ENGINE (変更なし) ---
 def calculate_kama(prices: pd.Series, period: int = 10, fast_ema: int = 2, slow_ema: int = 30) -> pd.Series:
     change = prices.diff(period).abs()
     volatility = prices.diff().abs().rolling(window=period).sum().replace(0, 1e-9)
@@ -363,7 +290,7 @@ async def main_loop():
     
     # 起動時の初期リスト設定
     CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS[:30]
-    macro_context = get_tradfi_macro_context() 
+    macro_context = get_tradfi_macro_context()
     
     while True:
         try:
@@ -372,7 +299,6 @@ async def main_loop():
             
             # --- 動的更新フェーズ (300秒に一度) ---
             if is_dynamic_update_needed:
-                # ログをINFOレベルで出力し、画面クリアは行わない (Render Live Tail向け)
                 logging.info("==================================================")
                 logging.info(f"Apex BOT v6.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
@@ -405,7 +331,8 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
             
         except asyncio.CancelledError:
-            raise
+            logging.warning("バックグラウンドタスクがキャンセルされました。")
+            break
         except Exception as e:
             logging.error(f"メインループで予期せぬエラーが発生しました: {e}。{LOOP_INTERVAL}秒後に再試行します。")
             await asyncio.sleep(LOOP_INTERVAL)
@@ -456,6 +383,4 @@ def read_root():
 # RENDER ENTRY POINT (Uvicorn configuration)
 # ------------------------------------------------------------------------------------
 
-# Renderは uvicorn main_render:app で起動するため、このブロックは不要
-# if __name__ == "__main__":
-#     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+# Render環境では、Uvicornがこのappインスタンスを自動的に起動します。
