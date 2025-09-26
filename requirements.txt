@@ -5,3 +5,4 @@ yfinance
 requests
 fastapi
 uvicorn[standard]
+python-dotenv
