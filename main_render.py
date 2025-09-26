@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v6.0 - Render Coinglass選定・最終安定版 (main_render.py)
+# Apex BOT v6.0 - Render .env対応版 (main_render.py)
 # ====================================================================================
 #
-# 目的: Renderの無料Webサービスで稼働させるための定義順序を修正し、NameErrorを解消。
+# 目的: ローカルでのテストを容易にするため、.envファイルからの環境変数読み込みを追加。
 #
 # ====================================================================================
 
@@ -21,10 +21,12 @@ import asyncio
 import random
 import re 
 from io import StringIO 
-
-# サーバーフレームワークのインポート
 from fastapi import FastAPI
 import uvicorn
+
+# .env ファイルの読み込みを追加
+from dotenv import load_dotenv
+load_dotenv() # .envファイルの内容を環境変数としてロード
 
 # ====================================================================================
 #                                    CONFIG
@@ -33,10 +35,10 @@ import uvicorn
 JST = timezone(timedelta(hours=9))
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "LTC", "ADA", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "BCH", "FIL", "TRX", "XLM", "ICP", "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", "NEO", "VET", "DASH", "QTUM"] 
 
-# Render 環境変数から設定を読み込む (未設定時のデフォルト値)
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '7904380124:AAE2AuRITmgBw5OECTELF5151D3pRz4K9JM')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '5890119671')
-COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', '1d6a02becd6146a2b09ea5e424b41b6e')
+# 環境変数から設定を読み込む (.envがロードされているため、ローカルでもos.environが機能)
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
+COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', 'YOUR_COINGLASS_API_KEY')
 
 # --- 動作設定 ---
 LOOP_INTERVAL = 30       
@@ -46,8 +48,10 @@ DYNAMIC_UPDATE_INTERVAL = 300
 COINGLASS_API_HEADERS = {'accept': 'application/json', 'coinglass-api-key': COINGLASS_API_KEY}
 
 # ====================================================================================
-#                               UTILITIES & CLIENTS (関数の定義開始)
+#                               UTILITIES & CLIENTS
 # ====================================================================================
+
+# ... (以降の関数定義は、前回の最終コードと同じです。すべて含めてください)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -97,7 +101,6 @@ def get_proxy_options(proxy_url: Optional[str]) -> Dict:
 def initialize_ccxt_client():
     """BOT実行時にCCXTクライアントを初期化する"""
     global CCXT_CLIENT
-    # プロキシは不要（BinanceへのOHLCVアクセスもブロックされる可能性はあるが、銘柄選定よりは負荷が低い）
     CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
 def send_telegram_html(text: str, is_emergency: bool = False):
@@ -118,7 +121,7 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[str], str]:
     """
-    Coinglass APIからOIに基づいて出来高上位銘柄を動的に取得する
+    Coinglass APIからOIに基づいて出来高上位銘柄を動的に取得する (CCXT依存を排除)
     """
     oi_rank_url = "https://open-api.coinglass.com/public/v2/open_interest/list"
     logging.info("銘柄選定をCoinglass API (OIランキング) から取得試行中...")
@@ -403,7 +406,7 @@ async def startup_event():
     
     logging.info("Starting Apex BOT Web Service...")
     
-    # 1. CCXTクライアントの初期化 (プロキシは不要、Binanceに固定)
+    # 1. CCXTクライアントの初期化 (Binanceに固定)
     initialize_ccxt_client() 
 
     # 2. バックグラウンドタスクとしてメインループを起動
