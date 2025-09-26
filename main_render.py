@@ -1,9 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.0 - Render .env対応版 (main_render.py)
-# ====================================================================================
-#
-# 目的: ローカルでのテストを容易にするため、.envファイルからの環境変数読み込みを追加。
-#
+# Apex BOT v6.0 - Webshare認証情報管理版 (main_render.py)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -20,13 +16,10 @@ import yfinance as yf
 import asyncio
 import random
 import re 
-from io import StringIO 
 from fastapi import FastAPI
 import uvicorn
-
-# .env ファイルの読み込みを追加
 from dotenv import load_dotenv
-load_dotenv() # .envファイルの内容を環境変数としてロード
+load_dotenv()
 
 # ====================================================================================
 #                                    CONFIG
@@ -35,10 +28,17 @@ load_dotenv() # .envファイルの内容を環境変数としてロード
 JST = timezone(timedelta(hours=9))
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "LTC", "ADA", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "BCH", "FIL", "TRX", "XLM", "ICP", "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", "NEO", "VET", "DASH", "QTUM"] 
 
-# 環境変数から設定を読み込む (.envがロードされているため、ローカルでもos.environが機能)
+# 環境変数から設定を読み込む
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', 'YOUR_COINGLASS_API_KEY')
+
+# --- WEBSHARE PROXY 分割設定 ---
+WS_USER = os.environ.get('WEBSHARE_USER', None)
+WS_PASS = os.environ.get('WEBSHARE_PASS', None)
+WS_HOST = os.environ.get('WEBSHARE_HOST', None)
+WS_PORT = os.environ.get('WEBSHARE_PORT', None)
+# -----------------------------
 
 # --- 動作設定 ---
 LOOP_INTERVAL = 30       
@@ -51,44 +51,23 @@ COINGLASS_API_HEADERS = {'accept': 'application/json', 'coinglass-api-key': COIN
 #                               UTILITIES & CLIENTS
 # ====================================================================================
 
-# ... (以降の関数定義は、前回の最終コードと同じです。すべて含めてください)
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-CCXT_CLIENT_NAME = 'Binance Futures' 
+# グローバル変数の定義
+CLIENTS = {} 
+CCXT_CLIENT_NAME = 'Unknown' 
 CCXT_CLIENT = None 
 LAST_UPDATE_TIME = 0.0 
 CURRENT_MONITOR_SYMBOLS = []
-PROXY_LIST = [] 
 
-def get_proxy_list_from_web() -> List[str]:
-    """外部Webサイトから無料のSOCKS5プロキシリストを取得する"""
-    logging.info("外部プロキシリストの取得試行中...")
-    proxies = []
-    sources = [
-        'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
-        'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5',
-    ]
-
-    for url in sources:
-        try:
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                new_proxies = [f"socks5://{p}" for p in response.text.splitlines() if re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+', p.strip())]
-                proxies.extend(new_proxies)
-        except Exception:
-            continue
-    
-    unique_proxies = list(set(proxies))
-    if len(unique_proxies) < 5:
-        logging.warning(f"外部プロキシの取得に失敗または数が不足({len(unique_proxies)}個)。ダミープロキシを使用します。")
-        unique_proxies.extend(['socks5://104.248.169.176:1080', 'socks5://159.203.111.9:1080'])
-        
-    logging.info(f"✅ {len(unique_proxies)} 個のユニークなSOCKS5プロキシを取得しました。")
-    return unique_proxies
+def get_webshare_proxy_url() -> Optional[str]:
+    """Webshareの環境変数からプロキシURL文字列を構築する"""
+    if WS_USER and WS_PASS and WS_HOST and WS_PORT:
+        # WebshareはSOCKS5またはHTTPを使用。ccxtは両方対応。ここではHTTP形式で構築する
+        return f"http://{WS_USER}:{WS_PASS}@{WS_HOST}:{WS_PORT}"
+    return None
 
 def get_proxy_options(proxy_url: Optional[str]) -> Dict:
-    """CCXTオプション形式でプロキシ設定を返す"""
     if proxy_url:
         return {
             'proxies': {
@@ -98,10 +77,25 @@ def get_proxy_options(proxy_url: Optional[str]) -> Dict:
         }
     return {}
 
-def initialize_ccxt_client():
-    """BOT実行時にCCXTクライアントを初期化する"""
-    global CCXT_CLIENT
-    CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
+def initialize_clients_with_proxy(proxy_url: Optional[str] = None):
+    """全てのCCXTクライアントをプロキシ設定で初期化する"""
+    global CLIENTS
+    proxy_options = get_proxy_options(proxy_url)
+    base_options = {"enableRateLimit": True, "timeout": 15000}
+    
+    CLIENTS = {
+        'Bybit': ccxt_async.bybit({**base_options, **proxy_options, "options": {"defaultType": "future"}}),
+        'Bitget': ccxt_async.bitget({**base_options, **proxy_options}),
+        'MEXC': ccxt_async.mexc({**base_options, **proxy_options, "options": {"defaultType": "future"}}),
+        'OKX': ccxt_async.okx({**base_options, **proxy_options}),
+        'Binance': ccxt_async.binance({**base_options, **proxy_options, "options": {"defaultType": "future"}}),
+    }
+
+def set_current_client(client_name: str, client: ccxt.async_support.Exchange):
+    """現在のクライアントと名前をグローバル設定に反映する"""
+    global CCXT_CLIENT, CCXT_CLIENT_NAME
+    CCXT_CLIENT_NAME = client_name
+    CCXT_CLIENT = client
 
 def send_telegram_html(text: str, is_emergency: bool = False):
     if 'YOUR' in TELEGRAM_TOKEN:
@@ -119,13 +113,51 @@ def send_telegram_html(text: str, is_emergency: bool = False):
     except requests.exceptions.RequestException as e:
         logging.error(f"Telegram送信エラー: {e}")
 
-async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[str], str]:
-    """
-    Coinglass APIからOIに基づいて出来高上位銘柄を動的に取得する (CCXT依存を排除)
-    """
-    oi_rank_url = "https://open-api.coinglass.com/public/v2/open_interest/list"
-    logging.info("銘柄選定をCoinglass API (OIランキング) から取得試行中...")
+async def fetch_tickers_from_exchange(client_name: str, client: ccxt.async_support.Exchange, limit: int = 30) -> List[str]:
+    """特定の取引所から出来高上位銘柄を取得するコアロジック"""
+    logging.info(f"出来高TOP30銘柄を {client_name} から取得試行中...")
+    
+    try:
+        tickers = await client.fetch_tickers()
+        swap_markets = []
+        
+        # シンボルフィルタリング
+        if client_name == 'OKX':
+             swap_markets = [ticker for ticker in tickers.values() if 'USDT' in ticker['symbol'] and ticker.get('type') == 'swap']
+        elif client_name == 'MEXC' or client_name == 'Binance':
+             swap_markets = [ticker for ticker in tickers.values() if 'USDT' in ticker['symbol'] and '/USDT' in ticker['symbol']]
+        else: # Bybit, Bitget
+             swap_markets = [ticker for ticker in tickers.values() if 'USDT' in ticker['symbol'] and '/USDT' in ticker['symbol'] and (ticker.get('type') == 'swap' or ticker.get('type') == 'future')]
 
+        sorted_markets = sorted(
+            swap_markets, 
+            key=lambda x: x.get('quoteVolume', 0) if x.get('quoteVolume') is not None else 0,
+            reverse=True
+        )
+        
+        top_symbols = []
+        stablecoins = ["USDT", "USDC", "DAI", "TUSD", "FDUSD"]
+        for market in sorted_markets:
+            base_currency = market['symbol'].split('/')[0]
+            if base_currency not in stablecoins and base_currency not in top_symbols:
+                top_symbols.append(base_currency)
+            if len(top_symbols) >= limit:
+                break
+                
+        if len(top_symbols) < limit / 2: 
+             raise Exception(f"出来高リストが空でした (取得数 {len(top_symbols)}個)。")
+                
+        logging.info(f"✅ {client_name} から {len(top_symbols)} 銘柄を取得成功。")
+        return top_symbols
+            
+    except Exception as e:
+        logging.warning(f"❌ {client_name} からの出来高ランキング取得に失敗: {e}")
+        return []
+
+async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[str], str]:
+    """Coinglass APIからOIに基づいて動的銘柄リストを取得する (フォールバック)"""
+    oi_rank_url = "https://open-api.coinglass.com/public/v2/open_interest/list"
+    
     try:
         if 'YOUR' in COINGLASS_API_KEY:
             raise Exception("COINGLASS_API_KEYが設定されていません。")
@@ -139,7 +171,6 @@ async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[
         
         top_symbols = []
         stablecoins = ["USDT", "USDC", "DAI", "TUSD", "FDUSD"]
-        
         for item in data:
             symbol = item.get('symbol')
             if symbol and symbol not in stablecoins and symbol not in top_symbols:
@@ -154,15 +185,67 @@ async def fetch_top_symbols_from_coinglass_async(limit: int = 30) -> Tuple[List[
         return top_symbols, "Coinglass (OI Rank)"
 
     except Exception as e:
-        logging.error(f"❌ Coinglassからの銘柄取得に失敗: {e}。静的リストを使用します。")
-        return DEFAULT_SYMBOLS[:limit], "Static List (Failure Avoided)"
+        logging.warning(f"❌ Coinglassからの銘柄取得に失敗: {e}。")
+        return [], ""
+
+async def fetch_top_symbols_with_hybrid_fallback(limit: int) -> Tuple[List[str], str]:
+    """取引所順序 -> Coinglass -> 静的リスト の順で銘柄取得を試行する"""
+    
+    # 1. Coinglass API (プライマリとして最優先で試行)
+    symbols_coinglass, source_coinglass = await fetch_top_symbols_from_coinglass_async(limit)
+    if symbols_coinglass:
+        # 成功時、OHLCV用にBinanceをネイティブIPで再設定
+        initialize_clients_with_proxy(None) 
+        set_current_client('Binance', CLIENTS['Binance'])
+        return symbols_coinglass, source_coinglass
+
+    # 2. CCXT取引所フォールバック
+    
+    proxy_url = get_webshare_proxy_url()
+    
+    # 優先順位: Bybit -> Bitget -> MEXC -> OKX -> Binance
+    exchange_chain = ['Bybit', 'Bitget', 'MEXC', 'OKX', 'Binance']
+    
+    # a. Webshareプロキシで試行 (設定されている場合のみ)
+    if proxy_url:
+        logging.info(f"--- CCXT: Webshareプロキシ で試行中 ---")
+        initialize_clients_with_proxy(proxy_url)
+        for name in exchange_chain:
+             symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
+             if symbols:
+                 set_current_client(name + ' (Proxy)', CLIENTS[name])
+                 return symbols, name + ' (Proxy)'
+    
+    # b. ネイティブIPで試行 (最後の砦)
+    logging.info("--- CCXT: ネイティブIPで試行中 ---")
+    initialize_clients_with_proxy(None)
+    for name in exchange_chain:
+        symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
+        if symbols:
+            set_current_client(name, CLIENTS[name])
+            return symbols, name
+            
+    # 3. 最終フォールバック
+    logging.error("🚨 全ての動的銘柄取得手段が失敗しました。静的リストを使用します。")
+    initialize_clients_with_proxy(None) # OHLCV用にBinanceをネイティブIPで初期化
+    set_current_client('Binance', CLIENTS['Binance']) 
+    return DEFAULT_SYMBOLS[:limit], "Static List (Failure Avoided)"
 
 
 async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[list]:
-    """OHLCVは固定のCCXTクライアント (Binance) から取得する"""
+    """OHLCVは現在設定されているCCXTクライアントから取得する"""
     if CCXT_CLIENT is None: return []
     
+    client_name = CCXT_CLIENT_NAME.split(' ')[0] # Bybit (Proxy) -> Bybit
     market_symbol = f"{symbol}/USDT" 
+    
+    # 取引所ごとのシンボル調整
+    if client_name == 'OKX':
+        market_symbol = f"{symbol}-USDT-SWAP"
+    elif client_name == 'Bitget':
+        market_symbol = f"{symbol}/USDT:USDT" 
+    elif client_name in ['MEXC', 'Bybit', 'Binance']:
+        market_symbol = f"{symbol}/USDT"
 
     try:
         return await CCXT_CLIENT.fetch_ohlcv(market_symbol, timeframe, limit=limit)
@@ -170,7 +253,6 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
         return []
 
 async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
-    """OIデータ取得をスキップし、ダミーデータを返す"""
     return {"oi_change_24h": 0} 
 
 def get_tradfi_macro_context() -> str:
@@ -281,7 +363,7 @@ async def generate_signal(symbol: str, regime: str, macro_context: str) -> Optio
 def format_telegram_message(signal: Dict) -> str:
     side_icon = "📈" if signal['side'] == "ロング" else "📉"
     msg = f"💎 <b>Apex BOT シグナル速報: {signal['symbol']}</b> {side_icon}\n"
-    msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME}データ)</i>\n"
+    msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ)</i>\n"
     msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%}</i>\n\n"
     
     msg += "<b>✅ 判断根拠 (Criteria)</b>\n"
@@ -361,8 +443,8 @@ async def main_loop():
                 macro_context = get_tradfi_macro_context() # マクロコンテクストを更新
                 logging.info(f"マクロ経済コンテクスト: {macro_context}")
                 
-                # 出来高TOP30取得試行 (Coinglassへの変更)
-                symbols_to_monitor, source_exchange = await fetch_top_symbols_from_coinglass_async(30)
+                # 出来高TOP30取得試行 (ハイブリッドフォールバックロジック)
+                symbols_to_monitor, source_exchange = await fetch_top_symbols_with_hybrid_fallback(30)
                 
                 CURRENT_MONITOR_SYMBOLS = symbols_to_monitor
                 LAST_UPDATE_TIME = current_time
@@ -394,6 +476,50 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
 
 
+async def fetch_top_symbols_with_hybrid_fallback(limit: int) -> Tuple[List[str], str]:
+    """Coinglass -> CCXT取引所順序 -> 静的リスト の順で銘柄取得を試行する"""
+    
+    # 1. Coinglass API (プライマリとして最優先で試行)
+    symbols_coinglass, source_coinglass = await fetch_top_symbols_from_coinglass_async(limit)
+    if symbols_coinglass:
+        # Coinglass成功時、OHLCV用にBinanceをネイティブIPで再設定
+        initialize_clients_with_proxy(None) 
+        set_current_client('Binance', CLIENTS['Binance'])
+        return symbols_coinglass, source_coinglass
+
+    # 2. CCXT取引所フォールバック
+    
+    proxy_url = get_webshare_proxy_url()
+    
+    # 優先順位: Bybit -> Bitget -> MEXC -> OKX -> Binance
+    exchange_chain = ['Bybit', 'Bitget', 'MEXC', 'OKX', 'Binance']
+    
+    # a. Webshareプロキシで試行 (設定されている場合のみ)
+    if proxy_url:
+        logging.info(f"--- CCXT: Webshareプロキシ ({WS_HOST}:{WS_PORT}) で試行中 ---")
+        initialize_clients_with_proxy(proxy_url)
+        for name in exchange_chain:
+             symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
+             if symbols:
+                 set_current_client(name + ' (Proxy)', CLIENTS[name])
+                 return symbols, name + ' (Proxy)'
+    
+    # b. ネイティブIPで試行 (最後の砦)
+    logging.info("--- CCXT: ネイティブIPで試行中 ---")
+    initialize_clients_with_proxy(None)
+    for name in exchange_chain:
+        symbols = await fetch_tickers_from_exchange(name, CLIENTS[name], limit)
+        if symbols:
+            set_current_client(name, CLIENTS[name])
+            return symbols, name
+            
+    # 3. 最終フォールバック
+    logging.error("🚨 全ての動的銘柄取得手段が失敗しました。静的リストを使用します。")
+    initialize_clients_with_proxy(None) # OHLCV用にBinanceをネイティブIPで初期化
+    set_current_client('Binance', CLIENTS['Binance']) 
+    return DEFAULT_SYMBOLS[:limit], "Static List (Failure Avoided)"
+
+
 # ------------------------------------------------------------------------------------
 # FASTAPI WEB SERVER SETUP
 # ------------------------------------------------------------------------------------
@@ -406,8 +532,10 @@ async def startup_event():
     
     logging.info("Starting Apex BOT Web Service...")
     
-    # 1. CCXTクライアントの初期化 (Binanceに固定)
-    initialize_ccxt_client() 
+    # 1. CCXTクライアントの初期化 (初期設定: Binance)
+    initialize_clients_with_proxy(None) 
+    # 初期化後、CCXTクライアントを一つ設定
+    set_current_client('Binance', CLIENTS['Binance'])
 
     # 2. バックグラウンドタスクとしてメインループを起動
     asyncio.create_task(main_loop())
@@ -415,9 +543,12 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """サーバーシャットダウン時にリソースを解放する"""
-    if CCXT_CLIENT:
-        logging.info("Closing CCXT Client during shutdown.")
-        await CCXT_CLIENT.close()
+    logging.info("Closing all CCXT Clients during shutdown.")
+    for client in CLIENTS.values():
+        try:
+            await client.close()
+        except Exception:
+            pass
 
 @app.get("/")
 def read_root():
@@ -426,12 +557,6 @@ def read_root():
     return {
         "status": "Running",
         "service": "Apex BOT v6.0",
-        "monitoring_base": CCXT_CLIENT_NAME,
+        "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
-
-# ------------------------------------------------------------------------------------
-# RENDER ENTRY POINT (Uvicorn configuration)
-# ------------------------------------------------------------------------------------
-
-# Render環境では、Uvicornがこのappインスタンスを自動的に起動します。
