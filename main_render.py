@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v6.7 - レンジ相場からの強制選定版 (main_render.py)
+# Apex BOT v6.8 - 強制サイド決定＆RSIフィルタ解除版 (main_render.py)
 # ====================================================================================
 #
-# 目的: MTF/トレンド構造の厳格な一致がなくても、ML予測スコアに基づきサイドを決定し、
-#       中立市場でも最も優位性のある銘柄を強制的に通知する。
+# 目的: 市場がレンジでもML予測スコアに基づきサイドを強制決定し、全銘柄が除外される
+#       問題を解消する。
 #
 # ====================================================================================
 
@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ====================================================================================
-#           　　　　　　　　　　　　　CONFIG
+#                                    CONFIG
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
@@ -61,10 +61,10 @@ def initialize_ccxt_client():
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v6.7 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v6.8 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**中立市場対応の強制通知モード**で稼働中です。"
+        f"**レンジ市場強制通知モード (v6.8)**で稼働中です。"
     )
     
     try:
@@ -95,7 +95,7 @@ async def fetch_top_symbols_async(limit: int = 30) -> Tuple[List[str], str]:
     """
     動的選定がブロックされるため、VIXマクロに基づいて静的リストの優先順位をシャッフルする。
     """
-    coingecko_url = "https://api.coingecko.com/api/v3/coins/markets" # ダミーURL
+    coingecko_url = "https://api.coingecko.com/api/v3/coins/markets"
     
     try:
         vix = yf.Ticker("^VIX").history(period="1d", interval="5m")
@@ -183,7 +183,6 @@ async def determine_market_regime(symbol: str) -> str:
     return "レンジ相場"
 
 async def multi_timeframe_confirmation(symbol: str) -> Dict:
-    """MTF分析を厳格化：KAMA、RSI、EMAの3つで整合性をチェック"""
     timeframes = ['1h', '4h']
     results = {"kama": [], "rsi": [], "ema": [], "trend": "不明"}
     
@@ -273,15 +272,19 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     criteria_list = {"MATCHED": [], "MISSED": []}
     side = None
     
-    # 1. サイド決定ロジックの柔軟化: MTFが不一致でも、ML予測スコアが高ければ方向を決定
-    is_trend_aligned = (trend_direction != "不一致" and trend_direction != "データ不足")
-    
-    if trend_direction == "上昇" or (not is_trend_aligned and win_prob > 0.65):
+    # 1. サイド決定ロジックの柔軟化 (v6.8の核)
+    # MTFが不一致でも、MLスコアが0.05以上 (55%) であれば、その方向を暫定サイドとして採用
+    if win_prob >= 0.55:
         side = "ロング"
-    elif trend_direction == "下降" or (not is_trend_aligned and win_prob < 0.35):
+    elif win_prob <= 0.45:
         side = "ショート"
+    else:
+        # ML予測が極端に中立な場合は、サイドを決定しない (スコアが低すぎるため)
+        return None
     
     # 評価のためのロギング
+    is_trend_aligned = (trend_direction != "不一致" and trend_direction != "データ不足")
+    
     if is_trend_aligned:
         criteria_list["MATCHED"].append(f"MTF分析が一致 ({trend_direction})")
     else:
@@ -292,17 +295,13 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     else:
          criteria_list["MISSED"].append(f"長期レジームはレンジ ({regime})")
 
-    # 2. RSIによる過熱感フィルタ
-    if side == "ロング":
-        if rsi_15m < 70:
-            criteria_list["MATCHED"].append(f"RSIは過熱なし ({rsi_15m:.1f})")
-        else:
-            criteria_list["MISSED"].append(f"RSIが過熱域 ({rsi_15m:.1f})")
-    elif side == "ショート":
-        if rsi_15m > 30:
-            criteria_list["MATCHED"].append(f"RSIは売られすぎではない ({rsi_15m:.1f})")
-        else:
-            criteria_list["MISSED"].append(f"RSIが売られすぎ ({rsi_15m:.1f})")
+    # 2. RSIによる過熱感フィルタ (警告に格下げ)
+    if side == "ロング" and rsi_15m >= 70:
+        criteria_list["MISSED"].append(f"RSIが過熱域 ({rsi_15m:.1f}) (注意)")
+    elif side == "ショート" and rsi_15m <= 30:
+        criteria_list["MISSED"].append(f"RSIが売られすぎ ({rsi_15m:.1f}) (注意)")
+    else:
+        criteria_list["MATCHED"].append(f"RSIはエントリー可能域 ({rsi_15m:.1f})")
         
     # 3. マクロ経済との整合性
     if side is not None:
@@ -314,8 +313,6 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
             
     criteria_list["MATCHED"].append("OIデータはニュートラルとして処理されました")
     
-    if side is None: return None
-
     # 4. ポジションとSL/TPの決定
     final_confidence = win_prob if side == "ロング" else (1 - win_prob)
     score = abs(win_prob - 0.5) 
@@ -325,12 +322,11 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     df_15m['tr'] = np.maximum(df_15m['h'] - df_15m['l'], np.maximum(abs(df_15m['h'] - df_15m['c'].shift()), abs(df_15m['l'] - df_15m['c'].shift())))
     atr_15m = df_15m['tr'].rolling(14).mean().iloc[-1]
     
-    # SL高度化
     sl_offset = atr_15m * 2.0 
     sl = optimal_entry - sl_offset if side == "ロング" else optimal_entry + sl_offset
 
-    # TP高度化
     S, R = await find_local_sr(prices_15m, window=30)
+    
     risk_per_unit = abs(optimal_entry - sl)
     default_tp1 = optimal_entry + (risk_per_unit * 1.5) if side == "ロング" else optimal_entry - (risk_per_unit * 1.5)
     default_tp2 = optimal_entry + (risk_per_unit * 3.0) if side == "ロング" else optimal_entry - (risk_per_unit * 3.0)
@@ -410,7 +406,6 @@ def format_telegram_message(signal: Dict) -> str:
 async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS
     
-    # 起動時の初期リスト設定
     CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
     macro_context = get_tradfi_macro_context()
     LAST_UPDATE_TIME = time.time()
@@ -425,7 +420,7 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if is_dynamic_update_needed:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v6.7 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v6.8 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 macro_context = get_tradfi_macro_context() 
                 logging.info(f"マクロ経済コンテクスト: {macro_context}")
@@ -446,6 +441,7 @@ async def main_loop():
             candidates = await asyncio.gather(*candidate_tasks)
             
             # 2. 候補のフィルタリング (方向性が決定したもののみ)
+            # MLスコアが極めて中立なものは generate_signal_candidate でNoneにされているため、ここでフィルタ
             valid_candidates = [c for c in candidates if c is not None and c['side'] is not None]
 
             # 3. 通知が必要な銘柄を特定 (強制通知ロジック)
@@ -455,7 +451,7 @@ async def main_loop():
                 
                 is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
 
-                # --- V6.7 追加ログ: 最優秀候補の状態を記録 ---
+                # --- V6.8 追加ログ: 最優秀候補の状態を記録 ---
                 log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 1時間ロック中"
                 log_msg = f"🔔 最優秀候補: {best_signal['symbol']} - {best_signal['side']} (スコア: {best_signal['score']:.4f}) | 状況: {log_status}"
                 logging.info(log_msg)
@@ -466,8 +462,7 @@ async def main_loop():
                     send_telegram_html(message, is_emergency=True)
                     NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
             else:
-                # MTF/レジームがすべて不一致だった場合、ログに記録
-                logging.info("➡️ シグナル候補なし: 市場全体が極めてレンジか不明瞭です。")
+                logging.info("➡️ シグナル候補なし: ML予測が極めて中立であるため、有効な方向性が決定できませんでした。")
             
             # ログ出力は、5分に一度だけ行う
             if is_dynamic_update_needed:
@@ -518,7 +513,7 @@ def read_root():
     logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
-        "service": "Apex BOT v6.7 (Mid-Market Force)",
+        "service": "Apex BOT v6.8 (Mid-Market Force)",
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
