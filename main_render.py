@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v6.12 - 恐怖指数・市場情報追加版 (main_render.py)
+# Apex BOT v6.13 - 中立通知30分間隔版 (main_render.py)
 # ====================================================================================
 #
-# 目的: VIXとGVIX (簡易) を導入し、市場の恐怖度とボラティリティを分析に反映させる。
-#       市場が中立の場合、中立シグナルを通知するロジックを有効化。
+# 目的: 極めて中立な市場が続く場合、中立シグナル通知の頻度を30分に一度に変更。
 #
 # ====================================================================================
 
@@ -63,10 +62,11 @@ def initialize_ccxt_client():
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v6.12 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v6.13 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**中立シグナル通知モード (v6.12)**で稼働中です。"
+        f"**中立シグナル通知モード (v6.13)**で稼働中です。\n"
+        f"<i>中立シグナルは30分間隔で通知されます。</i>"
     )
     
     try:
@@ -211,7 +211,7 @@ async def determine_market_regime(symbol: str) -> str:
     return "レンジ相場"
 
 async def multi_timeframe_confirmation(symbol: str) -> Dict:
-    """MTF分析を厳格化：KAMA、RSI、EMAの3つで整合性をチェック"""
+    """MTF分析を厳格化：KAMA、RSI、EMA、エリオット勢いの4つで整合性をチェック"""
     timeframes = ['1h', '4h']
     results = {"kama": [], "rsi": [], "ema": [], "trend": "不明", "trend_score": 0}
     
@@ -254,7 +254,6 @@ async def multi_timeframe_confirmation(symbol: str) -> Dict:
     if all_kama_up and all_ema_up and rsi_ok_up:
         results["trend"] = "上昇"
         if is_elliott_impulse_up: elliott_score = 3
-        # トレンドスコア: KAMA(2) + EMA(2) + RSI(2) + Elliott(3) = 最大9点
         results["trend_score"] = sum(1 for t in results["kama"]) + sum(1 for t in results["ema"]) + sum(1 for t in results["rsi"] if t != "中立") + elliott_score
         
     elif all_kama_down and all_ema_down and rsi_ok_down:
@@ -318,13 +317,13 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     criteria_list = {"MATCHED": [], "MISSED": []}
     side = None
     
-    # 1. サイド決定ロジックの柔軟化 (v6.9 修正: 0.55 -> 0.53)
+    # 1. サイド決定ロジックの柔軟化 (信頼度53%未満は中立)
     if win_prob >= 0.53:
         side = "ロング"
     elif win_prob <= 0.47:
         side = "ショート"
     else:
-        # v6.10 修正: ML予測が極端に中立な場合、中立シグナルを返す
+        # ML予測が極端に中立な場合、中立シグナルを返す
         return {"symbol": symbol, "side": "Neutral", "confidence": abs(win_prob - 0.5), 
                 "regime": regime, "criteria_list": {"MATCHED": [f"ML予測信頼度: {max(win_prob, 1-win_prob):.2%} (中立)"], "MISSED": []},
                 "macro_context": macro_context_data}
@@ -499,7 +498,7 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if is_dynamic_update_needed:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v6.12 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v6.13 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 macro_context_data = await asyncio.create_task(get_tradfi_macro_context()) # マクロコンテクストを更新
                 logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f})")
@@ -545,9 +544,10 @@ async def main_loop():
                 # 5. 有効候補がなく、中立候補がある場合 (中立通知)
                 best_neutral = min(neutral_candidates, key=lambda c: c['confidence'])
                 
-                is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 60 * 6 
+                # ユーザーの要望に基づき、中立通知間隔を30分 (60 * 30) に変更
+                is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 30 
 
-                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 6時間ロック中"
+                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
                 log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
                 logging.info(log_msg)
 
@@ -614,7 +614,7 @@ def read_root():
     logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
-        "service": "Apex BOT v6.12 (Fear Index)",
+        "service": "Apex BOT v6.13 (Neutral 30min)",
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
