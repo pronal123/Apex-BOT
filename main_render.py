@@ -3,6 +3,7 @@
 # ====================================================================================
 #
 # 目的: VIXとGVIX (簡易) を導入し、市場の恐怖度とボラティリティを分析に反映させる。
+#       市場が中立の場合、中立シグナルを通知するロジックを有効化。
 #
 # ====================================================================================
 
@@ -52,7 +53,7 @@ CCXT_CLIENT = None
 LAST_UPDATE_TIME = 0.0 
 CURRENT_MONITOR_SYMBOLS = []
 NOTIFIED_SYMBOLS = {}
-NEUTRAL_NOTIFIED_TIME = 0
+NEUTRAL_NOTIFIED_TIME = 0 # 中立通知の最終時間トラッカー
 
 def initialize_ccxt_client():
     """CCXTクライアントを初期化する"""
@@ -65,7 +66,7 @@ async def send_test_message():
         f"🤖 <b>Apex BOT v6.12 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**恐怖指数分析モード (v6.12)**で稼働中です。"
+        f"**中立シグナル通知モード (v6.12)**で稼働中です。"
     )
     
     try:
@@ -134,15 +135,12 @@ async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
 async def calculate_gvix_proxy() -> float:
     """BTCの価格変動率の標準偏差をGVIXの代理として計算する"""
     try:
-        # 1時間足の過去24期間のデータを取得
         ohlcv_1h = await fetch_ohlcv_async('BTC', '1h', 24)
         if len(ohlcv_1h) < 24: return 0.0
         
         prices = pd.Series([c[4] for c in ohlcv_1h])
-        # 24期間の対数リターンの標準偏差（ボラティリティ）を計算
         log_returns = np.log(prices / prices.shift(1))
-        # 年率換算 (24期間 * 365日 = 約8760時間) は行わず、簡易的なボラティリティを返す
-        return log_returns.std() * 100 # %単位で返す
+        return log_returns.std() * 100 
     except Exception:
         return 0.0
 
@@ -328,7 +326,8 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     else:
         # v6.10 修正: ML予測が極端に中立な場合、中立シグナルを返す
         return {"symbol": symbol, "side": "Neutral", "confidence": abs(win_prob - 0.5), 
-                "regime": regime, "criteria_list": {"MATCHED": [f"ML予測信頼度: {max(win_prob, 1-win_prob):.2%} (中立)"], "MISSED": []}}
+                "regime": regime, "criteria_list": {"MATCHED": [f"ML予測信頼度: {max(win_prob, 1-win_prob):.2%} (中立)"], "MISSED": []},
+                "macro_context": macro_context_data}
 
     
     # 評価のためのロギング
@@ -406,15 +405,14 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     return {"symbol": symbol, "side": side, "price": current_price, "sl": sl, "tp1": tp1, "tp2": tp2,
             "criteria_list": criteria_list, "confidence": final_confidence, "score": score,
             "regime": regime, "ohlcv_15m": ohlcv_15m, "optimal_entry": optimal_entry, "atr_15m": atr_15m,
-            "vix_level": vix_level} # VIXレベルをリターンに追加
+            "vix_level": vix_level, "macro_context": macro_context_data}
 
 def format_telegram_message(signal: Dict) -> str:
     
-    # 恐怖指数レベルを取得
-    vix_level = signal.get('vix_level', 0)
-    vix_status = f"VIX:{vix_level:.1f}" if vix_level > 0 else ""
-    
     if signal['side'] == "Neutral":
+        vix_level = signal['macro_context']['vix_level']
+        vix_status = f"VIX:{vix_level:.1f}" if vix_level > 0 else ""
+        
         return (
             f"⚠️ <b>市場分析速報: {signal['regime']} (中立)</b> ⏸️\n"
             f"<i>市場コンテクスト: {signal['macro_context']['trend']} {vix_status}</i>\n"
@@ -426,6 +424,9 @@ def format_telegram_message(signal: Dict) -> str:
     # --- ロング/ショートシグナル用のメッセージ ---
     side_icon = "📈" if signal['side'] == "ロング" else "📉"
     
+    vix_level = signal.get('vix_level', 0)
+    vix_status = f"VIX:{vix_level:.1f}" if vix_level > 0 else ""
+
     if signal['score'] >= 0.15:
         msg = f"💎 <b>Apex BOT シグナル速報: {signal['symbol']}</b> {side_icon}\n"
         msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ) {vix_status}</i>\n"
@@ -483,7 +484,7 @@ async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
     
     # マクロコンテクストの初期取得 (最初の通知と分析に使用)
-    macro_context_data = get_tradfi_macro_context()
+    macro_context_data = await asyncio.create_task(get_tradfi_macro_context())
     
     CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
     LAST_UPDATE_TIME = time.time()
@@ -500,7 +501,7 @@ async def main_loop():
                 logging.info("==================================================")
                 logging.info(f"Apex BOT v6.12 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                macro_context_data = get_tradfi_macro_context() # マクロコンテクストを更新
+                macro_context_data = await asyncio.create_task(get_tradfi_macro_context()) # マクロコンテクストを更新
                 logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f})")
                 
                 symbols_to_monitor, source_exchange = await fetch_top_symbols_async(30)
@@ -530,11 +531,11 @@ async def main_loop():
                 
                 is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
 
-                # --- V6.12 ログと通知の実行 ---
                 log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 1時間ロック中"
                 log_msg = f"🔔 最優秀候補: {best_signal['symbol']} - {best_signal['side']} (スコア: {best_signal['score']:.4f}) | 状況: {log_status}"
                 logging.info(log_msg)
                 
+                # 4. 通知の実行
                 if is_not_recently_notified:
                     message = format_telegram_message(best_signal)
                     send_telegram_html(message, is_emergency=True)
