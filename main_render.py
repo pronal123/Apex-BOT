@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.13 - 最終感度調整コード (中立通知ロジック修正済み)
+# Apex BOT v6.14 - 最終感度調整コード (中立通知を30分間隔で強制実行)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -58,10 +58,10 @@ def initialize_ccxt_client():
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v6.13 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v6.14 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**中立シグナル通知モード (v6.13)**で稼働中です。\n"
+        f"**中立シグナル強制通知モード (v6.14)**で稼働中です。\n"
         f"<i>中立シグナルは30分間隔で通知されます。</i>"
     )
     
@@ -492,7 +492,7 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if is_dynamic_update_needed:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v6.13 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v6.14 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 # マクロコンテクストを更新 (同期関数なのでrun_in_executorでラップ)
                 macro_context_data = await loop.run_in_executor(
@@ -540,32 +540,29 @@ async def main_loop():
             elif neutral_candidates:
                 # 5. 有効候補がなく、中立候補がある場合 (中立通知)
                 
-                # 🚨 修正: minからmaxに変更。中立候補の中で0.5から最も離れているものを選ぶ
+                # 0.5から最も離れている中立候補を選ぶ (信頼度が高いもの)
                 best_neutral = max(neutral_candidates, key=lambda c: c['confidence'])
                 
                 # 中立通知間隔 (30分)
                 is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 30 
                 
-                # 信頼度 (0.5からの乖離) が 0.01 (1%) 未満の場合は無視
-                if best_neutral['confidence'] < 0.01:
-                    logging.info("➡️ 最優秀中立候補の信頼度が低すぎるため、通知をスキップしました。")
-                    
-                else:
-                    log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
-                    log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
-                    logging.info(log_msg)
+                # 🚨 修正: 信頼度が極端に低くても、30分経過していれば強制的に通知する
+                
+                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
+                log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
+                logging.info(log_msg)
 
-                    if is_not_recently_notified:
-                        # 中立シグナルのメッセージを生成
-                        neutral_msg = format_telegram_message({
-                            "side": "Neutral",
-                            "symbol": best_neutral['symbol'],
-                            "regime": best_neutral['regime'],
-                            "confidence": best_neutral['confidence'],
-                            "macro_context": macro_context_data,
-                        })
-                        await loop.run_in_executor(None, lambda: send_telegram_html(neutral_msg, is_emergency=False)) 
-                        NEUTRAL_NOTIFIED_TIME = current_time
+                if is_not_recently_notified:
+                    # 中立シグナルのメッセージを生成
+                    neutral_msg = format_telegram_message({
+                        "side": "Neutral",
+                        "symbol": best_neutral['symbol'],
+                        "regime": best_neutral['regime'],
+                        "confidence": best_neutral['confidence'],
+                        "macro_context": macro_context_data,
+                    })
+                    await loop.run_in_executor(None, lambda: send_telegram_html(neutral_msg, is_emergency=False)) 
+                    NEUTRAL_NOTIFIED_TIME = current_time
             else:
                 logging.info("➡️ シグナル候補なし: データ取得エラーまたは市場が極めて動いていません。")
             
@@ -618,7 +615,7 @@ def read_root():
     logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
-        "service": "Apex BOT v6.13 (Neutral 30min)",
+        "service": "Apex BOT v6.14 (Forced Neutral 30min)",
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
