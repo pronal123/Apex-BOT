@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.13 - 最終稼働コード (中立通知30分間隔)
+# Apex BOT v6.13 - 最終感度調整コード (中立通知ロジック修正済み)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -67,7 +67,6 @@ async def send_test_message():
     
     try:
         loop = asyncio.get_event_loop()
-        # send_telegram_html は同期関数なのでラッパーを使用
         await loop.run_in_executor(None, lambda: send_telegram_html(test_text, is_emergency=True))
         logging.info("✅ Telegram 起動テスト通知を正常に送信しました。")
     except Exception as e:
@@ -265,6 +264,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
         rs = gain / loss.replace(0, 1e-9)
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         
+        # 簡易MLモデル: RSIに基づく確率
         prob = 0.5 + ((rsi - 50) / 100) * 0.8 
         return np.clip(prob, 0, 1)
     except Exception:
@@ -306,14 +306,15 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     criteria_list = {"MATCHED": [], "MISSED": []}
     side = None
     
-    # 1. サイド決定ロジックの柔軟化 (信頼度53%未満は中立)
+    # 1. サイド決定ロジック (信頼度53%未満は中立)
     if win_prob >= 0.53:
         side = "ロング"
     elif win_prob <= 0.47:
         side = "ショート"
     else:
         # ML予測が極端に中立な場合、中立シグナルを返す
-        return {"symbol": symbol, "side": "Neutral", "confidence": abs(win_prob - 0.5), 
+        confidence = abs(win_prob - 0.5)
+        return {"symbol": symbol, "side": "Neutral", "confidence": confidence, 
                 "regime": regime, "criteria_list": {"MATCHED": [f"ML予測信頼度: {max(win_prob, 1-win_prob):.2%} (中立)"], "MISSED": []},
                 "macro_context": macro_context_data}
 
@@ -331,7 +332,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     else:
          criteria_list["MISSED"].append(f"長期レジームはレンジ ({regime})")
 
-    # 2. RSIによる過熱感フィルタ (警告に格下げ)
+    # 2. RSIによる過熱感フィルタ
     if side == "ロング" and rsi_15m >= 70:
         criteria_list["MISSED"].append(f"RSIが過熱域 ({rsi_15m:.1f}) (注意)")
     elif side == "ショート" and rsi_15m <= 30:
@@ -405,7 +406,7 @@ def format_telegram_message(signal: Dict) -> str:
             f"⚠️ <b>市場分析速報: {signal['regime']} (中立)</b> ⏸️\n"
             f"<i>市場コンテクスト: {signal['macro_context']['trend']} {vix_status}</i>\n"
             f"<b>【BOTの判断】: 現在は待機が最適</b>\n"
-            f"• 監視銘柄の全てでML予測が極めて中立的です。\n"
+            f"• 監視銘柄の中で、最も優位性のある銘柄 ({signal['symbol']}) のML予測も極めて中立的です。\n"
             f"• 優位性がある方向性が決定できません。積極的な待機を推奨します。"
         )
 
@@ -471,7 +472,6 @@ def format_telegram_message(signal: Dict) -> str:
 async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
     
-    # 同期関数の実行に必要なイベントループを取得
     loop = asyncio.get_event_loop()
     
     # 1. マクロコンテクストの初期取得 (同期関数なのでrun_in_executorでラップ)
@@ -534,33 +534,38 @@ async def main_loop():
                 # 4. 通知の実行
                 if is_not_recently_notified:
                     message = format_telegram_message(best_signal)
-                    # send_telegram_html は同期関数なのでラッパーを使用
                     await loop.run_in_executor(None, lambda: send_telegram_html(message, is_emergency=True))
                     NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
                     
             elif neutral_candidates:
                 # 5. 有効候補がなく、中立候補がある場合 (中立通知)
-                best_neutral = min(neutral_candidates, key=lambda c: c['confidence'])
                 
-                # 修正済みの中立通知間隔 (30分)
+                # 🚨 修正: minからmaxに変更。中立候補の中で0.5から最も離れているものを選ぶ
+                best_neutral = max(neutral_candidates, key=lambda c: c['confidence'])
+                
+                # 中立通知間隔 (30分)
                 is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 30 
+                
+                # 信頼度 (0.5からの乖離) が 0.01 (1%) 未満の場合は無視
+                if best_neutral['confidence'] < 0.01:
+                    logging.info("➡️ 最優秀中立候補の信頼度が低すぎるため、通知をスキップしました。")
+                    
+                else:
+                    log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
+                    log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
+                    logging.info(log_msg)
 
-                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
-                log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
-                logging.info(log_msg)
-
-                if is_not_recently_notified:
-                    # 中立シグナルのメッセージを生成
-                    neutral_msg = format_telegram_message({
-                        "side": "Neutral",
-                        "symbol": best_neutral['symbol'],
-                        "regime": best_neutral['regime'],
-                        "confidence": best_neutral['confidence'],
-                        "macro_context": macro_context_data,
-                    })
-                    # send_telegram_html は同期関数なのでラッパーを使用
-                    await loop.run_in_executor(None, lambda: send_telegram_html(neutral_msg, is_emergency=False)) 
-                    NEUTRAL_NOTIFIED_TIME = current_time
+                    if is_not_recently_notified:
+                        # 中立シグナルのメッセージを生成
+                        neutral_msg = format_telegram_message({
+                            "side": "Neutral",
+                            "symbol": best_neutral['symbol'],
+                            "regime": best_neutral['regime'],
+                            "confidence": best_neutral['confidence'],
+                            "macro_context": macro_context_data,
+                        })
+                        await loop.run_in_executor(None, lambda: send_telegram_html(neutral_msg, is_emergency=False)) 
+                        NEUTRAL_NOTIFIED_TIME = current_time
             else:
                 logging.info("➡️ シグナル候補なし: データ取得エラーまたは市場が極めて動いていません。")
             
