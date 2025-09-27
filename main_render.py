@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v6.8 - 強制サイド決定＆RSIフィルタ解除版 (main_render.py)
+# Apex BOT v6.12 - 恐怖指数・市場情報追加版 (main_render.py)
 # ====================================================================================
 #
-# 目的: 市場がレンジでもML予測スコアに基づきサイドを強制決定し、全銘柄が除外される
-#       問題を解消する。
+# 目的: VIXとGVIX (簡易) を導入し、市場の恐怖度とボラティリティを分析に反映させる。
 #
 # ====================================================================================
 
@@ -53,18 +52,20 @@ CCXT_CLIENT = None
 LAST_UPDATE_TIME = 0.0 
 CURRENT_MONITOR_SYMBOLS = []
 NOTIFIED_SYMBOLS = {}
+NEUTRAL_NOTIFIED_TIME = 0
 
 def initialize_ccxt_client():
+    """CCXTクライアントを初期化する"""
     global CCXT_CLIENT
     CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v6.8 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v6.12 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**レンジ市場強制通知モード (v6.8)**で稼働中です。"
+        f"**恐怖指数分析モード (v6.12)**で稼働中です。"
     )
     
     try:
@@ -93,14 +94,12 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 async def fetch_top_symbols_async(limit: int = 30) -> Tuple[List[str], str]:
     """
-    動的選定がブロックされるため、VIXマクロに基づいて静的リストの優先順位をシャッフルする。
+    VIXマクロに基づいて静的リストの優先順位をシャッフルする。
     """
-    coingecko_url = "https://api.coingecko.com/api/v3/coins/markets"
-    
     try:
         vix = yf.Ticker("^VIX").history(period="1d", interval="5m")
         if vix.empty or len(vix) < 10: raise Exception("VIXデータ不足")
-        vix_change = vix['Close'].iloc[-1] / vix['Close'].iloc[-5] - 1
+        vix_change = vix['Close'].iloc[-1] / vix['Close'][-10:].mean() - 1 # 過去平均との比較
         
         final_list = DEFAULT_SYMBOLS[:limit]
         
@@ -132,20 +131,51 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
 async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
     return {"oi_change_24h": 0} 
 
-def get_tradfi_macro_context() -> str:
+async def calculate_gvix_proxy() -> float:
+    """BTCの価格変動率の標準偏差をGVIXの代理として計算する"""
     try:
-        es = yf.Ticker("ES=F").history(period="5d", interval="1h")
-        if es.empty: return "不明"
-        prices = es['Close']
-        kama_fast = calculate_kama(prices, period=10)
-        kama_slow = calculate_kama(prices, period=21)
-        if kama_fast.iloc[-1] > kama_slow.iloc[-1] and prices.iloc[-1] > kama_fast.iloc[-1]:
-            return "リスクオン (株高)"
-        if kama_fast.iloc[-1] < kama_slow.iloc[-1] and prices.iloc[-1] < kama_fast.iloc[-1]:
-            return "リスクオフ (株安)"
-        return "中立"
+        # 1時間足の過去24期間のデータを取得
+        ohlcv_1h = await fetch_ohlcv_async('BTC', '1h', 24)
+        if len(ohlcv_1h) < 24: return 0.0
+        
+        prices = pd.Series([c[4] for c in ohlcv_1h])
+        # 24期間の対数リターンの標準偏差（ボラティリティ）を計算
+        log_returns = np.log(prices / prices.shift(1))
+        # 年率換算 (24期間 * 365日 = 約8760時間) は行わず、簡易的なボラティリティを返す
+        return log_returns.std() * 100 # %単位で返す
     except Exception:
-        return "不明"
+        return 0.0
+
+def get_tradfi_macro_context() -> Dict:
+    """マクロ経済コンテクストを拡張し、恐怖指数を含める"""
+    
+    context = {"trend": "不明", "vix_level": 0.0, "gvix_level": 0.0}
+    
+    try:
+        # 1. S&P 500トレンド
+        es = yf.Ticker("ES=F").history(period="5d", interval="1h")
+        if not es.empty:
+            prices = es['Close']
+            kama_fast = calculate_kama(prices, period=10)
+            kama_slow = calculate_kama(prices, period=21)
+            
+            if kama_fast.iloc[-1] > kama_slow.iloc[-1] and prices.iloc[-1] > kama_fast.iloc[-1]:
+                context["trend"] = "リスクオン (株高)"
+            elif kama_fast.iloc[-1] < kama_slow.iloc[-1] and prices.iloc[-1] < kama_fast.iloc[-1]:
+                context["trend"] = "リスクオフ (株安)"
+            else:
+                context["trend"] = "中立"
+        
+        # 2. VIXレベル
+        vix = yf.Ticker("^VIX").history(period="1d", interval="1h")
+        if not vix.empty:
+            context["vix_level"] = vix['Close'].iloc[-1]
+            
+    except Exception:
+        pass
+        
+    return context
+
 
 def calculate_kama(prices: pd.Series, period: int = 10, fast_ema: int = 2, slow_ema: int = 30) -> pd.Series:
     change = prices.diff(period).abs()
@@ -183,12 +213,13 @@ async def determine_market_regime(symbol: str) -> str:
     return "レンジ相場"
 
 async def multi_timeframe_confirmation(symbol: str) -> Dict:
+    """MTF分析を厳格化：KAMA、RSI、EMAの3つで整合性をチェック"""
     timeframes = ['1h', '4h']
-    results = {"kama": [], "rsi": [], "ema": [], "trend": "不明"}
+    results = {"kama": [], "rsi": [], "ema": [], "trend": "不明", "trend_score": 0}
     
     for tf in timeframes:
         ohlcv = await fetch_ohlcv_async(symbol, tf, 60)
-        if len(ohlcv) < 60: return {"kama": [], "rsi": [], "ema": [], "trend": "データ不足"}
+        if len(ohlcv) < 60: return {"kama": [], "rsi": [], "ema": [], "trend": "データ不足", "trend_score": 0}
 
         prices = pd.Series([c[4] for c in ohlcv])
         current_price = prices.iloc[-1]
@@ -205,6 +236,15 @@ async def multi_timeframe_confirmation(symbol: str) -> Dict:
         ema_trend = "上昇" if current_price > ema_short else "下降"
         results["ema"].append(ema_trend)
 
+    # エリオット波動 (簡易) 判定 (連続的な終値の更新)
+    ohlcv_1h = await fetch_ohlcv_async(symbol, '1h', 5)
+    prices_1h = pd.Series([c[4] for c in ohlcv_1h])
+    
+    is_elliott_impulse_up = len(prices_1h) == 5 and all(prices_1h.iloc[i] > prices_1h.iloc[i-1] for i in range(1, 5))
+    is_elliott_impulse_down = len(prices_1h) == 5 and all(prices_1h.iloc[i] < prices_1h.iloc[i-1] for i in range(1, 5))
+    
+    elliott_score = 0
+    
     all_kama_up = all(t == "上昇" for t in results["kama"])
     all_kama_down = all(t == "下降" for t in results["kama"])
     all_ema_up = all(t == "上昇" for t in results["ema"])
@@ -215,10 +255,18 @@ async def multi_timeframe_confirmation(symbol: str) -> Dict:
     
     if all_kama_up and all_ema_up and rsi_ok_up:
         results["trend"] = "上昇"
+        if is_elliott_impulse_up: elliott_score = 3
+        # トレンドスコア: KAMA(2) + EMA(2) + RSI(2) + Elliott(3) = 最大9点
+        results["trend_score"] = sum(1 for t in results["kama"]) + sum(1 for t in results["ema"]) + sum(1 for t in results["rsi"] if t != "中立") + elliott_score
+        
     elif all_kama_down and all_ema_down and rsi_ok_down:
         results["trend"] = "下降"
+        if is_elliott_impulse_down: elliott_score = 3
+        results["trend_score"] = sum(1 for t in results["kama"]) + sum(1 for t in results["ema"]) + sum(1 for t in results["rsi"] if t != "中立") + elliott_score
+        
     else:
         results["trend"] = "不一致"
+        results["trend_score"] = 0
         
     return results
 
@@ -254,7 +302,7 @@ async def find_local_sr(prices: pd.Series, window: int = 20) -> Tuple[Optional[f
         
     return S, R
 
-async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional[Dict]:
+async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Optional[Dict]:
     
     regime = await determine_market_regime(symbol)
     if regime == "不明": return None
@@ -272,23 +320,24 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     criteria_list = {"MATCHED": [], "MISSED": []}
     side = None
     
-    # 1. サイド決定ロジックの柔軟化 (v6.8の核)
-    # MTFが不一致でも、MLスコアが0.05以上 (55%) であれば、その方向を暫定サイドとして採用
-    if win_prob >= 0.55:
+    # 1. サイド決定ロジックの柔軟化 (v6.9 修正: 0.55 -> 0.53)
+    if win_prob >= 0.53:
         side = "ロング"
-    elif win_prob <= 0.45:
+    elif win_prob <= 0.47:
         side = "ショート"
     else:
-        # ML予測が極端に中立な場合は、サイドを決定しない (スコアが低すぎるため)
-        return None
+        # v6.10 修正: ML予測が極端に中立な場合、中立シグナルを返す
+        return {"symbol": symbol, "side": "Neutral", "confidence": abs(win_prob - 0.5), 
+                "regime": regime, "criteria_list": {"MATCHED": [f"ML予測信頼度: {max(win_prob, 1-win_prob):.2%} (中立)"], "MISSED": []}}
+
     
     # 評価のためのロギング
     is_trend_aligned = (trend_direction != "不一致" and trend_direction != "データ不足")
     
     if is_trend_aligned:
-        criteria_list["MATCHED"].append(f"MTF分析が一致 ({trend_direction})")
+        criteria_list["MATCHED"].append(f"MTF分析が一致 ({trend_direction}) (スコア: {mtf_results['trend_score']}/9)")
     else:
-        criteria_list["MISSED"].append(f"MTF分析が不一致 ({trend_direction})")
+        criteria_list["MISSED"].append(f"MTF分析が不一致 ({trend_direction}) (スコア: {mtf_results['trend_score']}/9)")
         
     if regime != "レンジ相場":
          criteria_list["MATCHED"].append(f"長期レジームはトレンド ({regime})")
@@ -303,13 +352,24 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     else:
         criteria_list["MATCHED"].append(f"RSIはエントリー可能域 ({rsi_15m:.1f})")
         
-    # 3. マクロ経済との整合性
-    if side is not None:
-        if (side == "ロング" and macro_context == "リスクオフ (株安)") or \
-           (side == "ショート" and macro_context == "リスクオン (株高)"):
-            criteria_list["MISSED"].append(f"マクロ経済が逆行 ({macro_context})")
+    # 3. マクロ経済との整合性 + 恐怖指数チェック (v6.12の主要な変更点)
+    
+    macro_trend = macro_context_data['trend']
+    vix_level = macro_context_data['vix_level']
+    
+    if side == "ロング":
+        if macro_trend == "リスクオフ (株安)":
+            criteria_list["MISSED"].append(f"マクロ経済が逆行 ({macro_trend})")
+        elif vix_level > 25.0: # VIXが25以上は市場パニックと見なす
+            criteria_list["MISSED"].append(f"VIX警戒レベル ({vix_level:.1f})。リスク大。")
         else:
-            criteria_list["MATCHED"].append(f"マクロ経済と整合 ({macro_context})")
+            criteria_list["MATCHED"].append(f"マクロ経済と整合 ({macro_trend}, VIX:{vix_level:.1f})")
+            
+    elif side == "ショート":
+        if macro_trend == "リスクオン (株高)":
+            criteria_list["MISSED"].append(f"マクロ経済が逆行 ({macro_trend})")
+        else:
+            criteria_list["MATCHED"].append(f"マクロ経済と整合 ({macro_trend}, VIX:{vix_level:.1f})")
             
     criteria_list["MATCHED"].append("OIデータはニュートラルとして処理されました")
     
@@ -333,10 +393,10 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     
     if side == "ロング" and R is not None and R > default_tp1:
         tp1 = R
-        criteria_list["MATCHED"].append(f"TP1をレジスタンス({R:.4f})に設定")
+        criteria_list["MATCHED"].append(f"TP1をレジスタンス({R:,.4f})に設定")
     elif side == "ショート" and S is not None and S < default_tp1:
         tp1 = S
-        criteria_list["MATCHED"].append(f"TP1をサポート({S:.4f})に設定")
+        criteria_list["MATCHED"].append(f"TP1をサポート({S:,.4f})に設定")
     else:
         tp1 = default_tp1
         criteria_list["MATCHED"].append("TP1をリスクリワード1.5倍に設定")
@@ -345,14 +405,30 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     
     return {"symbol": symbol, "side": side, "price": current_price, "sl": sl, "tp1": tp1, "tp2": tp2,
             "criteria_list": criteria_list, "confidence": final_confidence, "score": score,
-            "regime": regime, "ohlcv_15m": ohlcv_15m, "optimal_entry": optimal_entry, "atr_15m": atr_15m}
+            "regime": regime, "ohlcv_15m": ohlcv_15m, "optimal_entry": optimal_entry, "atr_15m": atr_15m,
+            "vix_level": vix_level} # VIXレベルをリターンに追加
 
 def format_telegram_message(signal: Dict) -> str:
+    
+    # 恐怖指数レベルを取得
+    vix_level = signal.get('vix_level', 0)
+    vix_status = f"VIX:{vix_level:.1f}" if vix_level > 0 else ""
+    
+    if signal['side'] == "Neutral":
+        return (
+            f"⚠️ <b>市場分析速報: {signal['regime']} (中立)</b> ⏸️\n"
+            f"<i>市場コンテクスト: {signal['macro_context']['trend']} {vix_status}</i>\n"
+            f"<b>【BOTの判断】: 現在は待機が最適</b>\n"
+            f"• 監視銘柄の全てでML予測が極めて中立的です。\n"
+            f"• 優位性がある方向性が決定できません。積極的な待機を推奨します。"
+        )
+
+    # --- ロング/ショートシグナル用のメッセージ ---
     side_icon = "📈" if signal['side'] == "ロング" else "📉"
     
     if signal['score'] >= 0.15:
         msg = f"💎 <b>Apex BOT シグナル速報: {signal['symbol']}</b> {side_icon}\n"
-        msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ)</i>\n"
+        msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ) {vix_status}</i>\n"
         msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%}</i>\n\n"
     else:
         msg = f"🔔 <b>Apex BOT 注目銘柄: {signal['symbol']}</b> {side_icon} (暫定)\n"
@@ -404,10 +480,12 @@ def format_telegram_message(signal: Dict) -> str:
     return msg
 
 async def main_loop():
-    global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS
+    global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
+    
+    # マクロコンテクストの初期取得 (最初の通知と分析に使用)
+    macro_context_data = get_tradfi_macro_context()
     
     CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
-    macro_context = get_tradfi_macro_context()
     LAST_UPDATE_TIME = time.time()
     
     await send_test_message()
@@ -420,10 +498,10 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if is_dynamic_update_needed:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v6.8 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v6.12 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                macro_context = get_tradfi_macro_context() 
-                logging.info(f"マクロ経済コンテクスト: {macro_context}")
+                macro_context_data = get_tradfi_macro_context() # マクロコンテクストを更新
+                logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f})")
                 
                 symbols_to_monitor, source_exchange = await fetch_top_symbols_async(30)
                 
@@ -437,32 +515,54 @@ async def main_loop():
             # --- メイン分析実行 (30秒ごと) ---
             
             # 1. 全銘柄のシグナル候補を生成
-            candidate_tasks = [generate_signal_candidate(sym, macro_context) for sym in CURRENT_MONITOR_SYMBOLS]
+            candidate_tasks = [generate_signal_candidate(sym, macro_context_data) for sym in CURRENT_MONITOR_SYMBOLS]
             candidates = await asyncio.gather(*candidate_tasks)
             
-            # 2. 候補のフィルタリング (方向性が決定したもののみ)
-            # MLスコアが極めて中立なものは generate_signal_candidate でNoneにされているため、ここでフィルタ
-            valid_candidates = [c for c in candidates if c is not None and c['side'] is not None]
+            # 2. 候補のフィルタリング
+            valid_candidates = [c for c in candidates if c is not None and c['side'] != "Neutral"]
+            neutral_candidates = [c for c in candidates if c is not None and c['side'] == "Neutral"]
 
-            # 3. 通知が必要な銘柄を特定 (強制通知ロジック)
             best_signal = None
+            
             if valid_candidates:
+                # 3. ロング/ショートの有効候補がある場合
                 best_signal = max(valid_candidates, key=lambda c: c['score'])
                 
                 is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
 
-                # --- V6.8 追加ログ: 最優秀候補の状態を記録 ---
+                # --- V6.12 ログと通知の実行 ---
                 log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 1時間ロック中"
                 log_msg = f"🔔 最優秀候補: {best_signal['symbol']} - {best_signal['side']} (スコア: {best_signal['score']:.4f}) | 状況: {log_status}"
                 logging.info(log_msg)
                 
-                # 4. 通知の実行 (最低スコア制限なし)
                 if is_not_recently_notified:
                     message = format_telegram_message(best_signal)
                     send_telegram_html(message, is_emergency=True)
                     NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
+                    
+            elif neutral_candidates:
+                # 5. 有効候補がなく、中立候補がある場合 (中立通知)
+                best_neutral = min(neutral_candidates, key=lambda c: c['confidence'])
+                
+                is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 60 * 6 
+
+                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 6時間ロック中"
+                log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
+                logging.info(log_msg)
+
+                if is_not_recently_notified:
+                    # 中立シグナルのメッセージを生成
+                    neutral_msg = format_telegram_message({
+                        "side": "Neutral",
+                        "symbol": best_neutral['symbol'],
+                        "regime": best_neutral['regime'],
+                        "confidence": best_neutral['confidence'],
+                        "macro_context": macro_context_data, # 拡張したデータを渡す
+                    })
+                    send_telegram_html(neutral_msg, is_emergency=False) 
+                    NEUTRAL_NOTIFIED_TIME = current_time
             else:
-                logging.info("➡️ シグナル候補なし: ML予測が極めて中立であるため、有効な方向性が決定できませんでした。")
+                logging.info("➡️ シグナル候補なし: データ取得エラーまたは市場が極めて動いていません。")
             
             # ログ出力は、5分に一度だけ行う
             if is_dynamic_update_needed:
@@ -513,7 +613,7 @@ def read_root():
     logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
-        "service": "Apex BOT v6.8 (Mid-Market Force)",
+        "service": "Apex BOT v6.12 (Fear Index)",
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
