@@ -1,133 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.13 - 最終修正版 (メインループ修正)
-# ====================================================================================
-# (UTILITIES & CLIENTS内の関数定義は変更なし)
-# ====================================================================================
-
-# ... (UTILITIES & CLIENTS 内の関数定義は省略)
-
-async def main_loop():
-    global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
-    
-    # --- 修正点 ---
-    # 同期関数を非同期で実行するためのループを取得
-    loop = asyncio.get_event_loop()
-    
-    # 🚨 修正: get_tradfi_macro_context は同期関数なので、run_in_executorでラップする
-    macro_context_data = await loop.run_in_executor(
-        None, get_tradfi_macro_context
-    )
-    # --- 修正終わり ---
-    
-    CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
-    LAST_UPDATE_TIME = time.time()
-    
-    await send_test_message()
-    
-    while True:
-        try:
-            current_time = time.time()
-            is_dynamic_update_needed = (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL
-            
-            # --- 動的更新フェーズ (5分に一度) ---
-            if is_dynamic_update_needed:
-                logging.info("==================================================")
-                logging.info(f"Apex BOT v6.13 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
-                
-                # 🚨 修正: ここでも run_in_executor でラップする
-                macro_context_data = await loop.run_in_executor(
-                    None, get_tradfi_macro_context
-                )
-                logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f})")
-                
-                symbols_to_monitor, source_exchange = await fetch_top_symbols_async(30)
-                
-                CURRENT_MONITOR_SYMBOLS = symbols_to_monitor
-                LAST_UPDATE_TIME = current_time
-                
-                logging.info(f"銘柄選定元: {source_exchange}")
-                logging.info(f"監視対象 (TOP30): {', '.join(CURRENT_MONITOR_SYMBOLS[:5])} ...")
-                logging.info("--------------------------------------------------")
-            
-            # --- メイン分析実行 (30秒ごと) ---
-            
-            # 1. 全銘柄のシグナル候補を生成
-            candidate_tasks = [generate_signal_candidate(sym, macro_context_data) for sym in CURRENT_MONITOR_SYMBOLS]
-            candidates = await asyncio.gather(*candidate_tasks)
-            
-            # 2. 候補のフィルタリング
-            valid_candidates = [c for c in candidates if c is not None and c['side'] != "Neutral"]
-            neutral_candidates = [c for c in candidates if c is not None and c['side'] == "Neutral"]
-
-            best_signal = None
-            
-            if valid_candidates:
-                # 3. ロング/ショートの有効候補がある場合
-                best_signal = max(valid_candidates, key=lambda c: c['score'])
-                
-                is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
-
-                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 1時間ロック中"
-                log_msg = f"🔔 最優秀候補: {best_signal['symbol']} - {best_signal['side']} (スコア: {best_signal['score']:.4f}) | 状況: {log_status}"
-                logging.info(log_msg)
-                
-                # 4. 通知の実行
-                if is_not_recently_notified:
-                    message = format_telegram_message(best_signal)
-                    await loop.run_in_executor(None, lambda: send_telegram_html(message, is_emergency=True)) # 🚨 send_telegram_html も同期なのでラップ
-                    NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
-                    
-            elif neutral_candidates:
-                # 5. 有効候補がなく、中立候補がある場合 (中立通知)
-                best_neutral = min(neutral_candidates, key=lambda c: c['confidence'])
-                
-                is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 30 
-
-                log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
-                log_msg = f"➡️ 最優秀中立候補: {best_neutral['symbol']} (信頼度: {best_neutral['confidence']:.4f}) | 状況: {log_status}"
-                logging.info(log_msg)
-
-                if is_not_recently_notified:
-                    # 中立シグナルのメッセージを生成
-                    neutral_msg = format_telegram_message({
-                        "side": "Neutral",
-                        "symbol": best_neutral['symbol'],
-                        "regime": best_neutral['regime'],
-                        "confidence": best_neutral['confidence'],
-                        "macro_context": macro_context_data,
-                    })
-                    await loop.run_in_executor(None, lambda: send_telegram_html(neutral_msg, is_emergency=False)) # 🚨 send_telegram_html も同期なのでラップ
-                    NEUTRAL_NOTIFIED_TIME = current_time
-            else:
-                logging.info("➡️ シグナル候補なし: データ取得エラーまたは市場が極めて動いていません。")
-            
-            # ログ出力は、5分に一度だけ行う
-            if is_dynamic_update_needed:
-                logging.info("--------------------------------------------------")
-                logging.info(f"分析サイクル完了。{LOOP_INTERVAL}秒待機します。")
-                logging.info("==================================================")
-            
-            # 30秒待機
-            await asyncio.sleep(LOOP_INTERVAL)
-            
-        except asyncio.CancelledError:
-            logging.warning("バックグラウンドタスクがキャンセルされました。")
-            break
-        except Exception as e:
-            logging.error(f"メインループで予期せぬエラーが発生しました: {e}。{LOOP_INTERVAL}秒後に再試行します。")
-            await asyncio.sleep(LOOP_INTERVAL)
-
-# ... (コード全体を提示するために、上記のロジック変更を適用した完全な main_render.py を提供)
-
-# 以下の完全なコードを main_render.py に上書きしてください。
-
-```python
-# ====================================================================================
-# Apex BOT v6.13 - 最終修正版 (メインループ修正)
-# ====================================================================================
-#
-# 目的: get_tradfi_macro_context() の TypeError を修正し、BOTの正常起動と継続稼働を保証する。
-#
+# Apex BOT v6.13 - 最終稼働コード (中立通知30分間隔)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -189,24 +61,27 @@ async def send_test_message():
         f"🤖 <b>Apex BOT v6.13 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**中立シグナル通知モード (v6.13)**で稼働中です。"
+        f"**中立シグナル通知モード (v6.13)**で稼働中です。\n"
+        f"<i>中立シグナルは30分間隔で通知されます。</i>"
     )
     
     try:
         loop = asyncio.get_event_loop()
+        # send_telegram_html は同期関数なのでラッパーを使用
         await loop.run_in_executor(None, lambda: send_telegram_html(test_text, is_emergency=True))
         logging.info("✅ Telegram 起動テスト通知を正常に送信しました。")
     except Exception as e:
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
 
 def send_telegram_html(text: str, is_emergency: bool = False):
+    """同期的なTelegram通知関数"""
     if 'YOUR' in TELEGRAM_TOKEN:
         clean_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "").replace("<pre>", "\n").replace("</pre>", "")
         logging.warning("⚠️ TELEGRAM_TOKENが初期値です。実際の通知は行われず、ログに出力されます。")
         logging.info("--- TELEGRAM通知（ダミー）---\n" + clean_text)
         return
 
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML",
         "disable_web_page_preview": True, "disable_notification": not is_emergency
@@ -259,7 +134,7 @@ async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
     return {"oi_change_24h": 0} 
 
 def get_tradfi_macro_context() -> Dict:
-    """マクロ経済コンテクストを拡張し、恐怖指数を含める"""
+    """マクロ経済コンテクストを拡張し、恐怖指数を含める (同期関数)"""
     
     context = {"trend": "不明", "vix_level": 0.0, "gvix_level": 0.0}
     
@@ -437,7 +312,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     elif win_prob <= 0.47:
         side = "ショート"
     else:
-        # v6.10 修正: ML予測が極端に中立な場合、中立シグナルを返す
+        # ML予測が極端に中立な場合、中立シグナルを返す
         return {"symbol": symbol, "side": "Neutral", "confidence": abs(win_prob - 0.5), 
                 "regime": regime, "criteria_list": {"MATCHED": [f"ML予測信頼度: {max(win_prob, 1-win_prob):.2%} (中立)"], "MISSED": []},
                 "macro_context": macro_context_data}
@@ -596,12 +471,13 @@ def format_telegram_message(signal: Dict) -> str:
 async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
     
-    # --- 修正: 同期関数の呼び出しを asyncio.to_thread でラップ ---
+    # 同期関数の実行に必要なイベントループを取得
     loop = asyncio.get_event_loop()
+    
+    # 1. マクロコンテクストの初期取得 (同期関数なのでrun_in_executorでラップ)
     macro_context_data = await loop.run_in_executor(
         None, get_tradfi_macro_context
     )
-    # --- 修正終わり ---
     
     CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
     LAST_UPDATE_TIME = time.time()
@@ -618,7 +494,7 @@ async def main_loop():
                 logging.info("==================================================")
                 logging.info(f"Apex BOT v6.13 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                # 🚨 修正: ここでも run_in_executor でラップする
+                # マクロコンテクストを更新 (同期関数なのでrun_in_executorでラップ)
                 macro_context_data = await loop.run_in_executor(
                     None, get_tradfi_macro_context
                 )
@@ -658,6 +534,7 @@ async def main_loop():
                 # 4. 通知の実行
                 if is_not_recently_notified:
                     message = format_telegram_message(best_signal)
+                    # send_telegram_html は同期関数なのでラッパーを使用
                     await loop.run_in_executor(None, lambda: send_telegram_html(message, is_emergency=True))
                     NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
                     
@@ -665,6 +542,7 @@ async def main_loop():
                 # 5. 有効候補がなく、中立候補がある場合 (中立通知)
                 best_neutral = min(neutral_candidates, key=lambda c: c['confidence'])
                 
+                # 修正済みの中立通知間隔 (30分)
                 is_not_recently_notified = current_time - NEUTRAL_NOTIFIED_TIME > 60 * 30 
 
                 log_status = "✅ 通知実行" if is_not_recently_notified else "🔒 30分ロック中"
@@ -678,8 +556,9 @@ async def main_loop():
                         "symbol": best_neutral['symbol'],
                         "regime": best_neutral['regime'],
                         "confidence": best_neutral['confidence'],
-                        "macro_context": macro_context_data, # 拡張したデータを渡す
+                        "macro_context": macro_context_data,
                     })
+                    # send_telegram_html は同期関数なのでラッパーを使用
                     await loop.run_in_executor(None, lambda: send_telegram_html(neutral_msg, is_emergency=False)) 
                     NEUTRAL_NOTIFIED_TIME = current_time
             else:
