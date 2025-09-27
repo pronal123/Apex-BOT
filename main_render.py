@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.1 - 最高スコア銘柄の強制通知ロジック実装版 (main_render.py)
+# Apex BOT v6.1 - 最低スコア制限解除版 (main_render.py)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -14,6 +14,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 import asyncio
+import random
+import re 
 from fastapi import FastAPI
 import uvicorn
 from dotenv import load_dotenv
@@ -29,16 +31,17 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "LTC", "ADA", "DOGE", "AVA
 # 環境変数から設定を読み込む
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
+COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', 'YOUR_COINGLASS_API_KEY')
 
 # --- 動作設定 ---
 LOOP_INTERVAL = 30       
-DYNAMIC_UPDATE_INTERVAL = 300 # 銘柄リスト更新間隔を300秒 (5分) に設定
+DYNAMIC_UPDATE_INTERVAL = 300 
 
 # ====================================================================================
 #                               UTILITIES & CLIENTS
 # ====================================================================================
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
 
 CCXT_CLIENT_NAME = 'Binance Futures' 
 CCXT_CLIENT = None 
@@ -47,10 +50,12 @@ CURRENT_MONITOR_SYMBOLS = []
 NOTIFIED_SYMBOLS = {}
 
 def initialize_ccxt_client():
+    """CCXTクライアントを初期化する"""
     global CCXT_CLIENT
     CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
 async def send_test_message():
+    """BOT起動時のセルフテスト通知"""
     test_text = (
         f"🤖 <b>Apex BOT v6.1 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
@@ -88,23 +93,35 @@ async def fetch_top_symbols_async(limit: int = 30) -> Tuple[List[str], str]:
     
     try:
         loop = asyncio.get_event_loop()
-        params = {'vs_currency': 'usd','order': 'market_cap_desc','per_page': limit * 2,'page': 1,'sparkline': 'false'}
+        params = {
+            'vs_currency': 'usd',
+            'order': 'market_cap_desc',
+            'per_page': limit * 2,
+            'page': 1,
+            'sparkline': 'false'
+        }
         res = await loop.run_in_executor(None, lambda: requests.get(coingecko_url, params=params, timeout=10).json())
         
-        if not isinstance(res, list) or not res: raise Exception("CoinGecko APIがリストを返しませんでした。")
+        if not isinstance(res, list) or not res:
+            raise Exception("CoinGecko APIがリストを返しませんでした。")
 
         top_symbols = []
         for item in res:
             symbol = item.get('symbol', '').upper()
+            
             if symbol not in ['USD', 'USDC', 'DAI', 'BUSD'] and len(symbol) <= 5: 
                 top_symbols.append(symbol)
-            if len(top_symbols) >= limit: break
+            
+            if len(top_symbols) >= limit:
+                break
 
-        if len(top_symbols) < limit / 2: raise Exception(f"CoinGeckoから取得できた銘柄数が少なすぎます ({len(top_symbols)}個)。")
+        if len(top_symbols) < limit / 2:
+             raise Exception(f"CoinGeckoから取得できた銘柄数が少なすぎます ({len(top_symbols)}個)。")
 
         return top_symbols, "CoinGecko (Market Cap Top)"
         
-    except Exception:
+    except Exception as e:
+        logging.error(f"❌ CoinGeckoからの動的選定に失敗: {e}。静的リストにフォールバックします。")
         return DEFAULT_SYMBOLS[:limit], "Static List (Fallback)"
 
 
@@ -138,7 +155,6 @@ def get_tradfi_macro_context() -> str:
     except Exception:
         return "不明"
 
-# --- ANALYSIS ENGINE (変更なし) ---
 def calculate_kama(prices: pd.Series, period: int = 10, fast_ema: int = 2, slow_ema: int = 30) -> pd.Series:
     change = prices.diff(period).abs()
     volatility = prices.diff().abs().rolling(window=period).sum().replace(0, 1e-9)
@@ -192,7 +208,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
         return np.clip(prob, 0, 1)
     except Exception:
         return 0.5
-    
+
 async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional[Dict]:
     """
     シグナル生成の厳格なチェックを外し、スコアと条件リストを生成する。
@@ -245,9 +261,7 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
         return None
 
     # 4. スコア計算
-    # final_confidence: 最終的な信頼度 (ロングなら win_prob, ショートなら 1-win_prob)
     final_confidence = win_prob if side == "ロング" else (1 - win_prob)
-    # score: ピックアップのためのスコア (0.5からの絶対乖離: 0.0 ～ 0.5)
     score = abs(win_prob - 0.5) 
     
     price = ohlcv_15m[-1][4]
@@ -260,7 +274,7 @@ async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional
     df_15m['tr'] = np.maximum(df_15m['h'] - df_15m['l'], np.maximum(abs(df_15m['h'] - df_15m['c'].shift()), abs(df_15m['l'] - df_15m['c'].shift())))
     atr_15m = df_15m['tr'].rolling(14).mean().iloc[-1]
     
-    risk_per_unit = atr_15m * 2.5 # SL幅をATRの2.5倍に設定
+    risk_per_unit = atr_15m * 2.5 
     sl = optimal_entry - risk_per_unit if side == "ロング" else optimal_entry + risk_per_unit
     
     return {"symbol": symbol, "side": side, "price": price, "sl": sl,
@@ -277,6 +291,7 @@ def format_telegram_message(signal: Dict) -> str:
         msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ)</i>\n"
         msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%}</i>\n\n"
     else:
+        # スコアが0.15未満の場合は「暫定」として通知
         msg = f"🔔 <b>Apex BOT 注目銘柄: {signal['symbol']}</b> {side_icon} (暫定)\n"
         msg += f"<i>現在の最高スコア銘柄を選定しました。</i>\n"
         msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%} (スコア: {signal['score']:.4f})</i>\n\n"
@@ -327,6 +342,18 @@ def format_telegram_message(signal: Dict) -> str:
     
     return msg
 
+async def analyze_symbol_and_notify(symbol: str, macro_context: str, notified_symbols: Dict):
+    current_time = time.time()
+    if symbol in notified_symbols and current_time - notified_symbols[symbol] < 3600: return
+
+    regime = await determine_market_regime(symbol)
+    if regime == "不明": return
+        
+    signal = await generate_signal_candidate(symbol, macro_context)
+    if signal and signal['score'] >= 0.10: # 以前の strict なチェックを削除
+        message = format_telegram_message(signal)
+        send_telegram_html(message, is_emergency=True)
+        notified_symbols[symbol] = current_time
 
 async def main_loop():
     """BOTの常時監視を実行するバックグラウンドタスク"""
@@ -351,10 +378,12 @@ async def main_loop():
                 logging.info("==================================================")
                 logging.info(f"Apex BOT v6.1 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                macro_context = get_tradfi_macro_context() 
+                macro_context = get_tradfi_macro_context() # マクロコンテクストを更新
                 logging.info(f"マクロ経済コンテクスト: {macro_context}")
                 
+                # 出来高TOP30取得試行 (CoinGeckoを使用)
                 symbols_to_monitor, source_exchange = await fetch_top_symbols_async(30)
+                
                 CURRENT_MONITOR_SYMBOLS = symbols_to_monitor
                 LAST_UPDATE_TIME = current_time
                 
@@ -378,18 +407,17 @@ async def main_loop():
                 best_signal = max(valid_candidates, key=lambda c: c['score'])
                 
                 # 通知フィルタリング:
-                # a) スコアが最低限 0.10 (信頼度 60%) 以上であること
-                # b) 一度通知したら1時間(3600秒)は再通知しないこと
-                is_ready_to_notify = best_signal['score'] >= 0.10
+                # a) 一度通知したら1時間(3600秒)は再通知しないこと
                 is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
 
-                # 4. 通知の実行
-                if is_ready_to_notify and is_not_recently_notified:
+                # 4. 通知の実行 (最低スコア制限なし)
+                if is_not_recently_notified:
                     message = format_telegram_message(best_signal)
+                    # 通知音を鳴らす
                     send_telegram_html(message, is_emergency=True)
                     NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
                     
-                    log_msg = f"🚨 強制通知成功: {best_signal['symbol']} - {best_signal['side']} @ {best_signal['price']:.4f} (スコア: {best_signal['score']:.4f})"
+                    log_msg = f"🔔 強制通知実行: {best_signal['symbol']} - {best_signal['side']} @ {best_signal['price']:.4f} (スコア: {best_signal['score']:.4f})"
                     logging.info(log_msg)
             
             # ログ出力は、5分に一度だけ行う
@@ -438,6 +466,7 @@ async def shutdown_event():
 def read_root():
     """Renderのスリープを防ぐためのヘルスチェックエンドポイント"""
     monitor_info = CURRENT_MONITOR_SYMBOLS[0] if CURRENT_MONITOR_SYMBOLS else "No Symbols"
+    logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
         "service": "Apex BOT v6.1 (Forced Signal)",
