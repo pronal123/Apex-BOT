@@ -1,9 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.0 - CoinGecko APIによる動的選定最終版 (main_render.py)
-# ====================================================================================
-#
-# 目的: CCXTおよびCoinglassがブロックされたため、CoinGeckoの公開APIを銘柄選定に利用する。
-#
+# Apex BOT v6.1 - 最高スコア銘柄の強制通知ロジック実装版 (main_render.py)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -18,8 +14,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 import asyncio
-import random
-import re 
 from fastapi import FastAPI
 import uvicorn
 from dotenv import load_dotenv
@@ -50,20 +44,18 @@ CCXT_CLIENT_NAME = 'Binance Futures'
 CCXT_CLIENT = None 
 LAST_UPDATE_TIME = 0.0 
 CURRENT_MONITOR_SYMBOLS = []
+NOTIFIED_SYMBOLS = {}
 
 def initialize_ccxt_client():
-    """CCXTクライアントを初期化する"""
     global CCXT_CLIENT
-    # OHLCV取得用にBinanceに固定
     CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
 async def send_test_message():
-    """BOT起動時のセルフテスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v6.0 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v6.1 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"分析サイクル (30秒ごと) および Telegram 接続は正常に稼働中です。"
+        f"**最高スコア銘柄の強制通知モード**で稼働中です。"
     )
     
     try:
@@ -91,47 +83,28 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"Telegram送信エラー: {e}")
 
 async def fetch_top_symbols_async(limit: int = 30) -> Tuple[List[str], str]:
-    """
-    CoinGecko APIから市場時価総額TOPの銘柄を取得し、Binanceのシンボルに変換する。
-    """
+    """CoinGecko APIから市場時価総額TOPの銘柄を取得し、Binanceのシンボルに変換する。"""
     coingecko_url = "https://api.coingecko.com/api/v3/coins/markets"
-    logging.info("銘柄選定をCoinGecko (時価総額TOP) から取得試行中...")
     
     try:
         loop = asyncio.get_event_loop()
-        params = {
-            'vs_currency': 'usd',
-            'order': 'market_cap_desc',
-            'per_page': limit * 2, # 多めに取得
-            'page': 1,
-            'sparkline': 'false'
-        }
+        params = {'vs_currency': 'usd','order': 'market_cap_desc','per_page': limit * 2,'page': 1,'sparkline': 'false'}
         res = await loop.run_in_executor(None, lambda: requests.get(coingecko_url, params=params, timeout=10).json())
         
-        if not isinstance(res, list) or not res:
-            raise Exception("CoinGecko APIがリストを返しませんでした。")
+        if not isinstance(res, list) or not res: raise Exception("CoinGecko APIがリストを返しませんでした。")
 
-        # CoinGeckoのシンボルをCCXT/Binanceの形式にマッピング
         top_symbols = []
         for item in res:
-            # シンボルは BTC, ETH, SOL などCCXTで使用可能な形式
             symbol = item.get('symbol', '').upper()
-            
-            # Binanceで取引可能な主要銘柄に絞る (CoinGeckoはマイナーなコインも含むため)
             if symbol not in ['USD', 'USDC', 'DAI', 'BUSD'] and len(symbol) <= 5: 
                 top_symbols.append(symbol)
-            
-            if len(top_symbols) >= limit:
-                break
+            if len(top_symbols) >= limit: break
 
-        if len(top_symbols) < limit / 2:
-             raise Exception(f"CoinGeckoから取得できた銘柄数が少なすぎます ({len(top_symbols)}個)。")
+        if len(top_symbols) < limit / 2: raise Exception(f"CoinGeckoから取得できた銘柄数が少なすぎます ({len(top_symbols)}個)。")
 
-        logging.info(f"✅ CoinGecko から {len(top_symbols)} 銘柄を取得成功。")
         return top_symbols, "CoinGecko (Market Cap Top)"
         
-    except Exception as e:
-        logging.error(f"❌ CoinGeckoからの動的選定に失敗: {e}。静的リストにフォールバックします。")
+    except Exception:
         return DEFAULT_SYMBOLS[:limit], "Static List (Fallback)"
 
 
@@ -219,66 +192,114 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
         return np.clip(prob, 0, 1)
     except Exception:
         return 0.5
-
-async def generate_signal(symbol: str, regime: str, macro_context: str) -> Optional[Dict]:
-    criteria = []
-    is_aligned, trend_direction = await multi_timeframe_confirmation(symbol)
-    if is_aligned: criteria.append(f"多時間軸の方向性が一致 ({trend_direction})")
     
-    side = None
-    if regime == "強気トレンド" and trend_direction == "上昇":
-        side = "ロング"
-        criteria.append("長期レジームが強気トレンド")
-    elif regime == "弱気トレンド" and trend_direction == "下降":
-        side = "ショート"
-        criteria.append("長期レジームが弱気トレンド")
-    
-    if side is None: return None
-        
-    if side == "ロング" and macro_context == "リスクオフ (株安)": return None
-    criteria.append(f"マクロ経済と整合 ({macro_context})")
-    
-    sentiment = await fetch_market_sentiment_data_async(symbol)
-    
-    criteria.append("OIデータはニュートラルとして処理されました")
-        
+async def generate_signal_candidate(symbol: str, macro_context: str) -> Optional[Dict]:
+    """
+    シグナル生成の厳格なチェックを外し、スコアと条件リストを生成する。
+    """
+    # 1. データ取得と事前チェック
+    regime = await determine_market_regime(symbol)
+    if regime == "不明": return None
     ohlcv_15m = await fetch_ohlcv_async(symbol, '15m', 100)
     if len(ohlcv_15m) < 100: return None
-    win_prob = get_ml_prediction(ohlcv_15m, sentiment)
-    criteria.append(f"MLモデル予測上昇確率: {win_prob:.2%}")
-    
-    required_confidence = 0.65
-    
-    if len(criteria) >= 3 and (win_prob > required_confidence if side == "ロング" else win_prob < (1 - required_confidence)):
-        price = ohlcv_15m[-1][4]
-        atr = (pd.Series([h[2] - h[3] for h in ohlcv_15m]).rolling(14).mean().iloc[-1])
-        sl = price - (atr * 2.5) if side == "ロング" else price + (atr * 2.5)
-        
-        final_confidence = win_prob if side == "ロング" else (1 - win_prob)
-        
-        return {"symbol": symbol, "side": side, "price": price, "sl": sl,
-                "criteria": criteria, "confidence": final_confidence, "regime": regime, "ohlcv_15m": ohlcv_15m}
-    return None
+    sentiment = await fetch_market_sentiment_data_async(symbol)
+    win_prob = get_ml_prediction(ohlcv_15m, sentiment) # ロングの確率
 
-def format_telegram_message(signal: Dict) -> str:
-    side_icon = "📈" if signal['side'] == "ロング" else "📉"
-    msg = f"💎 <b>Apex BOT シグナル速報: {signal['symbol']}</b> {side_icon}\n"
-    msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ)</i>\n"
-    msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%}</i>\n\n"
+    # 2. 条件チェックとリスト生成
+    criteria_list = {"MATCHED": [], "MISSED": []}
+    side = None
     
-    msg += "<b>✅ 判断根拠 (Criteria)</b>\n"
-    for c in signal['criteria']: msg += f"• {c}\n"
+    # a. 多時間軸の方向性
+    is_aligned, trend_direction = await multi_timeframe_confirmation(symbol)
+    if is_aligned: 
+        criteria_list["MATCHED"].append(f"多時間軸の方向性が一致 ({trend_direction})")
+    else:
+        criteria_list["MISSED"].append(f"多時間軸の方向性が不一致 ({trend_direction})")
+
+    # b. サイドの決定（トレンドフォロー）
+    is_strong_trend = False
+    if trend_direction == "上昇" and regime == "強気トレンド":
+        side = "ロング"
+        is_strong_trend = True
+    elif trend_direction == "下降" and regime == "弱気トレンド":
+        side = "ショート"
+        is_strong_trend = True
         
-    price = signal['price']
-    sl = signal['sl']
+    if is_strong_trend:
+        criteria_list["MATCHED"].append(f"長期レジーム({regime})と短期方向性が一致")
+    else:
+        criteria_list["MISSED"].append(f"長期レジーム({regime})と短期方向性が不一致")
+        
+    # c. マクロ経済との整合性 (サイドが決定していない場合はチェック対象外)
+    if side is not None:
+        if (side == "ロング" and macro_context == "リスクオフ (株安)") or \
+           (side == "ショート" and macro_context == "リスクオン (株高)"):
+            criteria_list["MISSED"].append(f"マクロ経済が逆行 ({macro_context})")
+        else:
+            criteria_list["MATCHED"].append(f"マクロ経済と整合 ({macro_context})")
+            
+    criteria_list["MATCHED"].append("OIデータはニュートラルとして処理されました")
     
-    closes_15m = pd.Series([c[4] for c in signal['ohlcv_15m']])
+    # 3. 実行方向（side）が定まらない場合はシグナル候補から除外
+    if side is None:
+        return None
+
+    # 4. スコア計算
+    # final_confidence: 最終的な信頼度 (ロングなら win_prob, ショートなら 1-win_prob)
+    final_confidence = win_prob if side == "ロング" else (1 - win_prob)
+    # score: ピックアップのためのスコア (0.5からの絶対乖離: 0.0 ～ 0.5)
+    score = abs(win_prob - 0.5) 
+    
+    price = ohlcv_15m[-1][4]
+    
+    # SL/TPの計算 (エントリープラン作成のため)
+    closes_15m = pd.Series([c[4] for c in ohlcv_15m])
     optimal_entry = closes_15m.ewm(span=9, adjust=False).mean().iloc[-1]
     
-    df_15m = pd.DataFrame(signal['ohlcv_15m'], columns=['t','o','h','l','c','v'])
+    df_15m = pd.DataFrame(ohlcv_15m, columns=['t','o','h','l','c','v'])
     df_15m['tr'] = np.maximum(df_15m['h'] - df_15m['l'], np.maximum(abs(df_15m['h'] - df_15m['c'].shift()), abs(df_15m['l'] - df_15m['c'].shift())))
     atr_15m = df_15m['tr'].rolling(14).mean().iloc[-1]
+    
+    risk_per_unit = atr_15m * 2.5 # SL幅をATRの2.5倍に設定
+    sl = optimal_entry - risk_per_unit if side == "ロング" else optimal_entry + risk_per_unit
+    
+    return {"symbol": symbol, "side": side, "price": price, "sl": sl,
+            "criteria_list": criteria_list, "confidence": final_confidence, "score": score,
+            "regime": regime, "ohlcv_15m": ohlcv_15m, "optimal_entry": optimal_entry, "atr_15m": atr_15m}
 
+def format_telegram_message(signal: Dict) -> str:
+    """強制通知用に一致/不一致条件を明確に表示するメッセージを作成する"""
+    side_icon = "📈" if signal['side'] == "ロング" else "📉"
+    
+    # スコアが0.15 (信頼度65%)以上なら高信頼度シグナルとして、そうでない場合は「注目」として表示
+    if signal['score'] >= 0.15:
+        msg = f"💎 <b>Apex BOT シグナル速報: {signal['symbol']}</b> {side_icon}\n"
+        msg += f"<i>市場レジーム: {signal['regime']} ({CCXT_CLIENT_NAME.split(' ')[0]}データ)</i>\n"
+        msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%}</i>\n\n"
+    else:
+        msg = f"🔔 <b>Apex BOT 注目銘柄: {signal['symbol']}</b> {side_icon} (暫定)\n"
+        msg += f"<i>現在の最高スコア銘柄を選定しました。</i>\n"
+        msg += f"<i>MLモデル予測信頼度: {signal['confidence']:.2%} (スコア: {signal['score']:.4f})</i>\n\n"
+    
+    # --- 条件の表示 ---
+    msg += "<b>✅ 一致した判断根拠</b>\n"
+    if signal['criteria_list']['MATCHED']:
+        for c in signal['criteria_list']['MATCHED']: msg += f"• {c}\n"
+    else:
+        msg += "• なし\n"
+        
+    msg += "\n<b>❌ 不一致または未確認の条件</b>\n"
+    if signal['criteria_list']['MISSED']:
+        for c in signal['criteria_list']['MISSED']: msg += f"• {c}\n"
+    else:
+        msg += "• なし\n"
+    # --- エントリープラン ---
+        
+    price = signal['price']
+    optimal_entry = signal['optimal_entry']
+    atr_15m = signal['atr_15m']
+    sl = signal['sl']
+    
     entry_zone_upper = optimal_entry + (atr_15m * 0.5)
     entry_zone_lower = optimal_entry - (atr_15m * 0.5)
     
@@ -290,15 +311,13 @@ def format_telegram_message(signal: Dict) -> str:
     msg += f"<pre>現在価格: {price:,.4f}\n\n"
     if signal['side'] == 'ロング':
         msg += f"--- エントリーゾーン (指値案) ---\n"
-        msg += f"上限: {entry_zone_upper:,.4f}\n"
         msg += f"最適: {optimal_entry:,.4f} (9EMA)\n"
-        msg += f"下限: {entry_zone_lower:,.4f}\n"
+        msg += f"範囲: {entry_zone_lower:,.4f} 〜 {entry_zone_upper:,.4f}\n"
         msg += "👉 この価格帯への押し目を待ってエントリー\n\n"
     else:
         msg += f"--- エントリーゾーン (指値案) ---\n"
-        msg += f"下限: {entry_zone_lower:,.4f}\n"
         msg += f"最適: {optimal_entry:,.4f} (9EMA)\n"
-        msg += f"上限: {entry_zone_upper:,.4f}\n"
+        msg += f"範囲: {entry_zone_lower:,.4f} 〜 {entry_zone_upper:,.4f}\n"
         msg += "👉 この価格帯への戻りを待ってエントリー\n\n"
         
     msg += f"--- ゾーンエントリー時の目標 ---\n"
@@ -308,25 +327,10 @@ def format_telegram_message(signal: Dict) -> str:
     
     return msg
 
-async def analyze_symbol_and_notify(symbol: str, macro_context: str, notified_symbols: Dict):
-    current_time = time.time()
-    if symbol in notified_symbols and current_time - notified_symbols[symbol] < 3600: return
-
-    regime = await determine_market_regime(symbol)
-    if regime == "不明": return
-        
-    signal = await generate_signal(symbol, regime, macro_context)
-    if signal:
-        message = format_telegram_message(signal)
-        send_telegram_html(message, is_emergency=True)
-        notified_symbols[symbol] = current_time
-        logging.info(f"🚨 シグナル通知成功: {signal['symbol']} - {signal['side']} @ {signal['price']:.4f} (信頼度: {signal['confidence']:.2%})")
-
 
 async def main_loop():
     """BOTの常時監視を実行するバックグラウンドタスク"""
-    global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS
-    notified_symbols = {}
+    global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS
     
     # 起動時の初期リスト設定
     CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
@@ -345,14 +349,12 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if is_dynamic_update_needed:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v6.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v6.1 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
-                macro_context = get_tradfi_macro_context() # マクロコンテクストを更新
+                macro_context = get_tradfi_macro_context() 
                 logging.info(f"マクロ経済コンテクスト: {macro_context}")
                 
-                # 出来高TOP30取得試行 (CoinGeckoを使用)
                 symbols_to_monitor, source_exchange = await fetch_top_symbols_async(30)
-                
                 CURRENT_MONITOR_SYMBOLS = symbols_to_monitor
                 LAST_UPDATE_TIME = current_time
                 
@@ -362,10 +364,34 @@ async def main_loop():
             
             # --- メイン分析実行 (30秒ごと) ---
             
-            # 分析の実行
-            tasks = [analyze_symbol_and_notify(sym, macro_context, notified_symbols) for sym in CURRENT_MONITOR_SYMBOLS]
-            await asyncio.gather(*tasks)
+            # 1. 全銘柄のシグナル候補を生成
+            candidate_tasks = [generate_signal_candidate(sym, macro_context) for sym in CURRENT_MONITOR_SYMBOLS]
+            candidates = await asyncio.gather(*candidate_tasks)
+            
+            # 2. 候補のフィルタリング (方向性が決定したもののみ)
+            valid_candidates = [c for c in candidates if c is not None and c['side'] is not None]
 
+            # 3. 通知が必要な銘柄を特定
+            best_signal = None
+            if valid_candidates:
+                # score (0.5からの乖離度) が最も高いものを選択
+                best_signal = max(valid_candidates, key=lambda c: c['score'])
+                
+                # 通知フィルタリング:
+                # a) スコアが最低限 0.10 (信頼度 60%) 以上であること
+                # b) 一度通知したら1時間(3600秒)は再通知しないこと
+                is_ready_to_notify = best_signal['score'] >= 0.10
+                is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
+
+                # 4. 通知の実行
+                if is_ready_to_notify and is_not_recently_notified:
+                    message = format_telegram_message(best_signal)
+                    send_telegram_html(message, is_emergency=True)
+                    NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
+                    
+                    log_msg = f"🚨 強制通知成功: {best_signal['symbol']} - {best_signal['side']} @ {best_signal['price']:.4f} (スコア: {best_signal['score']:.4f})"
+                    logging.info(log_msg)
+            
             # ログ出力は、5分に一度だけ行う
             if is_dynamic_update_needed:
                 logging.info("--------------------------------------------------")
@@ -412,10 +438,9 @@ async def shutdown_event():
 def read_root():
     """Renderのスリープを防ぐためのヘルスチェックエンドポイント"""
     monitor_info = CURRENT_MONITOR_SYMBOLS[0] if CURRENT_MONITOR_SYMBOLS else "No Symbols"
-    logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
-        "service": "Apex BOT v6.0",
+        "service": "Apex BOT v6.1 (Forced Signal)",
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
