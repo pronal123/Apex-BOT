@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v6.0 - 分析特化・最終クリーン版 (main_render.py)
+# Apex BOT v6.0 - 初回起動時テスト通知実装版 (main_render.py)
 # ====================================================================================
 #
-# 目的: 機能しない外部APIへのアクセスを全て削除し、静的リストの分析とWebサービス稼働に特化。
-#       BOTは最高の安定性で動作し続けます。
+# 目的: サーバー起動時に Telegram の接続テストを行い、正常稼働を通知する。
 #
 # ====================================================================================
 
@@ -19,6 +18,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 import asyncio
+import random
+import re 
 from fastapi import FastAPI
 import uvicorn
 from dotenv import load_dotenv
@@ -29,16 +30,19 @@ load_dotenv()
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
-# 出来高TOP30銘柄の条件を満たすための静的リスト（監視対象）
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "LTC", "ADA", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "BCH", "FIL", "TRX", "XLM", "ICP", "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", "NEO", "VET", "DASH", "QTUM"] 
 
 # 環境変数から設定を読み込む
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
+COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', 'YOUR_COINGLASS_API_KEY')
 
 # --- 動作設定 ---
 LOOP_INTERVAL = 30       
-DYNAMIC_UPDATE_INTERVAL = 3600 # 銘柄更新頻度は無効化のため3600秒に設定
+DYNAMIC_UPDATE_INTERVAL = 3600 
+
+# --- APIエンドポイント ---
+COINGLASS_API_HEADERS = {'accept': 'application/json', 'coinglass-api-key': COINGLASS_API_KEY}
 
 # ====================================================================================
 #                               UTILITIES & CLIENTS
@@ -54,13 +58,31 @@ CURRENT_MONITOR_SYMBOLS = []
 def initialize_ccxt_client():
     """CCXTクライアントを初期化する"""
     global CCXT_CLIENT
-    # プロキシ設定は不要。OHLCV取得用にBinanceに固定
     CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
+# --- 新規追加: テスト通知関数 ---
+async def send_test_message():
+    """BOT起動時のセルフテスト通知"""
+    test_text = (
+        f"🤖 <b>Apex BOT v6.0 - 起動テスト通知</b> 🚀\n\n"
+        f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
+        f"Render環境でのWebサービス起動に成功しました。\n"
+        f"分析サイクル (30秒ごと) および Telegram 接続は正常に稼働中です。"
+    )
+    
+    # send_telegram_html は同期関数なので、Executorで実行
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: send_telegram_html(test_text, is_emergency=True))
+        logging.info("✅ Telegram 起動テスト通知を正常に送信しました。")
+    except Exception as e:
+        logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
+# -----------------------------
+
 def send_telegram_html(text: str, is_emergency: bool = False):
-    # ... (Telegram送信ロジックは変更なし)
     if 'YOUR' in TELEGRAM_TOKEN:
         clean_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "").replace("<pre>", "\n").replace("</pre>", "")
+        logging.warning("⚠️ TELEGRAM_TOKENが初期値です。実際の通知は行われず、ログに出力されます。")
         logging.info("--- TELEGRAM通知（ダミー）---\n" + clean_text)
         return
 
@@ -76,7 +98,6 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 async def fetch_top_symbols_static(limit: int = 30) -> Tuple[List[str], str]:
     """動的選定ロジックを置き換え、常に静的リストを返す"""
-    # 出来高TOP30の条件を静的リストで満たす
     return DEFAULT_SYMBOLS[:limit], "Static List"
 
 async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[list]:
@@ -84,7 +105,7 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
     if CCXT_CLIENT is None: return []
     
     market_symbol = f"{symbol}/USDT" 
-    
+
     try:
         return await CCXT_CLIENT.fetch_ohlcv(market_symbol, timeframe, limit=limit)
     except Exception:
@@ -95,7 +116,6 @@ async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
     return {"oi_change_24h": 0} 
 
 def get_tradfi_macro_context() -> str:
-    # ... (Yahoo Financeのロジックは変更なし)
     try:
         es = yf.Ticker("ES=F")
         hist = es.history(period="5d", interval="1h")
@@ -270,6 +290,10 @@ async def main_loop():
     CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS[:30]
     macro_context = get_tradfi_macro_context()
     
+    # --- 初期起動時のテスト通知 ---
+    await send_test_message()
+    # -----------------------------
+    
     while True:
         try:
             current_time = time.time()
@@ -351,7 +375,3 @@ def read_root():
         "monitoring_base": CCXT_CLIENT_NAME.split(' ')[0],
         "next_dynamic_update": f"{DYNAMIC_UPDATE_INTERVAL - (time.time() - LAST_UPDATE_TIME):.0f}s"
     }
-
-# ------------------------------------------------------------------------------------
-# RENDER ENTRY POINT (Uvicorn configuration)
-# ------------------------------------------------------------------------------------
