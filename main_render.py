@@ -1,9 +1,5 @@
 # ====================================================================================
-# Apex BOT v6.0 - 初回起動時テスト通知実装版 (main_render.py)
-# ====================================================================================
-#
-# 目的: サーバー起動時に Telegram の接続テストを行い、正常稼働を通知する。
-#
+# Apex BOT v6.0 - 出来高トップ30銘柄の動的選定機能実装版 (main_render.py)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -39,10 +35,7 @@ COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', 'YOUR_COINGLASS_API_KEY'
 
 # --- 動作設定 ---
 LOOP_INTERVAL = 30       
-DYNAMIC_UPDATE_INTERVAL = 3600 
-
-# --- APIエンドポイント ---
-COINGLASS_API_HEADERS = {'accept': 'application/json', 'coinglass-api-key': COINGLASS_API_KEY}
+DYNAMIC_UPDATE_INTERVAL = 300  # 5分ごとに出来高トップ30を更新
 
 # ====================================================================================
 #                               UTILITIES & CLIENTS
@@ -60,7 +53,6 @@ def initialize_ccxt_client():
     global CCXT_CLIENT
     CCXT_CLIENT = ccxt_async.binance({"enableRateLimit": True, "timeout": 15000, "options": {"defaultType": "future"}})
 
-# --- 新規追加: テスト通知関数 ---
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
     test_text = (
@@ -70,14 +62,13 @@ async def send_test_message():
         f"分析サイクル (30秒ごと) および Telegram 接続は正常に稼働中です。"
     )
     
-    # send_telegram_html は同期関数なので、Executorで実行
     try:
         loop = asyncio.get_event_loop()
+        # send_telegram_html は同期関数なので、Executorで実行
         await loop.run_in_executor(None, lambda: send_telegram_html(test_text, is_emergency=True))
         logging.info("✅ Telegram 起動テスト通知を正常に送信しました。")
     except Exception as e:
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
-# -----------------------------
 
 def send_telegram_html(text: str, is_emergency: bool = False):
     if 'YOUR' in TELEGRAM_TOKEN:
@@ -92,13 +83,43 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         "disable_web_page_preview": True, "disable_notification": not is_emergency
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        # メッセージが届いていることから、この同期呼び出しは機能している
+        requests.post(url, json=payload, timeout=10) 
     except requests.exceptions.RequestException as e:
         logging.error(f"Telegram送信エラー: {e}")
 
-async def fetch_top_symbols_static(limit: int = 30) -> Tuple[List[str], str]:
-    """動的選定ロジックを置き換え、常に静的リストを返す"""
-    return DEFAULT_SYMBOLS[:limit], "Static List"
+# 🚨 【重要変更】出来高トップ30をCCXTで動的に取得する
+async def fetch_top_symbols_async(limit: int = 30) -> Tuple[List[str], str]:
+    """取引所の出来高トップ銘柄を動的に取得する"""
+    if CCXT_CLIENT is None: 
+        return DEFAULT_SYMBOLS[:limit], "Static List (CCXT Client missing)"
+
+    try:
+        # すべてのフューチャー（先物）市場のティッカー情報を取得
+        tickers = await CCXT_CLIENT.fetch_tickers(params={"defaultType": "future"})
+        
+        volume_data = []
+        for symbol, ticker in tickers.items():
+            # USDTペア、かつ24時間出来高データが存在するものを抽出
+            if '/USDT' in symbol and ticker.get('baseVolume') is not None:
+                # baseVolume (例: BTC/USDTのBTC出来高) でランキング
+                volume_data.append({'symbol': symbol.replace('/USDT', ''), 'volume': ticker['baseVolume']})
+
+        # 出来高降順でソート
+        volume_data.sort(key=lambda x: x['volume'], reverse=True)
+        # トップ30のシンボル名を取得 (ただしUSDT自身は除く)
+        top_symbols = [d['symbol'] for d in volume_data if d['symbol'] != 'USDT'][:limit]
+        
+        if not top_symbols:
+            # データが空の場合は静的リストにフォールバック
+            return DEFAULT_SYMBOLS[:limit], "Static List (Volume data empty)"
+
+        return top_symbols, "Dynamic List (CCXT Volume Top)"
+        
+    except Exception as e:
+        logging.error(f"❌ ダイナミック銘柄選定に失敗: {e}。静的リストにフォールバックします。")
+        return DEFAULT_SYMBOLS[:limit], "Static List (Fallback)"
+# ----------------------------------------------------
 
 async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[list]:
     """OHLCVは固定のCCXTクライアント (Binance) から取得する"""
@@ -113,6 +134,7 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
 
 async def fetch_market_sentiment_data_async(symbol: str) -> Dict:
     """OIデータ取得をスキップし、ダミーデータを返す"""
+    # 出来高ベースの選定により、OIデータは一旦ニュートラルとして扱う
     return {"oi_change_24h": 0} 
 
 def get_tradfi_macro_context() -> str:
@@ -148,7 +170,8 @@ async def determine_market_regime(symbol: str) -> str:
     if len(ohlcv) < 100: return "不明"
     prices = pd.Series([c[4] for c in ohlcv])
     atr_ratio = (pd.Series([h[2] - h[3] for h in ohlcv]).rolling(14).mean().iloc[-1]) / prices.iloc[-1]
-    if atr_ratio > 0.05: return "高ボラティリティ"
+    # ボラティリティ条件を少し緩和
+    if atr_ratio > 0.04: return "高ボラティリティ"
     kama_fast = calculate_kama(prices, period=21)
     kama_slow = calculate_kama(prices, period=50)
     if kama_fast.iloc[-1] > kama_slow.iloc[-1] and prices.iloc[-1] > kama_fast.iloc[-1]:
@@ -180,6 +203,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
         rs = gain / loss.replace(0, 1e-9)
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         
+        # RSIをベースに予測確率を計算。0.5をニュートラルとしてRSIが70なら0.8に近づく。
         prob = 0.5 + ((rsi - 50) / 100) * 0.8 
         return np.clip(prob, 0, 1)
     except Exception:
@@ -188,9 +212,12 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
 async def generate_signal(symbol: str, regime: str, macro_context: str) -> Optional[Dict]:
     criteria = []
     is_aligned, trend_direction = await multi_timeframe_confirmation(symbol)
+    
+    # シグナル生成の条件をわずかに緩和
     if is_aligned: criteria.append(f"多時間軸の方向性が一致 ({trend_direction})")
     
     side = None
+    # 高ボラティリティ相場ではトレンドフォローは行わない
     if regime == "強気トレンド" and trend_direction == "上昇":
         side = "ロング"
         criteria.append("長期レジームが強気トレンド")
@@ -200,11 +227,12 @@ async def generate_signal(symbol: str, regime: str, macro_context: str) -> Optio
     
     if side is None: return None
         
+    # マクロ経済との整合性チェック
     if side == "ロング" and macro_context == "リスクオフ (株安)": return None
+    if side == "ショート" and macro_context == "リスクオン (株高)": return None
     criteria.append(f"マクロ経済と整合 ({macro_context})")
     
     sentiment = await fetch_market_sentiment_data_async(symbol)
-    
     criteria.append("OIデータはニュートラルとして処理されました")
         
     ohlcv_15m = await fetch_ohlcv_async(symbol, '15m', 100)
@@ -212,12 +240,19 @@ async def generate_signal(symbol: str, regime: str, macro_context: str) -> Optio
     win_prob = get_ml_prediction(ohlcv_15m, sentiment)
     criteria.append(f"MLモデル予測上昇確率: {win_prob:.2%}")
     
-    if len(criteria) >= 3 and win_prob > 0.70:
+    # 以前の0.70から0.65に緩和し、よりシグナルを出しやすくする
+    required_confidence = 0.65
+    
+    if len(criteria) >= 3 and (win_prob > required_confidence if side == "ロング" else win_prob < (1 - required_confidence)):
         price = ohlcv_15m[-1][4]
         atr = (pd.Series([h[2] - h[3] for h in ohlcv_15m]).rolling(14).mean().iloc[-1])
         sl = price - (atr * 2.5) if side == "ロング" else price + (atr * 2.5)
+        
+        # win_probはロングの確率なので、ショートの場合は逆の確率を使う
+        final_confidence = win_prob if side == "ロング" else (1 - win_prob)
+        
         return {"symbol": symbol, "side": side, "price": price, "sl": sl,
-                "criteria": criteria, "confidence": win_prob, "regime": regime, "ohlcv_15m": ohlcv_15m}
+                "criteria": criteria, "confidence": final_confidence, "regime": regime, "ohlcv_15m": ohlcv_15m}
     return None
 
 def format_telegram_message(signal: Dict) -> str:
@@ -270,6 +305,7 @@ def format_telegram_message(signal: Dict) -> str:
 
 async def analyze_symbol_and_notify(symbol: str, macro_context: str, notified_symbols: Dict):
     current_time = time.time()
+    # 一度シグナルを出したら1時間(3600秒)は再通知しない
     if symbol in notified_symbols and current_time - notified_symbols[symbol] < 3600: return
 
     regime = await determine_market_regime(symbol)
@@ -278,8 +314,10 @@ async def analyze_symbol_and_notify(symbol: str, macro_context: str, notified_sy
     signal = await generate_signal(symbol, regime, macro_context)
     if signal:
         message = format_telegram_message(signal)
+        # 実際のシグナルは緊急通知として送信 (通知音を鳴らす)
         send_telegram_html(message, is_emergency=True)
         notified_symbols[symbol] = current_time
+        logging.info(f"🚨 シグナル通知成功: {signal['symbol']} - {signal['side']} @ {signal['price']:.4f} (信頼度: {signal['confidence']:.2%})")
 
 async def main_loop():
     """BOTの常時監視を実行するバックグラウンドタスク"""
@@ -287,8 +325,9 @@ async def main_loop():
     notified_symbols = {}
     
     # 起動時の初期リスト設定
-    CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS[:30]
+    CURRENT_MONITOR_SYMBOLS, source = await fetch_top_symbols_async(30)
     macro_context = get_tradfi_macro_context()
+    LAST_UPDATE_TIME = time.time()
     
     # --- 初期起動時のテスト通知 ---
     await send_test_message()
@@ -297,9 +336,10 @@ async def main_loop():
     while True:
         try:
             current_time = time.time()
+            # 出来高トップ30のリストを5分に一度更新
             is_dynamic_update_needed = (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL
             
-            # --- 動的更新フェーズ (300秒に一度) ---
+            # --- 動的更新フェーズ (5分に一度) ---
             if is_dynamic_update_needed:
                 logging.info("==================================================")
                 logging.info(f"Apex BOT v6.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -307,8 +347,8 @@ async def main_loop():
                 macro_context = get_tradfi_macro_context() # マクロコンテクストを更新
                 logging.info(f"マクロ経済コンテクスト: {macro_context}")
                 
-                # 出来高TOP30取得試行 (静的リスト取得ロジックに置き換え)
-                symbols_to_monitor, source_exchange = await fetch_top_symbols_static(30)
+                # 出来高TOP30の動的選定
+                symbols_to_monitor, source_exchange = await fetch_top_symbols_async(30)
                 
                 CURRENT_MONITOR_SYMBOLS = symbols_to_monitor
                 LAST_UPDATE_TIME = current_time
@@ -323,7 +363,7 @@ async def main_loop():
             tasks = [analyze_symbol_and_notify(sym, macro_context, notified_symbols) for sym in CURRENT_MONITOR_SYMBOLS]
             await asyncio.gather(*tasks)
 
-            # ログ出力は、5分に一度だけ行う
+            # ログ出力は、5分に一度の更新時に集約して出力する
             if is_dynamic_update_needed:
                 logging.info("--------------------------------------------------")
                 logging.info(f"分析サイクル完了。{LOOP_INTERVAL}秒待機します。")
@@ -368,7 +408,9 @@ async def shutdown_event():
 @app.get("/")
 def read_root():
     """Renderのスリープを防ぐためのヘルスチェックエンドポイント"""
-    logging.info(f"Health Check Ping Received. Analyzing: {CURRENT_MONITOR_SYMBOLS[0]}...")
+    # 監視対象リストが空でないことを確認してからログに出力
+    monitor_info = CURRENT_MONITOR_SYMBOLS[0] if CURRENT_MONITOR_SYMBOLS else "No Symbols"
+    logging.info(f"Health Check Ping Received. Analyzing: {monitor_info}...")
     return {
         "status": "Running",
         "service": "Apex BOT v6.0",
