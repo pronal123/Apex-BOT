@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v8.8 - Final Error Evasion & Robustness (最終統合バージョン)
+# Apex BOT v8.9 - Final Stability Release (Render ReadTimeout/Stability 対策)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -16,7 +16,7 @@ import yfinance as yf
 import asyncio
 import random
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse # JSONResponseをインポート
+from fastapi.responses import JSONResponse 
 import uvicorn
 from dotenv import load_dotenv
 load_dotenv()
@@ -38,7 +38,8 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 LOOP_INTERVAL = 45      # メイン分析ループ間隔 (45秒)
 DYNAMIC_UPDATE_INTERVAL = 600 # マクロ分析/銘柄更新間隔 (10分)
 REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (0.5秒)
-PING_TIMEOUT = 30       # 📌 v8.8 修正: ReadTimeout対策としてタイムアウトを30秒に延長
+PING_TIMEOUT = 30       # Pingタイムアウトを30秒に維持
+PING_INTERVAL = 30      # 📌 v8.9 修正: Renderのアイドル対策としてPing間隔を30秒に短縮
 
 # ログ設定
 logging.basicConfig(level=logging.INFO,
@@ -84,11 +85,11 @@ def initialize_ccxt_client():
 
 
 async def send_test_message():
-    """起動テスト通知 (v8.8に更新)"""
+    """起動テスト通知 (v8.9に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v8.8 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v8.9 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>動的選定エラーとPingタイムアウトに対する最終回避ロジックを実装。</b>"
+        f"<b>Render ReadTimeout対策のため、Ping間隔を30秒に短縮しました。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -97,7 +98,12 @@ async def send_test_message():
     except Exception as e:
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
 
-# (send_telegram_html, get_tradfi_macro_context, get_news_sentiment などの関数は変更なしのため省略)
+# (send_telegram_html, get_tradfi_macro_context, get_news_sentiment, 
+#  calculate_elliott_wave_score, calculate_trade_levels, 
+#  calculate_technical_indicators, get_ml_prediction, 
+#  fetch_ohlcv_single_client, fetch_order_book_depth_async, 
+#  format_telegram_message の関数は v8.8と同一のため省略)
+
 def send_telegram_html(text: str, is_emergency: bool = False):
     if 'YOUR' in TELEGRAM_TOKEN:
         clean_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "").replace("<pre>", "\n").replace("</pre>", "")
@@ -230,7 +236,6 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
         return 0.5, {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
 async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: str, limit: int) -> Tuple[List[list], str]:
-    """OHLCV取得 (レート制限時のステータス返却ロジックはv8.7と同じ)"""
     client = CCXT_CLIENTS_DICT.get(client_name)
     if client is None: return [], "NoClient"
 
@@ -265,7 +270,7 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
 
     return [], "NoData"
 
-async def fetch_order_book_depth_async(symbol: str) -> Dict: # ... (省略)
+async def fetch_order_book_depth_async(symbol: str) -> Dict:
     client = CCXT_CLIENTS_DICT.get(CCXT_CLIENT_NAME)
     if client is None: return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5}
 
@@ -286,9 +291,7 @@ async def fetch_order_book_depth_async(symbol: str) -> Dict: # ... (省略)
         return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5}
 
 async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) -> None:
-    """
-    動的銘柄選定。v8.8修正: TypeErrorを確実に回避するためのフィルタリング強化。
-    """
+    """動的銘柄選定 (v8.8ロジックを維持: TypeErrorを確実に回避するためのフィルタリング強化)"""
     global CURRENT_MONITOR_SYMBOLS
     client = CCXT_CLIENTS_DICT.get(client_name)
     if client is None: return
@@ -300,14 +303,13 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
             if 'USDT' in symbol and market_data.get('active', True)
         }
 
-        # 📌 銘柄数が多すぎる場合はCCXTのレート制限を避けるため、一部のペアのみを取得する
         target_symbols = list(usdt_pairs.keys())
         if len(target_symbols) > 150: 
             target_symbols = random.sample(target_symbols, 150)
 
         tickers = await client.fetch_tickers(target_symbols)
         
-        # 📌 v8.8 修正: quoteVolumeがNoneや負の数を返す可能性のある銘柄をフィルタリング
+        # v8.8 フィルタリング: quoteVolumeがNoneや負の数を返す可能性のある銘柄をフィルタリング
         valid_tickers = [
             t for t in tickers.values() if 
             t.get('quoteVolume') is not None and 
@@ -332,13 +334,12 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
             logging.warning(f"⚠️ 動的銘柄選定に失敗 (銘柄数不足: {len(new_symbols)}), デフォルトリストを維持。")
 
     except Exception as e:
-        # エラー発生時のロギングを詳細化
         logging.error(f"❌ 動的銘柄選定エラー: {type(e).__name__}: {e}。既存リスト({len(CURRENT_MONITOR_SYMBOLS)}銘柄)を維持。")
-        # エラー時もリストは変更しない
+        
 
 
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
-    """シグナル候補を生成 (v8.7と同じロジックを維持)"""
+    """シグナル候補を生成 (v8.8と同じロジックを維持)"""
     sentiment_data = get_news_sentiment(symbol)
     ohlcv_15m, ccxt_status = await fetch_ohlcv_single_client(client_name, symbol, '15m', 100)
 
@@ -356,13 +357,12 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
         closes = pd.Series([c[4] for c in ohlcv_15m])
         wave_score, wave_phase = calculate_elliott_wave_score(closes)
     elif symbol in YFINANCE_SUPPORTED_SYMBOLS:
-        return None # YFinance Fallbackロジックは省略
+        return None 
     else:
         return None
 
     if closes is None: return None
 
-    # (中立シグナル判定と複合スコア計算ロジックはv8.7と同じため省略)
     depth_data = await fetch_order_book_depth_async(symbol) if not is_fallback else {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5}
 
     if win_prob >= 0.53:
@@ -377,7 +377,6 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
                 "wave_phase": wave_phase, "depth_ratio": depth_data['depth_ratio'],
                 "tech_data": tech_data, "sentiment_score": sentiment_data["sentiment_score"]}
 
-    # 複合スコア計算
     base_score = abs(win_prob - 0.5) * 2
     base_score *= (0.8 + wave_score * 0.4)
 
@@ -410,9 +409,9 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
             "tech_data": tech_data}
 
 
-async def self_ping_task(interval: int = 55):
+async def self_ping_task(interval: int = PING_INTERVAL):
     """
-    v8.8 修正: ReadTimeout対策としてタイムアウトを30秒に延長。
+    v8.9 修正: Ping間隔を短縮 (30秒)し、成功ログを追加。
     """
     render_url = os.environ.get('RENDER_EXTERNAL_URL')
     if not render_url:
@@ -427,15 +426,17 @@ async def self_ping_task(interval: int = 55):
     while True:
         await asyncio.sleep(interval)
         try:
-            # 📌 修正点: タイムアウトをPING_TIMEOUTに設定
+            # タイムアウトをPING_TIMEOUTに設定 (30秒)
             response = requests.get(ping_url, timeout=PING_TIMEOUT)
             response.raise_for_status()
-            logging.debug(f"Self-ping successful. Status: {response.status_code}")
+            # 📌 v8.9 修正: 成功時のログを追加
+            logging.debug(f"✅ Self-ping successful. Status: {response.status_code}")
         except requests.exceptions.RequestException as e:
             logging.warning(f"❌ Self-ping failed ({type(e).__name__}): {e}. Retrying.")
+            # 失敗時は、次のPingまでの待機時間を少し長く取る (Renderのリカバリを待つ)
+            await asyncio.sleep(5) 
         except asyncio.CancelledError:
             break
-
 
 async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
@@ -446,20 +447,20 @@ async def main_loop():
     macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
     LAST_UPDATE_TIME = time.time()
     await send_test_message()
-    asyncio.create_task(self_ping_task(interval=55))
+    # 📌 v8.9 修正: PING_INTERVAL (30秒)でタスクを開始
+    asyncio.create_task(self_ping_task(interval=PING_INTERVAL))
 
     while True:
         try:
             current_time = time.time()
 
-            # クライアントの選定: 最終成功時刻が新しいクライアントを優先
             CCXT_CLIENT_NAME = max(ACTIVE_CLIENT_HEALTH, key=ACTIVE_CLIENT_HEALTH.get, default=CCXT_CLIENT_NAMES[0])
             logging.debug(f"現在の優先クライアント: {CCXT_CLIENT_NAME}")
 
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v8.8 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v8.9 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -473,7 +474,6 @@ async def main_loop():
                                for sym in CURRENT_MONITOR_SYMBOLS]
             candidates = await asyncio.gather(*candidate_tasks)
 
-            # レート制限/タイムアウトエラーハンドリングと即時クライアント切り替えロジック
             rate_limit_error_found = any(isinstance(c, dict) and c.get('side') in ["RateLimit", "Timeout"] for c in candidates)
 
             if rate_limit_error_found:
@@ -486,7 +486,6 @@ async def main_loop():
                 await asyncio.sleep(5) 
                 continue 
 
-            # (統計情報更新と通知ロジックはv8.7と同じため省略)
             valid_candidates_and_neutral = [c for c in candidates if c is not None and c.get('side') not in ["RateLimit", "Timeout"]]
             success_count = len(valid_candidates_and_neutral)
             TOTAL_ANALYSIS_ATTEMPTS += len(CURRENT_MONITOR_SYMBOLS)
@@ -536,7 +535,7 @@ async def main_loop():
             logging.error(f"メインループで予期せぬエラーが発生しました: {type(e).__name__}: {e}。{LOOP_INTERVAL}秒後に再試行します。")
             await asyncio.sleep(LOOP_INTERVAL)
 
-# (format_telegram_message は v8.7と同じため省略)
+
 def format_telegram_message(signal: Dict) -> str:
     is_fallback = signal.get('is_fallback', False)
     vix_level = signal['macro_context']['vix_level']
@@ -555,7 +554,7 @@ def format_telegram_message(signal: Dict) -> str:
         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             return (
-                f"🚨 <b>Apex BOT v8.8 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v8.9 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -633,7 +632,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("Starting Apex BOT Web Service (v8.8 - Final Error Evasion)...")
+    logging.info("Starting Apex BOT Web Service (v8.9 - Final Stability Release)...")
     initialize_ccxt_client()
 
     port = int(os.environ.get("PORT", 8000))
@@ -649,11 +648,10 @@ async def shutdown_event():
     logging.info("CCXT Clients closed during shutdown.")
 
 @app.get("/", include_in_schema=False)
-@app.head("/", include_in_schema=False) # 📌 v8.8 修正: HEADリクエストにもJSON応答を許可し405を回避
+@app.head("/", include_in_schema=False) 
 async def read_root(request: Request):
     """
     Renderのヘルスチェックと自己Pingに応答するためのルート。
-    GET/HEADリクエストの両方で実行されるようにする。
     """
     monitor_info = ", ".join(CURRENT_MONITOR_SYMBOLS[:5]) + f"...({len(CURRENT_MONITOR_SYMBOLS)} total)"
     last_health_time = ACTIVE_CLIENT_HEALTH.get(CCXT_CLIENT_NAME, 0)
@@ -661,7 +659,7 @@ async def read_root(request: Request):
     
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v8.8 (Final Error Evasion)",
+        "service": "Apex BOT v8.9 (Final Stability Release)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
@@ -671,6 +669,7 @@ async def read_root(request: Request):
     
     # HEADリクエストの場合はコンテンツを返さず、ヘッダーのみ返す (RenderのLiveness Check対策)
     if request.method == "HEAD":
+        # Content-Typeが設定されるようにJSONResponseを使用
         return JSONResponse(content={}, headers={"Content-Length": "0"})
     
     return response_data
