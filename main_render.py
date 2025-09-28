@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v8.9.3 - Render/詳細分析統合版 (完全版)
+# Apex BOT v8.9.4 - 詳細分析 & Render耐久性統合版 (完全版)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,7 +37,7 @@ YFINANCE_SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "ADA", "XRP", "LTC", 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v8.9.3 設定: Render耐久性強化 + 詳細分析
+# 📌 v8.9.4 設定: Render耐久性強化 + 詳細分析
 LOOP_INTERVAL = 60      # メイン分析ループ間隔 (秒)
 PING_INTERVAL = 15      # 自己Ping間隔 (秒)
 # ----------------------------------------------------------------------
@@ -91,11 +91,11 @@ def initialize_ccxt_client():
 
 
 async def send_test_message():
-    """起動テスト通知 (v8.9.3に更新)"""
+    """起動テスト通知 (v8.9.4に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v8.9.3 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v8.9.4 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>Render ReadTimeout対策: Ping間隔15秒、メイン分析60秒。中立通知の詳細解説機能を統合。</b>"
+        f"<b>機能強化: 詳細な分析ロジック解説を通知に統合しました。Render耐久性設定も維持。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -126,17 +126,19 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 
 # ====================================================================================
-# CORE ANALYSIS FUNCTIONS (UNCHANGED FROM v8.9.2 LOGIC)
+# CORE ANALYSIS FUNCTIONS
 # ====================================================================================
 
 def get_tradfi_macro_context() -> Dict:
     """伝統的金融市場（VIXなど）からマクロ環境のコンテクストを取得（ブロッキング関数）"""
     context = {"trend": "不明", "vix_level": 0.0, "gvix_level": 0.0}
     try:
+        # VIXを取得
         vix = yf.Ticker("^VIX").history(period="1d", interval="1h")
         if not vix.empty:
             context["vix_level"] = vix['Close'].iloc[-1]
             context["trend"] = "中立" if context["vix_level"] < 20 else "リスクオフ (VIX高)"
+        # 仮想通貨ボラティリティ指数はダミー
         context["gvix_level"] = random.uniform(40, 60)
     except Exception:
         pass
@@ -495,7 +497,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v8.9.3 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v8.9.4 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -576,17 +578,23 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
             
 def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形 (v8.9.3: 中立詳細解説ロジックを統合)"""
+    """シグナルデータからTelegram通知メッセージを整形 (v8.9.4: 詳細なロジック解説を統合)"""
     
     # --- 共通情報の抽出 ---
-    is_fallback = signal.get('is_fallback', False)
     vix_level = signal['macro_context']['vix_level']
     vix_status = f"VIX: {vix_level:.1f}" if vix_level > 0 else "VIX: N/A"
     gvix_level = signal['macro_context']['gvix_level']
     gvix_status = f"GVIX: {gvix_level:.1f}"
-
-    stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
-    last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
+    
+    # テクニカルデータとその他の抽出
+    tech_data = signal.get('tech_data', {})
+    rsi = tech_data.get('rsi', 50.0)
+    macd_hist = tech_data.get('macd_hist', 0.0)
+    adx = tech_data.get('adx', 25.0)
+    cci = tech_data.get('cci_signal', 0.0)
+    sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+    depth_ratio = signal.get('depth_ratio', 0.5)
+    source = signal.get('source', 'N/A')
 
     def format_price(price):
         if signal['symbol'] in ["BTC", "ETH"]: return f"{price:,.2f}"
@@ -595,11 +603,13 @@ def format_telegram_message(signal: Dict) -> str:
     # --- 1. 中立/ヘルス通知 (詳細解説版) ---
     if signal['side'] == "Neutral":
         
-        # システムヘルス情報のみのFALLBACKメッセージ 
+        # システムヘルス情報のみのFALLBACKメッセージ (省略なし)
         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
+            stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
+            last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             return (
-                f"🚨 <b>Apex BOT v8.9.3 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v8.9.4 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -607,100 +617,107 @@ def format_telegram_message(signal: Dict) -> str:
             )
 
         # 通常の中立（レンジ相場）メッセージ 
-        tech_data = signal.get('tech_data', {})
-        symbol = signal['symbol']
-        
-        # 詳細データ抽出
-        rsi = tech_data.get('rsi', 50.0)
-        macd_hist = tech_data.get('macd_hist', 0.0)
-        adx = tech_data.get('adx', 25.0)
-        cci = tech_data.get('cci_signal', 0.0)
-        wave_phase = signal['wave_phase']
-        depth_ratio = signal.get('depth_ratio', 0.5)
-        sentiment_pct = signal.get('sentiment_score', 0.5) * 100
         confidence_pct = signal['confidence'] * 200 # 中立シグナルの「確信度」
-
-        # 需給バランスの判断を詳細化
-        if depth_ratio > 0.52: depth_status = "買い圧力がわずかに優勢"
-        elif depth_ratio < 0.48: depth_status = "売り圧力がわずかに優勢"
+        
+        # 需給バランスの判断
+        if depth_ratio > 0.53: depth_status = "買い圧力優勢 (注意)"
+        elif depth_ratio < 0.47: depth_status = "売り圧力優勢 (注意)"
         else: depth_status = "完全な均衡状態"
             
-        # テクニカル状況の解説
+        # テクニカル状況の解説を強化
         tech_comment = ""
-        if 45 < rsi < 55 and abs(macd_hist) < 0.0005 and adx < 20:
-             tech_comment = "全てのトレンド・モメンタム指標が停止。明確なレンジ相場を確証。"
-        elif 40 < rsi < 60 and adx < 25:
-             tech_comment = "モメンタムは中立圏に滞留。方向性は不明確。"
+        if adx < 20 and 48 < rsi < 52 and abs(macd_hist) < 0.0003:
+             tech_comment = "**レンジ確信:** トレンド、モメンタム、勢いの全てが完全に停滞。"
+        elif adx < 25 and 40 < rsi < 60:
+             tech_comment = "トレンド強度が弱く、モメンタムも中立圏。方向性転換待ち。"
         else:
-             tech_comment = "指標は中立から移行期を示唆。"
+             tech_comment = "指標は中立付近で混乱中。明確なシグナル待ち。"
 
-        
         return (
-            f"⏸️ <b>{symbol} - 市場状況: {signal['regime']} (詳細分析)</b> 🔎\n"
+            f"⏸️ <b>{signal['symbol']} - 市場状況: レンジ相場 (詳細分析)</b> 🔎\n"
             f"<i>最終分析時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n"
             f"-------------------------------------------\n"
-            f"<b>📊 テクニカル分析の現状</b>\n"
-            f"• <b>波形フェーズ</b>: **{wave_phase}** (信頼度 {confidence_pct:.1f}%)\n"
-            f"• <b>トレンド強度 (ADX)</b>: {adx:.1f} (基準: 25以下はレンジ)\n"
-            f"• <b>モメンタム (RSI)</b>: {rsi:.1f} (基準: 40-60は中立)\n"
-            f"• <b>トレンド勢い (MACD Hist)</b>: {macd_hist:.4f} (ゼロ近辺で停滞)\n"
-            f"   → <i>解説</i>: {tech_comment}\n"
+            f"<b>📊 レンジ相場の根拠</b>\n"
+            f"• <b>波形フェーズ</b>: **{signal['wave_phase']}** (確信度 {confidence_pct:.1f}%)\n"
+            f"• <b>トレンド強度 (ADX)</b>: {adx:.1f} (目標値: <25)\n"
+            f"• <b>モメンタム (RSI)</b>: {rsi:.1f} (目標値: 40-60)\n"
+            f"• <b>トレンド勢い (MACD Hist)</b>: {macd_hist:.4f} (目標値: ≈0)\n"
+            f"   → <i>結論</i>: {tech_comment}\n"
             f"\n"
             f"<b>⚖️ 需給・感情・マクロ環境</b>\n"
             f"• <b>オーダーブック深度</b>: {depth_status} (比率: {depth_ratio:.2f})\n"
             f"• <b>ニュース感情</b>: {sentiment_pct:.1f}% Positive\n"
             f"• <b>マクロ環境</b>: {signal['macro_context']['trend']} ({vix_status} / {gvix_status})\n"
             f"\n"
-            f"<b>💡 BOTの結論</b>\n"
-            f"現在の市場は**明確な方向性を欠いており**、大口トレーダーも様子見姿勢です。不確実なレンジ相場での損失リスクを避けるため、**次の推進波シグナル**が出るまで待機することを推奨します。"
+            f"<b>💡 BOTの推奨アクション: 待機</b>\n"
+            f"不確実なレンジ相場での損失リスクを避けるため、次の推進波シグナルが出るまで取引を見送ることを強く推奨します。"
         )
 
-
-    # --- 2. トレードシグナル通知 ---
+    # --- 2. トレードシグナル通知 (詳細解説追加) ---
     score = signal['score']
     side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
-    source = signal.get('source', 'N/A')
-
+    side_text = signal['side']
+    
+    # 推奨ロット/アクションの決定
     if score >= 0.80: 
-        score_icon = "🔥🔥🔥"; lot_size = "MAX"; action = "積極的なエントリー"
+        score_icon = "🔥🔥🔥"; lot_size = "MAX (高確度)"
     elif score >= 0.65: 
-        score_icon = "🔥🌟"; lot_size = "中〜大"; action = "標準的なエントリー"
+        score_icon = "🔥🌟"; lot_size = "中〜大 (標準)"
     elif score >= 0.55: 
-        score_icon = "✨"; lot_size = "小"; action = "慎重なエントリー"
+        score_icon = "✨"; lot_size = "小 (慎重)"
     else: 
-        score_icon = "🔹"; lot_size = "最小限"; action = "見送りまたは極めて慎重に"
+        score_icon = "🔹"; lot_size = "最小限 (要検討)"
 
-    tech_data = signal.get('tech_data', {})
-    rsi_str = f"{tech_data.get('rsi', 50):.1f}"
-    macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
-    adx_str = f"{tech_data.get('adx', 25):.1f}"
-    cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
-    sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+    # ロジック解説の作成
+    logic_comment = ""
+    # 強気ロジック
+    if side_text == "ロング":
+        if rsi > 60 and macd_hist > 0:
+            logic_comment = f"強気のモメンタム ({rsi:.1f}) とトレンド勢い ({macd_hist:.4f}) が一致。押し目買いのチャンス。"
+        elif rsi < 40 and macd_hist > 0:
+            logic_comment = f"一時的な売られすぎ ({rsi:.1f}) も、トレンド勢い ({macd_hist:.4f}) は強気転換を維持。反発期待。"
+        else:
+            logic_comment = "複合的な要因（需給、感情）がポジティブな方向転換を示唆。"
+    # 弱気ロジック
+    else: # ショート
+        if rsi < 40 and macd_hist < 0:
+            logic_comment = f"弱気のモメンタム ({rsi:.1f}) とトレンド勢い ({macd_hist:.4f}) が一致。戻り売りのチャンス。"
+        elif rsi > 60 and macd_hist < 0:
+            logic_comment = f"一時的な買われすぎ ({rsi:.1f}) が発生中だが、トレンド勢い ({macd_hist:.4f}) は弱気転換を維持。下落期待。"
+        else:
+            logic_comment = "複合的な要因（需給、感情）がネガティブな方向転換を示唆。"
+            
+    # 価格の整形
+    current_price_str = format_price(signal['price'])
+    entry_str = format_price(signal['entry'])
+    tp1_str = format_price(signal['tp1'])
+    sl_str = format_price(signal['sl'])
 
     return (
         f"{score_icon} **{signal['symbol']} - {side_icon} シグナル発生!** {score_icon}\n"
         f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
         f"-----------------------------------------\n"
-        f"• <b>現在価格</b>: ${format_price(signal['price'])}\n"
+        f"• <b>現在価格</b>: ${current_price_str}\n"
         f"\n"
-        f"🎯 <b>エントリー</b>: **${format_price(signal['entry'])}**\n"
-        f"🟢 <b>利確 (TP1)</b>: **${format_price(signal['tp1'])}**\n"
-        f"🔴 <b>損切 (SL)</b>: **${format_price(signal['sl'])}**\n"
+        f"🎯 <b>取引戦略（15分足ベース）</b>:\n"
+        f"    <b>エントリー</b>: **${entry_str}**\n"
+        f"    <b>利確 (TP1)</b>: **${tp1_str}**\n"
+        f"    <b>損切 (SL)</b>: **${sl_str}**\n"
         f"\n"
-        f"📈 <b>複合分析</b>:\n"
-        f"  - <i>RSI / MACD Hist</i>: {rsi_str} / {macd_hist_str}\n"
-        f"  - <i>ADX (強度) / CCI (過熱)</i>: {adx_str} / {cci_str}\n" 
-        f"• <i>ニュース感情</i>: {sentiment_pct:.1f}% Positive | <i>波形</i>: {signal['wave_phase']}\n"
-        f"• <i>マクロ環境</i>: {vix_status} | {gvix_status} (ソース: {source})\n"
+        f"📈 <b>複合分析: なぜこのシグナルが出たのか？</b>\n"
+        f"  - <i>ロジック解説</i>: **{logic_comment}**\n"
+        f"  - <i>テクニカル詳細</i>: RSI: {rsi:.1f} / MACD Hist: {macd_hist:.4f} / ADX: {adx:.1f}\n" 
+        f"  - <i>波形/感情</i>: {signal['wave_phase']} / 感情: {sentiment_pct:.1f}% Positive\n"
+        f"  - <i>マクロ環境</i>: {vix_status} | {gvix_status} (ソース: {source})\n"
         f"\n"
-        f"💰 <b>取引示唆</b>:\n"
-        f"  - <b>推奨ロット</b>: {lot_size}\n"
-        f"  - <b>推奨アクション</b>: {action}\n"
-        f"<b>【BOTの判断】: 取引計画に基づきエントリーを検討してください。</b>"
+        f"💰 <b>推奨アクション</b>:\n"
+        f"  - <b>推奨ロット</b>: **{lot_size}**\n"
+        f"  - <b>推奨事項</b>: 取引計画に基づき、リスクを管理しながら検討してください。\n"
+        f"<b>【BOTの判断】: 明確なトレンド発生の可能性あり。</b>"
     )
 
 # ====================================================================================
-# FASTAPI WEB SERVER SETUP (UNCHANGED FROM v8.9.2)
+# FASTAPI WEB SERVER SETUP
 # ====================================================================================
 
 app = FastAPI()
@@ -708,7 +725,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始"""
-    logging.info("Starting Apex BOT Web Service (v8.9.3 - Final Stability Release)...")
+    logging.info("Starting Apex BOT Web Service (v8.9.4 - Final Stability Release)...")
     initialize_ccxt_client()
 
     port = int(os.environ.get("PORT", 8000))
@@ -734,7 +751,7 @@ async def read_root(request: Request):
     
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v8.9.3 (Final Stability Release)",
+        "service": "Apex BOT v8.9.4 (Final Stability Release)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
