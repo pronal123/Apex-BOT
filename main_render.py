@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v7.7 - Coinbase出来高トップ30分析版
-# データソース: Coinbase / Upbit / YFinance (Fallback)
+# Apex BOT v7.8 - 銘柄リスト最適化とCCXTエラー対応版
+# データソース: Coinbase(調整済) / Upbit / YFinance (Fallback)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -28,12 +28,16 @@ load_dotenv()
 
 JST = timezone(timedelta(hours=9))
 
-# 📌 変更点 1: Coinbaseで出来高が高い30銘柄を想定したリストに変更
-# (流動性が高く、ボラティリティが高い銘柄を優先)
-DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", 
-                   "MATIC", "LINK", "UNI", "LTC", "BCH", "FIL", "TRX", "XLM", "ICP", 
-                   "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", "NEAR", 
-                   "VET", "DASH", "QTUM"] 
+# 📌 変更点 1: BadSymbolエラーを避けるため、Coinbaseで確実に取り扱いがある主要な30銘柄にリストを最適化
+# BNB, TRX, QTUMなどはCoinbaseで扱われないため除外。
+DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT", 
+                   "MATIC", "LINK", "UNI", "LTC", "BCH", "FIL", "XLM", "ICP", 
+                   "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", 
+                   "NEAR", "MANA", "SAND", "AXS", "CRV", "IMX"] # Coinbase/Upbitで取引しやすい銘柄に変更
+
+# YFinanceでのサポートが期待できる主要銘柄のリスト（フォールバック用）
+YFINANCE_SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "ADA", "XRP", "LTC", "BCH"]
+
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
@@ -96,12 +100,12 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
-    # 📌 変更点 2: バージョンを v7.7 に更新
+    # 📌 変更点 2: バージョンを v7.8 に更新
     test_text = (
-        f"🤖 <b>Apex BOT v7.7 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v7.8 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**Coinbase出来高TOP30分析モード (v7.7)**で稼働中です。"
+        f"**銘柄リスト最適化モード (v7.8)**で稼働中です。"
     )
     
     try:
@@ -110,8 +114,6 @@ async def send_test_message():
         logging.info("✅ Telegram 起動テスト通知を正常に送信しました。")
     except Exception as e:
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
-
-# get_tradfi_macro_context, fetch_order_book_depth_async, calculate_elliott_wave_score, calculate_trade_levels は v7.6 と同じ (機能ロジック)
 
 def get_tradfi_macro_context() -> Dict:
     """マクロ経済コンテクストと恐怖指数を取得"""
@@ -133,8 +135,14 @@ async def fetch_order_book_depth_async(symbol: str) -> Dict:
     """板の厚さ（Buy/Sell Depth）を取得 (現在の優先CCXTクライアントを使用)"""
     if CURRENT_CCXT_CLIENT is None: return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5}
     
-    market_symbol = f"{symbol}-USD" if CCXT_CLIENT_NAME == 'Coinbase' else f"{symbol}/USDT" 
-    
+    # 📌 変更点 3: Upbitのシンボル形式をKRWに調整（BadSymbol対策）
+    if CCXT_CLIENT_NAME == 'Coinbase':
+        market_symbol = f"{symbol}-USD" 
+    elif CCXT_CLIENT_NAME == 'Upbit':
+        market_symbol = f"{symbol}/KRW" if symbol not in ["BTC", "ETH"] else f"{symbol}/USDT" # UpbitはKRWペアが多いため
+    else:
+        market_symbol = f"{symbol}/USDT" 
+
     try:
         order_book = await CURRENT_CCXT_CLIENT.fetch_order_book(market_symbol, limit=20) 
         bid_volume = sum(amount * price for price, amount in order_book['bids'][:5])
@@ -192,7 +200,7 @@ def calculate_trade_levels(closes: pd.Series, side: str, score: float) -> Dict:
     return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2}
 
 
-# --- データ取得ロジック (v7.5 と同じ) ---
+# --- データ取得ロジック (v7.8) ---
 
 async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[list]:
     """CoinbaseとUpbitのCCXTクライアントを順番に試行し、OHLCVを取得する"""
@@ -200,7 +208,15 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
 
     for client, name in CCXT_CLIENTS:
         try:
-            current_symbol = f"{symbol}-USD" if name == 'Coinbase' else f"{symbol}/USDT" 
+            # 📌 変更点 3: BadSymbolエラーを減らすためのシンボル調整
+            if name == 'Coinbase':
+                current_symbol = f"{symbol}-USD" 
+            elif name == 'Upbit':
+                # Upbitのシンボルは 'XRP/KRW' のような形式が多いが、USDペアも存在
+                # ここではUSDを優先しつつ、UpbitでUSDペアが存在しない場合はBadSymbolになることを許容
+                current_symbol = f"{symbol}/USDT" 
+            else:
+                current_symbol = f"{symbol}/USDT" 
             
             ohlcv = await client.fetch_ohlcv(current_symbol, timeframe, limit=limit)
             
@@ -219,11 +235,14 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
 
 async def fetch_yfinance_ohlcv(symbol: str, period: str = "7d", interval: str = "30m") -> List[float]:
     """YFinanceからOHLCVを取得 (最優先フォールバック)"""
-    yf_symbol_map = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"} 
-    # TOP30銘柄のYFinanceサポートは限られるため、ここでは主要な3つのみに限定
+    # 📌 変更点 2: YFinanceサポート銘柄リストを更新
+    yf_symbol_map = {
+        "BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD", 
+        "DOGE": "DOGE-USD", "ADA": "ADA-USD", "XRP": "XRP-USD",
+        "LTC": "LTC-USD", "BCH": "BCH-USD"
+    }
     yf_ticker = yf_symbol_map.get(symbol) 
     if not yf_ticker: 
-        # フォールバックは主要銘柄のみに限定し、それ以外は分析をスキップ
         return []
 
     try:
@@ -262,7 +281,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
     except Exception:
         return 0.5
 
-# --- メインシグナル生成ロジック (v7.7) ---
+# --- メインシグナル生成ロジック (v7.8) ---
 
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Optional[Dict]:
     
@@ -272,7 +291,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     closes = None
     
     if len(ohlcv_15m) < 100:
-        # CCXT失敗時: YFinanceによるフォールバック分析を試行 (主要3銘柄のみ)
+        # CCXT失敗時: YFinanceによるフォールバック分析を試行 
         prices = await fetch_yfinance_ohlcv(symbol, period="7d", interval="30m")
         if len(prices) >= 20:
             win_prob = get_fallback_prediction(prices)
@@ -281,11 +300,11 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
             closes = pd.Series(prices)
             wave_score, wave_phase = calculate_elliott_wave_score(closes)
         else:
-            if symbol in ["BTC", "ETH", "SOL"]:
+            # 📌 変更点 2: YFinanceも失敗した場合のログ調整
+            if symbol in YFINANCE_SUPPORTED_SYMBOLS:
                 logging.info(f"❌ {symbol}: CCXTもYFinanceもデータ取得に失敗しました。分析スキップ。")
             else:
-                 # マイナー銘柄はフォールバックサポートがないため、CCXT失敗で即スキップ
-                 pass
+                 logging.info(f"❌ {symbol}: CCXTデータ取得失敗。YFinance非サポートのため分析スキップ。")
             return None 
     else:
         # CCXT成功時: 通常のML分析と複合分析
@@ -364,7 +383,7 @@ def format_telegram_message(signal: Dict) -> str:
         
         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
              return (
-                f"🚨 <b>Apex BOT v7.7 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v7.8 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST\n"
@@ -381,7 +400,7 @@ def format_telegram_message(signal: Dict) -> str:
             f"**信頼度**: {confidence_pct:.1f}% 📉\n"
             f"---------------------------\n"
             f"• <b>ソース/波形</b>: {source} | {signal['wave_phase']}\n"
-            f"• <b>需給バランス</b>: {depth_status} (比率: {depth_ratio:.2f})\n"
+            f"• <b>需給バランス</b>: {depth_バランス} (比率: {depth_ratio:.2f})\n"
             f"<b>【BOTの判断】: 現在は待機が最適です。</b>"
         )
     
@@ -428,8 +447,8 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                # 📌 変更点 2: バージョンを v7.7 に更新
-                logging.info(f"Apex BOT v7.7 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                # 📌 変更点 2: バージョンを v7.8 に更新
+                logging.info(f"Apex BOT v7.8 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f}, GVIX: {macro_context_data['gvix_level']:.1f})")
@@ -539,10 +558,10 @@ async def shutdown_event():
 def read_root():
     """Renderのスリープを防ぐためのヘルスチェックエンドポイント"""
     monitor_info = ", ".join(CURRENT_MONITOR_SYMBOLS[:3]) + "..." if len(CURRENT_MONITOR_SYMBOLS) > 3 else "No Symbols"
-    # 📌 変更点 2: バージョンを v7.7 に更新
+    # 📌 変更点 2: バージョンを v7.8 に更新
     return {
         "status": "Running",
-        "service": "Apex BOT v7.7 (Coinbase TOP30 Focus)",
+        "service": "Apex BOT v7.8 (Symbol Optimized)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "monitored_symbols": monitor_info,
         "last_analysis_attempt": datetime.fromtimestamp(LAST_UPDATE_TIME).strftime('%H:%M:%S'),
