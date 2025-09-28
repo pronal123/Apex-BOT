@@ -35,12 +35,12 @@ YFINANCE_SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "ADA", "XRP", "LTC", 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-LOOP_INTERVAL = 45      # メイン分析ループ間隔 (45秒)
+LOOP_INTERVAL = 60      # 📌 v8.9.2 修正: メイン分析ループ間隔を45秒から60秒に延長
 DYNAMIC_UPDATE_INTERVAL = 600 # マクロ分析/銘柄更新間隔 (10分)
 REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (0.5秒)
 PING_TIMEOUT = 30       # Pingタイムアウトを30秒に維持
-PING_INTERVAL = 30      # Renderのアイドル対策としてPing間隔を30秒に短縮
-MIN_SLEEP_AFTER_IO = 0.005 # 📌 v8.9.1 修正: IO解放のための最小スリープ時間
+PING_INTERVAL = 15      # 📌 v8.9.2 修正: Ping間隔を30秒から15秒に短縮
+MIN_SLEEP_AFTER_IO = 0.005 # IO解放のための最小スリープ時間
 
 # ログ設定
 logging.basicConfig(level=logging.INFO,
