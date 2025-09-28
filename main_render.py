@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v8.9.4 - 詳細分析 & Render耐久性統合版 (完全版)
+# Apex BOT v8.9.5 - 安定化 & 詳細分析統合版 (完全版)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -32,20 +32,17 @@ JST = timezone(timedelta(hours=9))
 # 📌 初期監視対象銘柄リスト 
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 
-YFINANCE_SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "ADA", "XRP", "LTC", "BCH"]
-
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v8.9.4 設定: Render耐久性強化 + 詳細分析
+# 📌 v8.9.5 設定: Render耐久性強化 + Telegram安定化
 LOOP_INTERVAL = 60      # メイン分析ループ間隔 (秒)
 PING_INTERVAL = 15      # 自己Ping間隔 (秒)
-# ----------------------------------------------------------------------
-
 DYNAMIC_UPDATE_INTERVAL = 600 # マクロ分析/銘柄更新間隔 (10分)
-REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (0.5秒)
+REQUEST_DELAY = 0.7     # 💥 修正: CCXTリクエスト間の遅延を増加 (0.5 -> 0.7秒)
 PING_TIMEOUT = 30       # Pingタイムアウト
 MIN_SLEEP_AFTER_IO = 0.005 # IO解放のための最小スリープ時間
+# ----------------------------------------------------------------------
 
 # ログ設定
 logging.basicConfig(level=logging.INFO,
@@ -91,11 +88,11 @@ def initialize_ccxt_client():
 
 
 async def send_test_message():
-    """起動テスト通知 (v8.9.4に更新)"""
+    """起動テスト通知 (v8.9.5に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v8.9.4 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v8.9.5 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: 詳細な分析ロジック解説を通知に統合しました。Render耐久性設定も維持。</b>"
+        f"<b>機能強化: Render安定化 (I/O遅延増加) とTelegram通知形式の安定化を適用。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -122,23 +119,20 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         response.raise_for_status()
         logging.info(f"✅ Telegram通知成功。Response Status: {response.status_code}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
-
+        logging.error(f"❌ Telegram送信エラーが発生しました: {type(e).__name__}: {e}") # エラータイプもログに出力
 
 # ====================================================================================
-# CORE ANALYSIS FUNCTIONS
+# CORE ANALYSIS FUNCTIONS (UNCHANGED)
 # ====================================================================================
 
 def get_tradfi_macro_context() -> Dict:
     """伝統的金融市場（VIXなど）からマクロ環境のコンテクストを取得（ブロッキング関数）"""
     context = {"trend": "不明", "vix_level": 0.0, "gvix_level": 0.0}
     try:
-        # VIXを取得
         vix = yf.Ticker("^VIX").history(period="1d", interval="1h")
         if not vix.empty:
             context["vix_level"] = vix['Close'].iloc[-1]
             context["trend"] = "中立" if context["vix_level"] < 20 else "リスクオフ (VIX高)"
-        # 仮想通貨ボラティリティ指数はダミー
         context["gvix_level"] = random.uniform(40, 60)
     except Exception:
         pass
@@ -497,7 +491,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v8.9.4 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v8.9.5 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -578,7 +572,7 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
             
 def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形 (v8.9.4: 詳細なロジック解説を統合)"""
+    """シグナルデータからTelegram通知メッセージを整形 (v8.9.5: 中立メッセージのHTMLを最小化して安定化)"""
     
     # --- 共通情報の抽出 ---
     vix_level = signal['macro_context']['vix_level']
@@ -609,15 +603,15 @@ def format_telegram_message(signal: Dict) -> str:
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             return (
-                f"🚨 <b>Apex BOT v8.9.4 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v8.9.5 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
                 f"• **データソース**: {CCXT_CLIENT_NAME} が現在メイン (エラー時即時切替)。"
             )
 
-        # 通常の中立（レンジ相場）メッセージ 
-        confidence_pct = signal['confidence'] * 200 # 中立シグナルの「確信度」
+        # 通常の中立（レンジ相場）メッセージ (💥 HTMLタグを最小化して安定化)
+        confidence_pct = signal['confidence'] * 200
         
         # 需給バランスの判断
         if depth_ratio > 0.53: depth_status = "買い圧力優勢 (注意)"
@@ -627,33 +621,33 @@ def format_telegram_message(signal: Dict) -> str:
         # テクニカル状況の解説を強化
         tech_comment = ""
         if adx < 20 and 48 < rsi < 52 and abs(macd_hist) < 0.0003:
-             tech_comment = "**レンジ確信:** トレンド、モメンタム、勢いの全てが完全に停滞。"
+             tech_comment = "レンジ確信: トレンド、モメンタム、勢いの全てが完全に停滞。"
         elif adx < 25 and 40 < rsi < 60:
-             tech_comment = "トレンド強度が弱く、モメンタムも中立圏。方向性転換待ち。"
+             tech_comment = "トレンド弱く、モメンタム中立圏。方向性転換待ち。"
         else:
              tech_comment = "指標は中立付近で混乱中。明確なシグナル待ち。"
 
         return (
-            f"⏸️ <b>{signal['symbol']} - 市場状況: レンジ相場 (詳細分析)</b> 🔎\n"
+            f"⏸️ <b>{signal['symbol']} - 市場状況: レンジ相場</b> 🔎\n"
             f"<i>最終分析時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n"
             f"-------------------------------------------\n"
             f"<b>📊 レンジ相場の根拠</b>\n"
-            f"• <b>波形フェーズ</b>: **{signal['wave_phase']}** (確信度 {confidence_pct:.1f}%)\n"
-            f"• <b>トレンド強度 (ADX)</b>: {adx:.1f} (目標値: <25)\n"
-            f"• <b>モメンタム (RSI)</b>: {rsi:.1f} (目標値: 40-60)\n"
-            f"• <b>トレンド勢い (MACD Hist)</b>: {macd_hist:.4f} (目標値: ≈0)\n"
-            f"   → <i>結論</i>: {tech_comment}\n"
+            f"• 波形フェーズ: {signal['wave_phase']} (確信度 {confidence_pct:.1f}%)\n"
+            f"• トレンド強度 (ADX): {adx:.1f} (基準: <25)\n"
+            f"• モメンタム (RSI): {rsi:.1f} (基準: 40-60)\n"
+            f"• トレンド勢い (MACD Hist): {macd_hist:.4f} (基準: ≈0)\n"
+            f"   → <b>結論: {tech_comment}</b>\n" # 結論部分のみ太字を維持
             f"\n"
             f"<b>⚖️ 需給・感情・マクロ環境</b>\n"
-            f"• <b>オーダーブック深度</b>: {depth_status} (比率: {depth_ratio:.2f})\n"
-            f"• <b>ニュース感情</b>: {sentiment_pct:.1f}% Positive\n"
-            f"• <b>マクロ環境</b>: {signal['macro_context']['trend']} ({vix_status} / {gvix_status})\n"
+            f"• オーダーブック深度: {depth_status} (比率: {depth_ratio:.2f})\n"
+            f"• ニュース感情: {sentiment_pct:.1f}% Positive\n"
+            f"• マクロ環境: {signal['macro_context']['trend']} ({vix_status} / {gvix_status})\n"
             f"\n"
             f"<b>💡 BOTの推奨アクション: 待機</b>\n"
-            f"不確実なレンジ相場での損失リスクを避けるため、次の推進波シグナルが出るまで取引を見送ることを強く推奨します。"
+            f"不確実なレンジ相場を避け、次の推進波シグナルが出るまで取引を見送ることを強く推奨します。"
         )
 
-    # --- 2. トレードシグナル通知 (詳細解説追加) ---
+    # --- 2. トレードシグナル通知 (詳細解説維持) ---
     score = signal['score']
     side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
     side_text = signal['side']
@@ -725,7 +719,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始"""
-    logging.info("Starting Apex BOT Web Service (v8.9.4 - Final Stability Release)...")
+    logging.info("Starting Apex BOT Web Service (v8.9.5 - Final Stability Release)...")
     initialize_ccxt_client()
 
     port = int(os.environ.get("PORT", 8000))
@@ -751,7 +745,7 @@ async def read_root(request: Request):
     
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v8.9.4 (Final Stability Release)",
+        "service": "Apex BOT v8.9.5 (Final Stability Release)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
