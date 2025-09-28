@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v7.41 - ログエラー修正 & 無料枠耐久設定の再デプロイ
+# Apex BOT v7.50 - Web Service無料枠耐久・レート制限回避
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,30 +37,32 @@ YFINANCE_SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "ADA", "XRP", "LTC", 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-LOOP_INTERVAL = 60       
-DYNAMIC_UPDATE_INTERVAL = 300 
+LOOP_INTERVAL = 60      # メイン分析ループ間隔 (60秒)
+DYNAMIC_UPDATE_INTERVAL = 300 # マクロ分析/ログ更新間隔 (5分)
 REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (0.5秒)
 
-# 📌 修正1: ロギングフォーマットの修正
+# 📌 ログ設定: ノイズ抑制を維持
 logging.basicConfig(level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s', # <- ]を)に修正
+                    format='%(asctime)s - %(levelname)s - %(message)s', 
                     force=True)
 
-# CCXT/urllib3のログノイズを抑制
 logging.getLogger('ccxt').setLevel(logging.WARNING) 
 logging.getLogger('urllib3').setLevel(logging.WARNING) 
 
-# グローバル状態変数 (変更なし)
+# グローバル状態変数
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
 CCXT_CLIENT_NAMES: List[str] = []
 CCXT_CLIENT_NAME: str = 'Initializing' 
 LAST_UPDATE_TIME: float = 0.0 
-CURRENT_MONITOR_SYMBOLS: List[str] = []
+CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS
+# 1時間ロックを維持 (3600秒)
 NOTIFIED_SYMBOLS: Dict[str, float] = {} 
+# 中立/死活通知の30分ロックを維持 (1800秒)
 NEUTRAL_NOTIFIED_TIME: float = 0 
 LAST_SUCCESS_TIME: float = 0.0
 TOTAL_ANALYSIS_ATTEMPTS: int = 0
 TOTAL_ANALYSIS_ERRORS: int = 0
+CURRENT_CLIENT_INDEX: int = 0 # 📌 クライアントローテーション用インデックス
 
 # ====================================================================================
 #                             UTILITIES & CLIENTS
@@ -70,13 +72,14 @@ def initialize_ccxt_client():
     """CCXTクライアントを初期化"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, CCXT_CLIENT_NAME
     
+    # timeout: ネットワーク安定性の低い無料枠向けに長めに設定
     client_cb = ccxt_async.coinbase({"enableRateLimit": True, "timeout": 20000, 
                                         "options": {"defaultType": "spot", "fetchTicker": "public"}})
     client_upbit = ccxt_async.upbit({"enableRateLimit": True, "timeout": 20000})
 
     CCXT_CLIENTS_DICT = {'Coinbase': client_cb, 'Upbit': client_upbit}
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
-    CCXT_CLIENT_NAME = 'Coinbase'
+    CCXT_CLIENT_NAME = CCXT_CLIENT_NAMES[0] # 初期値は一つ目
 
 def send_telegram_html(text: str, is_emergency: bool = False):
     """同期的なTelegram通知関数"""
@@ -99,11 +102,11 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
 
 async def send_test_message():
-    """起動テスト通知"""
+    """起動テスト通知 (v7.50に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v7.41 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v7.50 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"**無料枠耐久**を試みます (遅延 {REQUEST_DELAY}秒, 自己Ping有効)。"
+        f"**無料枠耐久**を試みます (遅延 {REQUEST_DELAY}秒, クライアントローテーション有効)。"
     )
     
     try:
@@ -113,7 +116,7 @@ async def send_test_message():
     except Exception as e:
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
 
-# 📌 修正2: 欠落していたユーティリティ関数を再挿入
+# --- ユーティリティ関数（変更なし） ---
 
 def get_tradfi_macro_context() -> Dict:
     """マクロ経済コンテクストと恐怖指数を取得"""
@@ -123,9 +126,7 @@ def get_tradfi_macro_context() -> Dict:
         if not vix.empty:
             context["vix_level"] = vix['Close'].iloc[-1]
             context["trend"] = "中立" if context["vix_level"] < 20 else "リスクオフ (VIX高)"
-        
         context["gvix_level"] = random.uniform(40, 60)
-        
     except Exception:
         pass
     return context
@@ -133,20 +134,17 @@ def get_tradfi_macro_context() -> Dict:
 def calculate_elliott_wave_score(closes: pd.Series) -> Tuple[float, str]:
     """エリオット波動の段階を簡易的に推定する"""
     if len(closes) < 50: return 0.0, "不明"
-    
     volatility = closes.pct_change().std()
     recent_trend_strength = closes.iloc[-1] / closes.iloc[-20:].mean() - 1
-    
     if volatility < 0.005 and abs(recent_trend_strength) < 0.01:
-        wave_score = 0.2 
+        wave_score = 0.2  
         wave_phase = "修正波 (レンジ)"
     elif abs(recent_trend_strength) > 0.05 and volatility > 0.01:
-        wave_score = 0.8 
+        wave_score = 0.8  
         wave_phase = "推進波 (トレンド)"
     else:
         wave_score = random.uniform(0.3, 0.7)
         wave_phase = "移行期"
-        
     return wave_score, wave_phase
 
 def calculate_trade_levels(closes: pd.Series, side: str, score: float) -> Dict:
@@ -154,22 +152,19 @@ def calculate_trade_levels(closes: pd.Series, side: str, score: float) -> Dict:
     if len(closes) < 20:
         current_price = closes.iloc[-1]
         return {"entry": current_price, "sl": current_price, "tp1": current_price, "tp2": current_price}
-        
     current_price = closes.iloc[-1]
-    volatility_range = closes.diff().abs().std() * 2 
-    multiplier = 1.0 + score * 0.5 
-    
+    volatility_range = closes.diff().abs().std() * 2  
+    multiplier = 1.0 + score * 0.5  
     if side == "ロング":
-        entry = current_price * 0.9995 
-        sl = current_price - (volatility_range * 1.0) 
+        entry = current_price * 0.9995  
+        sl = current_price - (volatility_range * 1.0)  
         tp1 = current_price + (volatility_range * 1.5 * multiplier)
         tp2 = current_price + (volatility_range * 3.0 * multiplier)
     else: 
-        entry = current_price * 1.0005 
-        sl = current_price + (volatility_range * 1.0) 
-        tp1 = current_price - (volatility_range * 1.5 * multiplier) 
-        tp2 = current_price - (volatility_range * 3.0 * multiplier) 
-        
+        entry = current_price * 1.0005  
+        sl = current_price + (volatility_range * 1.0)  
+        tp1 = current_price - (volatility_range * 1.5 * multiplier)  
+        tp2 = current_price - (volatility_range * 3.0 * multiplier)  
     return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2}
 
 async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: str, limit: int) -> Tuple[List[list], str]:
@@ -190,15 +185,14 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
     for market_symbol in trial_symbols:
         try:
             await asyncio.sleep(REQUEST_DELAY) # 📌 遅延を適用 (0.5s)
-            
             ohlcv = await client.fetch_ohlcv(market_symbol, timeframe, limit=limit)
-            
             if ohlcv and len(ohlcv) >= limit:
                 return ohlcv, "Success"
                 
         except ccxt_async.RateLimitExceeded:
-            logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) データ取得エラー: RateLimitExceeded。処理を中断。")
-            return [], "RateLimitExceeded"
+            # RateLimitExceededの場合、このシンボル/クライアントでの試行を中断
+            logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) RateLimitExceeded。この銘柄をスキップ。")
+            return [], "RateLimitExceeded" 
             
         except ccxt_async.BadSymbol:
             logging.debug(f"ℹ️ CCXT ({client_name}, {market_symbol}) BadSymbol。次のペアを試行。")
@@ -217,6 +211,7 @@ async def fetch_order_book_depth_async(symbol: str) -> Dict:
     client = CCXT_CLIENTS_DICT.get(CCXT_CLIENT_NAME)
     if client is None: return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5}
     
+    # 選択されている現在のクライアントを使用
     market_symbol = f"{symbol}-USD" if CCXT_CLIENT_NAME == 'Coinbase' else f"{symbol}/USDT" 
 
     try:
@@ -245,6 +240,7 @@ async def fetch_yfinance_ohlcv(symbol: str, period: str = "7d", interval: str = 
 
     try:
         loop = asyncio.get_event_loop()
+        # 同期関数を非同期で実行
         data = await loop.run_in_executor(None, 
             lambda: yf.Ticker(yf_ticker).history(period=period, interval=interval)
         )
@@ -260,7 +256,6 @@ def get_fallback_prediction(prices: List[float]) -> float:
     short_ma = prices_series.rolling(window=7).mean().iloc[-1]
     long_ma = prices_series.rolling(window=20).mean().iloc[-1]
     deviation = (short_ma - long_ma) / long_ma
-    
     if deviation > 0.01:
         return 0.5 + min(deviation, 0.05) * 5 
     elif deviation < -0.01:
@@ -400,7 +395,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
             "source": source,
             "tech_data": tech_data} 
 
-# --- 稼働時間維持のための自己Ping関数 (変更なし) ---
+# --- 稼働時間維持のための自己Ping関数 (改良) ---
 
 async def self_ping_task(interval: int = 55):
     """
@@ -415,7 +410,7 @@ async def self_ping_task(interval: int = 55):
 
     logging.info(f"🟢 自己Pingタスクを開始します (インターバル: {interval}秒)。URL: {render_url}")
     
-    if not render_url.startswith('https://'):
+    if not render_url.startswith('http'):
         render_url = f"https://{render_url}"
 
     while True:
@@ -423,55 +418,59 @@ async def self_ping_task(interval: int = 55):
         try:
             # GET / にアクセス
             response = requests.get(render_url, timeout=5)
+            response.raise_for_status() # 200以外のステータスコードでエラーを発生させる
+            logging.debug(f"Self-ping successful. Status: {response.status_code}") # 成功はdebugレベル
             
         except requests.exceptions.RequestException as e:
-            logging.debug(f"Self-ping failed: {e}. Retrying.")
+            # 📌 エラーをログに出力し、プロセスを維持
+            logging.error(f"❌ Self-ping failed: {type(e).__name__}: {e}. Retrying.")
         except asyncio.CancelledError:
             break
 
-# --- main_loop (変更なし) ---
+# --- main_loop (クライアントローテーションを実装) ---
 
 async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
     global LAST_SUCCESS_TIME, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS
-    global CCXT_CLIENT_NAME
+    global CCXT_CLIENT_NAME, CURRENT_CLIENT_INDEX
     
     loop = asyncio.get_event_loop()
     
     # 起動時の初期化
     macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
-    CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS 
     LAST_UPDATE_TIME = time.time()
     await send_test_message() 
     
+    # 自己Pingをタスクとして開始
     asyncio.create_task(self_ping_task(interval=55)) 
-    
-    current_client_index = 0 
     
     while True:
         try:
             current_time = time.time()
             
-            # --- 負荷分散: クライアント切り替え ---
-            current_client_name = CCXT_CLIENT_NAMES[current_client_index % len(CCXT_CLIENT_NAMES)]
+            # 📌 負荷分散: クライアント切り替えロジック
+            current_client_name = CCXT_CLIENT_NAMES[CURRENT_CLIENT_INDEX % len(CCXT_CLIENT_NAMES)]
             CCXT_CLIENT_NAME = current_client_name 
             
             # --- 動的更新フェーズ (5分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v7.41 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v7.50 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f}, GVIX: {macro_context_data['gvix_level']:.1f})")
                 LAST_UPDATE_TIME = current_time
                 logging.info(f"優先データソース: {CCXT_CLIENT_NAME} (非同期並列処理, 遅延: {REQUEST_DELAY}s)")
                 logging.info("--------------------------------------------------")
-            
+            else:
+                logging.info(f"🔍 分析開始 (データソース: {CCXT_CLIENT_NAME}, インデックス: {CURRENT_CLIENT_INDEX})")
+
             # --- メイン分析実行 (60秒ごと) ---
             candidate_tasks = [generate_signal_candidate(sym, macro_context_data, CCXT_CLIENT_NAME) 
                                for sym in CURRENT_MONITOR_SYMBOLS]
             candidates = await asyncio.gather(*candidate_tasks)
             
-            current_client_index += 1
+            # 📌 クライアントインデックスをインクリメント（次のループで別クライアントを使用）
+            CURRENT_CLIENT_INDEX += 1
 
             # 統計情報を更新
             TOTAL_ANALYSIS_ATTEMPTS += len(CURRENT_MONITOR_SYMBOLS)
@@ -506,6 +505,7 @@ async def main_loop():
                 logging.info("⚠️ 30分間隔の強制通知時間になりました。")
                 
                 final_signal_data = None
+                # 分析統計情報を追加（死活監視に役立てる）
                 analysis_stats = {"attempts": TOTAL_ANALYSIS_ATTEMPTS, "errors": TOTAL_ANALYSIS_ERRORS, "last_success": LAST_SUCCESS_TIME}
                 
                 if neutral_candidates:
@@ -532,7 +532,7 @@ async def main_loop():
             # 5. ロギング（シグナルも中立通知も行わなかった場合）
             elif not valid_candidates:
                 if neutral_candidates:
-                     logging.info(f"🔒 30分ロック中 (残り: {max(0, 1800 - time_since_last_neutral):.0f}s)。")
+                    logging.info(f"🔒 30分ロック中 (残り: {max(0, 1800 - time_since_last_neutral):.0f}s)。")
 
             await asyncio.sleep(LOOP_INTERVAL)
             
@@ -544,7 +544,7 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
 
 
-# --- Telegram Message Format (バージョン表記を v7.41 に更新) ---
+# --- Telegram Message Format (v7.50に更新) ---
 def format_telegram_message(signal: Dict) -> str:
     """Telegramメッセージのフォーマット"""
     
@@ -564,25 +564,26 @@ def format_telegram_message(signal: Dict) -> str:
     
     if signal['side'] == "Neutral":
         
-         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
-             return (
-                f"🚨 <b>Apex BOT v7.41 - 死活監視 (システム正常)</b> 🟢\n"
+          if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
+              error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
+              return (
+                f"🚨 <b>Apex BOT v7.50 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
-                f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST\n"
+                f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
                 f"• **データソース**: {CCXT_CLIENT_NAME} が現在メイン (非同期処理)。"
             )
-         
-         tech_data = signal.get('tech_data', {})
-         rsi_str = f"RSI: {tech_data.get('rsi', 50):.1f}"
-         macd_hist_str = f"MACD Hist: {tech_data.get('macd_hist', 0):.4f}"
+          
+          tech_data = signal.get('tech_data', {})
+          rsi_str = f"RSI: {tech_data.get('rsi', 50):.1f}"
+          macd_hist_str = f"MACD Hist: {tech_data.get('macd_hist', 0):.4f}"
 
-         source = "YFinance (簡易分析)" if is_fallback else CCXT_CLIENT_NAME
-         depth_ratio = signal.get('depth_ratio', 0.5)
-         depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
-         confidence_pct = signal['confidence'] * 200 
-         
-         return (
+          source = "YFinance (簡易分析)" if is_fallback else CCXT_CLIENT_NAME
+          depth_ratio = signal.get('depth_ratio', 0.5)
+          depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
+          confidence_pct = signal['confidence'] * 200 
+          
+          return (
             f"⚠️ <b>市場分析速報: {signal['regime']} (中立)</b> ⏸️\n"
             f"**信頼度**: {confidence_pct:.1f}% 📉\n"
             f"---------------------------\n"
@@ -640,14 +641,14 @@ def format_telegram_message(signal: Dict) -> str:
     )
 
 # ------------------------------------------------------------------------------------
-# FASTAPI WEB SERVER SETUP (バージョン表記を v7.41 に更新)
+# FASTAPI WEB SERVER SETUP (v7.50に更新)
 # ------------------------------------------------------------------------------------
 
 app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("Starting Apex BOT Web Service (v7.41 - Free Tier Endurance)...")
+    logging.info("Starting Apex BOT Web Service (v7.50 - Free Tier Endurance)...")
     initialize_ccxt_client() 
     
     port = int(os.environ.get("PORT", 8000))
@@ -667,9 +668,14 @@ def read_root():
     monitor_info = ", ".join(CURRENT_MONITOR_SYMBOLS[:3]) + "..." if len(CURRENT_MONITOR_SYMBOLS) > 3 else "No Symbols"
     return {
         "status": "Running",
-        "service": "Apex BOT v7.41 (Free Tier Endurance)",
+        "service": "Apex BOT v7.50 (Free Tier Endurance)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "monitored_symbols": monitor_info,
         "analysis_interval_s": LOOP_INTERVAL,
-        "last_analysis_attempt": datetime.fromtimestamp(LAST_UPDATE_TIME).strftime('%H:%M:%S'),
+        "last_analysis_attempt": datetime.fromtimestamp(LAST_UPDATE_TIME).strftime('%H:%M:%S') if LAST_UPDATE_TIME > 0 else "N/A",
+        "next_client": CCXT_CLIENT_NAMES[(CURRENT_CLIENT_INDEX + 1) % len(CCXT_CLIENT_NAMES)]
     }
+
+# FastAPIのエントリポイント（通常、Procfileからuvicorn経由で呼び出されます）
+# if __name__ == "__main__":
+#     uvicorn.run(app, host="0.0.0.0", port=8000)
