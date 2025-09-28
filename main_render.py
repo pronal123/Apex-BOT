@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v7.6 - Telegram通知デザイン強化＆可視化版
-# データソース: Coinbase / Upbit / YFinance (Fallback, CoinGecko完全排除)
+# Apex BOT v7.7 - Coinbase出来高トップ30分析版
+# データソース: Coinbase / Upbit / YFinance (Fallback)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -27,7 +27,13 @@ load_dotenv()
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
-DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL"] 
+
+# 📌 変更点 1: Coinbaseで出来高が高い30銘柄を想定したリストに変更
+# (流動性が高く、ボラティリティが高い銘柄を優先)
+DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", 
+                   "MATIC", "LINK", "UNI", "LTC", "BCH", "FIL", "TRX", "XLM", "ICP", 
+                   "ETC", "AAVE", "MKR", "ATOM", "EOS", "ALGO", "ZEC", "COMP", "NEAR", 
+                   "VET", "DASH", "QTUM"] 
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
@@ -90,11 +96,12 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 async def send_test_message():
     """BOT起動時のセルフテスト通知"""
+    # 📌 変更点 2: バージョンを v7.7 に更新
     test_text = (
-        f"🤖 <b>Apex BOT v7.6 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v7.7 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"Render環境でのWebサービス起動に成功しました。\n"
-        f"**通知デザイン強化モード (v7.6)**で稼働中です。"
+        f"**Coinbase出来高TOP30分析モード (v7.7)**で稼働中です。"
     )
     
     try:
@@ -104,7 +111,7 @@ async def send_test_message():
     except Exception as e:
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
 
-# get_tradfi_macro_context, fetch_order_book_depth_async, calculate_elliott_wave_score, calculate_trade_levels は v7.5 と同じ (機能ロジック)
+# get_tradfi_macro_context, fetch_order_book_depth_async, calculate_elliott_wave_score, calculate_trade_levels は v7.6 と同じ (機能ロジック)
 
 def get_tradfi_macro_context() -> Dict:
     """マクロ経済コンテクストと恐怖指数を取得"""
@@ -167,7 +174,6 @@ def calculate_trade_levels(closes: pd.Series, side: str, score: float) -> Dict:
         return {"entry": current_price, "sl": current_price, "tp1": current_price, "tp2": current_price}
         
     current_price = closes.iloc[-1]
-    # 簡易ボラティリティ指標として、過去10期間の終値の変動幅の標準偏差の2倍をATRと近似
     volatility_range = closes.diff().abs().std() * 2 
     
     multiplier = 1.0 + score * 0.5 
@@ -213,9 +219,12 @@ async def fetch_ohlcv_async(symbol: str, timeframe: str, limit: int) -> List[lis
 
 async def fetch_yfinance_ohlcv(symbol: str, period: str = "7d", interval: str = "30m") -> List[float]:
     """YFinanceからOHLCVを取得 (最優先フォールバック)"""
-    yf_symbol_map = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"}
-    yf_ticker = yf_symbol_map.get(symbol)
-    if not yf_ticker: return []
+    yf_symbol_map = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD"} 
+    # TOP30銘柄のYFinanceサポートは限られるため、ここでは主要な3つのみに限定
+    yf_ticker = yf_symbol_map.get(symbol) 
+    if not yf_ticker: 
+        # フォールバックは主要銘柄のみに限定し、それ以外は分析をスキップ
+        return []
 
     try:
         loop = asyncio.get_event_loop()
@@ -225,7 +234,6 @@ async def fetch_yfinance_ohlcv(symbol: str, period: str = "7d", interval: str = 
         if data.empty: raise Exception("YFデータが空です")
         return data['Close'].tolist()
     except Exception as e:
-        # このログが CoinGecko の 429 エラーのログと混ざるのを防ぐため、より詳細なログを出力
         logging.warning(f"❌ YFinance ({symbol}) データ取得失敗（フォールバック）: {e}") 
         return []
 
@@ -254,7 +262,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> float:
     except Exception:
         return 0.5
 
-# --- メインシグナル生成ロジック (v7.6: ロジックはv7.5と同じ) ---
+# --- メインシグナル生成ロジック (v7.7) ---
 
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Optional[Dict]:
     
@@ -264,6 +272,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
     closes = None
     
     if len(ohlcv_15m) < 100:
+        # CCXT失敗時: YFinanceによるフォールバック分析を試行 (主要3銘柄のみ)
         prices = await fetch_yfinance_ohlcv(symbol, period="7d", interval="30m")
         if len(prices) >= 20:
             win_prob = get_fallback_prediction(prices)
@@ -272,8 +281,14 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
             closes = pd.Series(prices)
             wave_score, wave_phase = calculate_elliott_wave_score(closes)
         else:
+            if symbol in ["BTC", "ETH", "SOL"]:
+                logging.info(f"❌ {symbol}: CCXTもYFinanceもデータ取得に失敗しました。分析スキップ。")
+            else:
+                 # マイナー銘柄はフォールバックサポートがないため、CCXT失敗で即スキップ
+                 pass
             return None 
     else:
+        # CCXT成功時: 通常のML分析と複合分析
         sentiment = {"oi_change_24h": 0} 
         win_prob = get_ml_prediction(ohlcv_15m, sentiment)
         closes = pd.Series([c[4] for c in ohlcv_15m])
@@ -323,6 +338,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict) -> Op
             "source": source}
 
 
+# format_telegram_message は v7.6 と同じ (デザインは維持)
 def format_telegram_message(signal: Dict) -> str:
     """Telegramメッセージのフォーマット (v7.6: デザイン強化)"""
     
@@ -348,7 +364,7 @@ def format_telegram_message(signal: Dict) -> str:
         
         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
              return (
-                f"🚨 <b>Apex BOT v7.6 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v7.7 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST\n"
@@ -358,7 +374,7 @@ def format_telegram_message(signal: Dict) -> str:
         source = "YFinance (簡易分析)" if is_fallback else CCXT_CLIENT_NAME
         depth_ratio = signal.get('depth_ratio', 0.5)
         depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
-        confidence_pct = signal['confidence'] * 200 # 0.5からの乖離を200倍してパーセンテージに
+        confidence_pct = signal['confidence'] * 200 
 
         return (
             f"⚠️ <b>市場分析速報: {signal['regime']} (中立)</b> ⏸️\n"
@@ -391,7 +407,7 @@ def format_telegram_message(signal: Dict) -> str:
         f"<b>【推奨】: 取引計画に基づきエントリーを検討してください。</b>"
     )
 
-# --- main_loop (v7.5 と同じ) ---
+# --- main_loop ---
 
 async def main_loop():
     global LAST_UPDATE_TIME, CURRENT_MONITOR_SYMBOLS, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
@@ -400,6 +416,7 @@ async def main_loop():
     loop = asyncio.get_event_loop()
     
     macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
+    # 📌 変更点 1 の適用
     CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS 
     LAST_UPDATE_TIME = time.time()
     await send_test_message() 
@@ -411,7 +428,8 @@ async def main_loop():
             # --- 動的更新フェーズ (5分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v7.6 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                # 📌 変更点 2: バージョンを v7.7 に更新
+                logging.info(f"Apex BOT v7.7 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 logging.info(f"マクロ経済コンテクスト: {macro_context_data['trend']} (VIX: {macro_context_data['vix_level']:.1f}, GVIX: {macro_context_data['gvix_level']:.1f})")
@@ -520,10 +538,12 @@ async def shutdown_event():
 @app.get("/")
 def read_root():
     """Renderのスリープを防ぐためのヘルスチェックエンドポイント"""
-    monitor_info = CURRENT_MONITOR_SYMBOLS[0] if CURRENT_MONITOR_SYMBOLS else "No Symbols"
+    monitor_info = ", ".join(CURRENT_MONITOR_SYMBOLS[:3]) + "..." if len(CURRENT_MONITOR_SYMBOLS) > 3 else "No Symbols"
+    # 📌 変更点 2: バージョンを v7.7 に更新
     return {
         "status": "Running",
-        "service": "Apex BOT v7.6 (Visual Design)",
+        "service": "Apex BOT v7.7 (Coinbase TOP30 Focus)",
         "monitoring_base": CCXT_CLIENT_NAME,
+        "monitored_symbols": monitor_info,
         "last_analysis_attempt": datetime.fromtimestamp(LAST_UPDATE_TIME).strftime('%H:%M:%S'),
     }
