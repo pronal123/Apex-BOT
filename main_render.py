@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v9.1.2 - 定義順序修正・堅牢性強化版
+# Apex BOT v9.1.3 - 最終構文修正版
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -36,7 +36,7 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v9.1.2 設定
+# 📌 v9.1.3 設定
 LOOP_INTERVAL = 60      
 PING_INTERVAL = 8       
 PING_TIMEOUT = 12       
@@ -128,11 +128,11 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
 
 async def send_test_message():
-    """起動テスト通知 (v9.1.2に更新)"""
+    """起動テスト通知 (v9.1.3に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.2 - 起動テスト通知 (エラー修正版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.3 - 起動テスト通知 (構文エラー修正版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: 致命的なNameError（定義順序エラー）を最終修正しました。</b>"
+        f"<b>機能強化: 致命的なSyntaxError (文字列フォーマットミス) を修正しました。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -225,7 +225,7 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             return (
-                f"🚨 <b>Apex BOT v9.1.2 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.1.3 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -275,7 +275,8 @@ def format_telegram_message(signal: Dict) -> str:
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"\n"
         f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
-        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1']}</code>**\n"
+        # 💡 L278: 修正箇所: format_price(signal['tp1'])} に修正
+        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1'])}</code>**\n" 
         f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
         f"\n"
         f"📈 <b>複合分析詳細</b>:\n"
@@ -418,7 +419,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
         return 0.5, {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
 # -----------------------------------------------------------------------------------
-# CCXT WRAPPER FUNCTIONS (v9.1.2 調整)
+# CCXT WRAPPER FUNCTIONS (v9.1.3 調整)
 # -----------------------------------------------------------------------------------
 
 def _aggregate_ohlcv(ohlcv_source: List[list], target_timeframe: str) -> List[list]:
@@ -755,7 +756,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v9.1.2 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v9.1.3 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await asyncio.to_thread(get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -828,7 +829,7 @@ app = FastAPI()
 @app.get("/")
 async def health_check(request: Request):
     """FastAPIのデフォルトエンドポイントを維持"""
-    return {"status": "ok", "message": "Apex BOT v9.1.2 is running."}
+    return {"status": "ok", "message": "Apex BOT v9.1.3 is running."}
 
 @app.get("/status")
 async def get_status():
@@ -852,7 +853,7 @@ async def startup_event():
     """アプリケーション起動時に初期化とメインループタスクを開始"""
     initialize_ccxt_client()
     asyncio.create_task(main_loop())
-    logging.info("🚀 Apex BOT v9.1.2 Startup Complete.")
+    logging.info("🚀 Apex BOT v9.1.3 Startup Complete.")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get('PORT', 8080)))
