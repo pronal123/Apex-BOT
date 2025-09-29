@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v10.1.0 - 代替時間足戦略 & 視覚化強化版
-# 変更点: Coinbase等の4h足データ不足に対応するため、長期分析を1h足400本で代替。
+# Apex BOT v10.2.0 - Coinbase 長期データ除外戦略 & クライアントヘルス強化版
+# 変更点: Coinbase利用時は長期データ(long)の取得をスキップし、短期・中期のみで分析を行う。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -36,14 +36,14 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v10.1.0 時間軸設定 - 代替足戦略
+# 📌 v10.2.0 時間軸設定 - 代替足戦略 (1h 400本を基本とする)
 TIMEFRAMES = {
     "short": '15m', # 短期: エントリータイミング、モメンタム
     "mid": '1h',    # 中期: 主要トレンド、波形フェーズ
-    "long": '1h'    # ✅ 4hデータ不足対策として、長期分析用に1h足を使用
+    "long": '1h'    # ✅ 長期: 4hデータ不足対策として、1h足を使用
 }
 
-# 📌 v10.1.0 期間設定 - 時間軸ごとに設定
+# 📌 v10.2.0 期間設定 - 時間軸ごとに設定
 OHLCV_LIMIT: Dict[str, int] = {
     "short": 100,  # 15分 * 100本 = 25時間 (短期目線)
     "mid": 100,    # 1時間 * 100本 = 100時間 (中期目線)
@@ -106,15 +106,16 @@ def initialize_ccxt_client():
 
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
+    # 初期ヘルスは全クライアントを同等に設定
     ACTIVE_CLIENT_HEALTH = {name: time.time() for name in CCXT_CLIENT_NAMES}
 
 
 async def send_test_message():
-    """起動テスト通知 (v10.1.0に更新)"""
+    """起動テスト通知 (v10.2.0に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v10.1.0 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v10.2.0 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>戦略強化: Coinbase 4hデータ不足対策 (長期分析を1h足400本で代替) を導入しました。</b>"
+        f"<b>戦略強化: Coinbase利用時は長期データ(long)をスキップするロジックを実装しました。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -190,11 +191,14 @@ def calculate_trade_levels(closes: pd.Series, side: str, score: float, adx_level
     # 長期方向とのアライメントによるSL/TP調整 (v10.0.0 維持)
     long_term_alignment_boost = 1.0
     sl_factor_adjustment = 1.0
-    if (side == "ロング" and long_term_direction == "ロング") or \
-       (side == "ショート" and long_term_direction == "ショート"):
-        long_term_alignment_boost = 1.15 # TP拡大
-        sl_factor_adjustment = 0.85 # SLを少し広げる (ノイズ耐性)
     
+    # long_term_direction が '不明' でない場合にのみ調整を行う
+    if long_term_direction != "不明":
+        if (side == "ロング" and long_term_direction == "ロング") or \
+           (side == "ショート" and long_term_direction == "ショート"):
+            long_term_alignment_boost = 1.15 # TP拡大
+            sl_factor_adjustment = 0.85 # SLを少し広げる (ノイズ耐性)
+        
     multiplier *= long_term_alignment_boost 
     
     if side == "ロング":
@@ -242,8 +246,6 @@ def calculate_technical_indicators(ohlcv: List[list]) -> Dict:
     highs = pd.Series([c[2] for c in ohlcv])
     lows = pd.Series([c[3] for c in ohlcv])
     
-    # 必要なデータ長が時間軸によって異なるため、最小データ長は設定しない。
-    # ただし、計算のために一定の長さ(例: 50)は必要。
     if len(closes) < 50:
          return {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
@@ -311,7 +313,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
 
 
 # -----------------------------------------------------------------------------------
-# CCXT WRAPPER FUNCTIONS (v10.1.0 修正)
+# CCXT WRAPPER FUNCTIONS (v10.2.0 修正)
 # -----------------------------------------------------------------------------------
 
 async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: str, limit: int) -> Tuple[List[list], str]:
@@ -325,11 +327,11 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
     for market_symbol in trial_symbols:
         try:
             await asyncio.sleep(REQUEST_DELAY) 
-            # 📌 limit引数にOHLCV_LIMIT辞書の値を使用
             ohlcv = await client.fetch_ohlcv(market_symbol, timeframe, limit=limit)
             await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
             if ohlcv and len(ohlcv) >= limit:
                 global ACTIVE_CLIENT_HEALTH
+                # 成功時、ヘルスを最新に更新
                 ACTIVE_CLIENT_HEALTH[client_name] = time.time() 
                 return ohlcv, "Success"
         except ccxt_async.RateLimitExceeded:
@@ -344,21 +346,37 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
 
 
 async def fetch_ohlcv_multiple_timeframes(client_name: str, symbol: str) -> Tuple[Dict[str, List[list]], str]:
-    """複数の時間軸のOHLCVデータを取得する（v10.1.0 修正）"""
+    """複数の時間軸のOHLCVデータを取得する（v10.2.0 修正）"""
     ohlcv_data: Dict[str, List[list]] = {}
     
     for tf_key, timeframe in TIMEFRAMES.items():
-        # 📌 OHLCV_LIMITを辞書から取得
+        # 📌 v10.2.0: Coinbase利用時は長期分析をスキップ
+        if client_name == 'Coinbase' and tf_key == 'long':
+            logging.info(f"ℹ️ {symbol}: Coinbase利用のため、長期分析 ({timeframe}) のデータ取得をスキップします。")
+            continue
+            
         limit = OHLCV_LIMIT.get(tf_key, 100)
         ohlcv, status = await fetch_ohlcv_single_client(client_name, symbol, timeframe, limit)
+        
         if status in ["RateLimit", "Timeout"]:
             # ひとつでもレート制限が出たら即座に切り替えを要求
             return ohlcv_data, status
+            
         if status == "NoData":
-            # 取得できなかった時間軸と本数をログ出力
             logging.warning(f"⚠️ {symbol} の {timeframe} データ（{limit}本）が不足しています。スキップします。")
+            
+            # 🚨 NEW v10.2.0: 長期足（'long'）のデータ不足は重大なエラーとして扱い、クライアント切り替えを促す
+            if tf_key == 'long':
+                 logging.error(f"❌ {client_name} - {symbol} の長期データ取得失敗。クライアント切り替え要求。")
+                 # この新しいステータスコードを返して、メインループでペナルティを与える
+                 return ohlcv_data, "LongDataMissing" 
             continue
+            
         ohlcv_data[tf_key] = ohlcv
+        
+    # 長期をスキップした場合は、データが一つ少ない状態で PartialSuccess を返す
+    if client_name == 'Coinbase' and len(ohlcv_data) == len(TIMEFRAMES) - 1:
+        return ohlcv_data, "PartialSuccess_Coinbase"
         
     if len(ohlcv_data) < len(TIMEFRAMES):
         return ohlcv_data, "PartialData"
@@ -392,34 +410,43 @@ async def fetch_order_book_depth_async(symbol: str) -> Dict:
         return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5, "total_depth": 0}
 
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
-    """多時間軸分析を実行し、シグナル候補を生成（v10.0.0 維持）"""
+    """多時間軸分析を実行し、シグナル候補を生成（v10.2.0 修正）"""
     
     sentiment_data = get_news_sentiment(symbol)
     
     # 1. 多時間軸OHLCVデータの取得 (Async I/O)
     ohlcv_all, ccxt_status = await fetch_ohlcv_multiple_timeframes(client_name, symbol)
 
-    if ccxt_status in ["RateLimit", "Timeout"]:
+    if ccxt_status in ["RateLimit", "Timeout", "LongDataMissing"]:
+        # エラーをメインループに報告
         return {"symbol": symbol, "side": ccxt_status, "score": 0.0, "client": client_name}
-    if ccxt_status != "Success":
-        # データが不完全な場合、スキップ
+        
+    # Coinbaseの長期スキップ、またはその他のPartialDataの場合
+    if ccxt_status not in ["Success", "PartialSuccess_Coinbase"]:
         return None 
 
     # 2. 短期 (15m) 分析 - エントリータイミング/モメンタム
-    ohlcv_short = ohlcv_all['short']
+    ohlcv_short = ohlcv_all.get('short')
+    if not ohlcv_short: return None # 短期データがなければ分析不可
     win_prob_short, tech_data_short = get_ml_prediction(ohlcv_short, sentiment_data)
     closes_short = pd.Series([c[4] for c in ohlcv_short])
     adx_short = tech_data_short.get('adx', 25)
     
     # 3. 中期 (1h) 分析 - メジャートレンド/波形
-    ohlcv_mid = ohlcv_all['mid']
+    ohlcv_mid = ohlcv_all.get('mid')
+    if not ohlcv_mid: return None # 中期データがなければ分析不可
     win_prob_mid, tech_data_mid = get_ml_prediction(ohlcv_mid, sentiment_data)
     closes_mid = pd.Series([c[4] for c in ohlcv_mid])
     wave_score_mid, wave_phase_mid = calculate_elliott_wave_score(closes_mid)
     
     # 4. 長期 (1h, 400本) 分析 - 全体的な方向性
-    ohlcv_long = ohlcv_all['long']
-    win_prob_long, tech_data_long = get_ml_prediction(ohlcv_long, sentiment_data)
+    long_direction = "不明" # デフォルト値
+    win_prob_long = 0.5 # デフォルト値
+    
+    ohlcv_long = ohlcv_all.get('long')
+    if ohlcv_long: # 長期データが存在する場合のみ計算
+        win_prob_long, _ = get_ml_prediction(ohlcv_long, sentiment_data)
+        long_direction = "ロング" if win_prob_long >= 0.5 else "ショート"
     
     # 5. オーダーブック深度 (Async I/O)
     depth_data = await fetch_order_book_depth_async(symbol) 
@@ -431,16 +458,16 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     if 0.47 < win_prob_short < 0.53:
         confidence = abs(win_prob_short - 0.5)
         regime = "レンジ相場" if adx_short < 25 else "移行期"
-        # 中立の場合は短期データと中期・長期の方向性のみを返す
+        
         return {"symbol": symbol, "side": "Neutral", "confidence": confidence, "regime": regime,
                 "macro_context": macro_context_data, "is_fallback": False,
                 "depth_ratio": depth_data['depth_ratio'], "total_depth": depth_data['total_depth'],
                 "short_data": tech_data_short, 
                 "mid_direction": "ロング" if win_prob_mid >= 0.5 else "ショート",
-                "long_direction": "ロング" if win_prob_long >= 0.5 else "ショート",
+                "long_direction": long_direction, # 長期が不明でもそのまま返す
                 "wave_phase": wave_phase_mid}
         
-    # --- トレードシグナル判定とスコアリング (v10.0.0 維持) ---
+    # --- トレードシグナル判定とスコアリング ---
     
     # 1. 基本スコア (短期予測に基づく)
     base_score = abs(win_prob_short - 0.5) * 2 
@@ -448,14 +475,14 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     # 2. 時間軸アライメントブースト
     alignment_boost = 0.0
     mid_direction = "ロング" if win_prob_mid >= 0.5 else "ショート"
-    long_direction = "ロング" if win_prob_long >= 0.5 else "ショート"
     
-    # 中期・長期の方向性と一致していれば大きくブースト
+    # 中期は必ずデータがあるためチェック
     if mid_direction == side: alignment_boost += 0.15 
-    if long_direction == side: alignment_boost += 0.15 
     
-    # 長期トレンドと逆行する場合、ペナルティ
-    if long_direction != side: alignment_boost -= 0.10
+    # 長期データが存在する場合のみアライメントボーナス/ペナルティを適用
+    if long_direction != "不明":
+        if long_direction == side: alignment_boost += 0.15 
+        else: alignment_boost -= 0.10 # 長期トレンドと逆行する場合、ペナルティ
     
     # 3. 流動性/深度調整 
     depth_adjustment = 0.0
@@ -471,7 +498,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     # 5. 最終スコア算出
     final_score = np.clip((base_score + alignment_boost + depth_adjustment + macro_boost), 0.0, 1.0)
     
-    # 6. トレードレベル計算 (長期方向性も渡す)
+    # 6. トレードレベル計算
     trade_levels = calculate_trade_levels(closes_short, side, final_score, adx_short, long_direction)
 
     return {"symbol": symbol, "side": side, "price": closes_short.iloc[-1], "score": final_score,
@@ -483,13 +510,13 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
             "vix_level": macro_context_data['vix_level'], "macro_context": macro_context_data,
             "short_data": tech_data_short, 
             "mid_direction": mid_direction,
-            "long_direction": long_direction,
+            "long_direction": long_direction, # '不明' の可能性あり
             "wave_phase": wave_phase_mid
             }
 
 
 # -----------------------------------------------------------------------------------
-# TELEGRAM FORMATTING (v10.0.0 維持)
+# TELEGRAM FORMATTING (v10.2.0 修正)
 # -----------------------------------------------------------------------------------
 
 def get_direction_icon(direction: str, current_side: str) -> str:
@@ -497,10 +524,13 @@ def get_direction_icon(direction: str, current_side: str) -> str:
     icon_map = {
         "ロング": "⬆️",
         "ショート": "⬇️",
+        "不明": "❓", # NEW
         "ニュートラル": "➖"
     }
     
-    if direction == current_side:
+    if direction == "不明":
+        return f"⚪️ {icon_map.get(direction, '❓')} <b>{direction}</b>" # '不明' は白で表示
+    elif direction == current_side:
         # 一致: 緑
         return f"🟢 {icon_map.get(direction, '➖')} <b>{direction}</b>"
     elif direction != current_side and direction != "ニュートラル":
@@ -534,7 +564,7 @@ def format_instant_message(symbol: str, side: str, change_pct: float, window_min
     )
 
 def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形（v10.0.0 維持）"""
+    """シグナルデータからTelegram通知メッセージを整形（v10.2.0 修正）"""
     
     # 共通情報の取得
     tech_data_short = signal.get('short_data', {})
@@ -561,7 +591,7 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             return (
-                f"🚨 <b>Apex BOT v10.1.0 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v10.2.0 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -571,7 +601,8 @@ def format_telegram_message(signal: Dict) -> str:
         # 通常の中立分析結果 
         confidence_pct = signal['confidence'] * 200
         mid_dir_str = get_direction_icon(signal['mid_direction'], "ニュートラル")
-        long_dir_str = get_direction_icon(signal['long_direction'], "ニュートラル")
+        long_dir = signal.get('long_direction', '不明')
+        long_dir_str = get_direction_icon(long_dir, "ニュートラル")
 
         return (
             f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
@@ -579,7 +610,7 @@ def format_telegram_message(signal: Dict) -> str:
             f"---------------------------\n"
             f"<b>⏱️ 時間軸アライメント (現在の方向性なし)</b>\n"
             f"• <b>中期 ({TIMEFRAMES['mid']})</b>: {mid_dir_str}\n"
-            f"• <b>長期 ({TIMEFRAMES['long']}) ({OHLCV_LIMIT['long']}本)</b>: {long_dir_str}\n"
+            f"• <b>長期 ({TIMEFRAMES['long']}) ({OHLCV_LIMIT['long']}本)</b>: {long_dir_str}\n" # long_dirが不明の可能性あり
             f"---------------------------\n"
             f"• <b>市場環境/レジーム</b>: {signal['regime']} (短期ADX: {adx_short}) | {macro_trend}\n"
             f"• <b>流動性/需給</b>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
@@ -603,16 +634,24 @@ def format_telegram_message(signal: Dict) -> str:
     
     # 時間軸アライメントの文字列を生成 
     mid_dir_str = get_direction_icon(signal['mid_direction'], side)
-    long_dir_str = get_direction_icon(signal['long_direction'], side)
+    long_dir = signal.get('long_direction', '不明')
+    long_dir_str = get_direction_icon(long_dir, side)
+
+    # 長期データ取得元の表示 (Coinbaseは取得本数が少ないため注意喚起)
+    long_data_note = ""
+    if signal['source'] == 'Coinbase' and long_dir == '不明':
+        long_data_note = " (Coinbase: 長期データ取得スキップ)"
+    elif long_dir != '不明':
+        long_data_note = f" ({OHLCV_LIMIT['long']}本)"
 
     return (
         f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
         f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
         f"-----------------------------------------\n"
-        f"<b>⏱️ 時間軸アライメント</b>\n"
+        f"<b>⏱️ 時間軸アライメント (ソース: {signal['source']})</b>\n"
         f"• <b>短期 ({TIMEFRAMES['short']})</b>: 🟢 ⬆️/⬇️ <b>{side}</b>\n"
         f"• <b>中期 ({TIMEFRAMES['mid']})</b>: {mid_dir_str}\n"
-        f"• <b>長期 ({TIMEFRAMES['long']}) ({OHLCV_LIMIT['long']}本)</b>: {long_dir_str}\n"
+        f"• <b>長期 ({TIMEFRAMES['long']})</b>: {long_dir_str}{long_data_note}\n"
         f"-----------------------------------------\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"\n"
@@ -781,7 +820,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v10.1.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v10.2.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -796,10 +835,13 @@ async def main_loop():
             candidates = await asyncio.gather(*candidate_tasks)
 
             # --- エラーハンドリングとクライアント切り替え ---
-            rate_limit_error_found = any(isinstance(c, dict) and c.get('side') in ["RateLimit", "Timeout"] for c in candidates)
+            # RateLimit, Timeout, LongDataMissing のいずれかが含まれるかチェック
+            error_statuses = ["RateLimit", "Timeout", "LongDataMissing"]
+            rate_limit_error_found = any(isinstance(c, dict) and c.get('side') in error_statuses for c in candidates)
+            
             if rate_limit_error_found:
-                penalized_time = time.time() - 3600
-                logging.error(f"❌ レート制限/タイムアウトエラー発生: クライアント {CCXT_CLIENT_NAME} のヘルスを {penalized_time:.0f} にリセット。")
+                penalized_time = time.time() - 3600 # 1時間のペナルティ
+                logging.error(f"❌ {CCXT_CLIENT_NAME}でデータ取得エラー発生 (RateLimit/Timeout/LongDataMissing)。ヘルスをペナルティ値 {penalized_time:.0f} にリセット。")
                 ACTIVE_CLIENT_HEALTH[CCXT_CLIENT_NAME] = penalized_time
                 next_client = max(ACTIVE_CLIENT_HEALTH, key=ACTIVE_CLIENT_HEALTH.get, default=CCXT_CLIENT_NAMES[0])
                 logging.info(f"➡️ 即時クライアント切り替え：次回は {next_client} を優先試行。")
@@ -807,7 +849,7 @@ async def main_loop():
                 continue 
 
             # --- シグナル選定と通知 ---
-            valid_candidates_and_neutral = [c for c in candidates if c is not None and c.get('side') not in ["RateLimit", "Timeout"]]
+            valid_candidates_and_neutral = [c for c in candidates if c is not None and c.get('side') not in error_statuses]
             success_count = len(valid_candidates_and_neutral)
             
             TOTAL_ANALYSIS_ATTEMPTS += len(CURRENT_MONITOR_SYMBOLS)
@@ -838,7 +880,7 @@ async def main_loop():
                 if neutral_candidates:
                     best_neutral = max(neutral_candidates, key=lambda c: c['confidence'])
                     mid_dir = best_neutral.get('mid_direction', 'ニュートラル')
-                    long_dir = best_neutral.get('long_direction', 'ニュートラル')
+                    long_dir = best_neutral.get('long_direction', '不明')
                     final_signal_data = {**best_neutral, 'analysis_stats': analysis_stats,
                                          "mid_direction": mid_dir, "long_direction": long_dir}
                 else:
@@ -847,7 +889,7 @@ async def main_loop():
                         "regime": "データ不足/レンジ", "is_fallback": True,
                         "macro_context": macro_context_data, "wave_phase": "N/A", "depth_ratio": 0.5, "total_depth": 0,
                         "analysis_stats": analysis_stats, "sentiment_score": 0.5,
-                        "mid_direction": 'ニュートラル', "long_direction": 'ニュートラル'
+                        "mid_direction": 'ニュートラル', "long_direction": '不明'
                     }
                 
                 neutral_msg = format_telegram_message(final_signal_data)
@@ -873,7 +915,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("Starting Apex BOT Web Service (v10.1.0 - Multi-Timeframe/Alternative Strategy)...")
+    logging.info("Starting Apex BOT Web Service (v10.2.0 - Multi-Timeframe/Coinbase Strategy)...")
     initialize_ccxt_client()
     port = int(os.environ.get("PORT", 8000))
     logging.info(f"Web service attempting to bind to port: {port}")
@@ -894,7 +936,7 @@ async def read_root(request: Request):
     last_health_str = datetime.fromtimestamp(last_health_time).strftime('%H:%M:%S') if last_health_time > 0 else "N/A"
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v10.1.0 (Multi-Timeframe/Alternative Strategy)",
+        "service": "Apex BOT v10.2.0 (Multi-Timeframe/Coinbase Strategy)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
