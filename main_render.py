@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v8.9.5 - Render Ping頻度強化版 (省略なし完全版)
+# Apex BOT v8.9.5 - Telegram表示強化・Render最終安定版
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -35,7 +35,7 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v8.9.5 変更点: Render Ping頻度強化 (Final "Hail Mary" attempt on Render)
+# 📌 v8.9.5 設定: Render Ping頻度強化
 LOOP_INTERVAL = 60      # メイン分析ループ間隔を60秒に維持
 PING_INTERVAL = 8       # 自己Ping間隔を8秒に短縮 (Renderのアイドルタイムアウトを回避するため)
 PING_TIMEOUT = 12       # Pingのタイムアウト時間を12秒に維持
@@ -110,7 +110,7 @@ def send_telegram_html(text: str, is_emergency: bool = False):
     """HTML形式でTelegramにメッセージを送信する（ブロッキング関数）"""
     if 'YOUR' in TELEGRAM_TOKEN:
         # トークンが設定されていない場合のログ出力
-        clean_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "").replace("<pre>", "\n").replace("</pre>", "")
+        clean_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "").replace("<code>", "").replace("</code>", "").replace("\n", " ").replace("•", "").replace("-", "").strip()
         logging.warning("⚠️ TELEGRAM_TOKENが初期値です。ログに出力されます。")
         logging.info("--- TELEGRAM通知（ダミー）---\n" + clean_text)
         return
@@ -130,7 +130,7 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 
 # ====================================================================================
-# CORE ANALYSIS FUNCTIONS (省略なし)
+# CORE ANALYSIS FUNCTIONS
 # ====================================================================================
 
 def get_tradfi_macro_context() -> Dict:
@@ -513,7 +513,7 @@ async def self_ping_task(interval: int = PING_INTERVAL):
 
 
 # ====================================================================================
-# MAIN LOOP & TELEGRAM FORMATTING
+# MAIN LOOP & TELEGRAM FORMATTING (表示強化版)
 # ====================================================================================
 
 async def main_loop():
@@ -631,7 +631,7 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
             
 def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形"""
+    """シグナルデータからTelegram通知メッセージを整形（表示強化版）"""
     
     is_fallback = signal.get('is_fallback', False)
     vix_level = signal['macro_context']['vix_level']
@@ -643,12 +643,14 @@ def format_telegram_message(signal: Dict) -> str:
     last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
 
     def format_price(price):
+        """BTC/ETHは小数点以下2桁、それ以外は4桁でフォーマット"""
         if signal['symbol'] in ["BTC", "ETH"]: return f"{price:,.2f}"
         return f"{price:,.4f}"
 
     # --- 1. 中立/ヘルス通知 ---
     if signal['side'] == "Neutral":
         
+        # システムヘルス通知 (データが不足している場合)
         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             return (
@@ -656,31 +658,34 @@ def format_telegram_message(signal: Dict) -> str:
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
-                f"• **データソース**: {CCXT_CLIENT_NAME} が現在メイン (エラー時即時切替)。"
+                f"• **データソース**: {CCXT_CLIENT_NAME} が現在メイン (エラー時即時切替)。\n"
+                f"<b>【BOTの判断】: データ取得に問題はありませんが、待機中です。</b>"
             )
 
+        # 通常の中立分析結果
         tech_data = signal.get('tech_data', {})
         rsi_str = f"{tech_data.get('rsi', 50):.1f}"
         macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
         adx_str = f"{tech_data.get('adx', 25):.1f}"
         cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
         sentiment_pct = signal.get('sentiment_score', 0.5) * 100
-
-        source = CCXT_CLIENT_NAME
         depth_ratio = signal.get('depth_ratio', 0.5)
         depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
         confidence_pct = signal['confidence'] * 200
 
         return (
-            f"⚠️ <b>市場分析速報: {signal['regime']} (中立)</b> ⏸️\n"
-            f"**信頼度**: {confidence_pct:.1f}% 📉\n"
+            f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
+            f"<b>信頼度: {confidence_pct:.1f}%</b>\n"
             f"---------------------------\n"
-            f"• <b>ソース/波形</b>: {source} | {signal['wave_phase']}\n"
-            f"• <b>需給バランス</b>: {depth_status} (比率: {depth_ratio:.2f})\n"
-            f"• <b>チャート動向</b>: RSI: {rsi_str}, MACD Hist: {macd_hist_str}\n"
-            f"• <b>トレンド強度/過熱</b>: ADX: {adx_str} / CCI: {cci_str}\n" 
-            f"• <b>ニュース感情</b>: {sentiment_pct:.1f}% Positive\n"
-            f"<b>【BOTの判断】: 現在は待機が最適です。</b>"
+            f"• <b>市場コンテクスト</b>: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
+            f"• <b>波形/需給</b>: {signal['wave_phase']} ({signal['regime']}) | {depth_status} (比率: {depth_ratio:.2f})\n"
+            f"\n"
+            f"📊 <b>テクニカル詳細</b>:\n"
+            f"  - <i>RSI (過熱感)</i>: {rsi_str} | <i>CCI (反転指標)</i>: {cci_str}\n"
+            f"  - <i>MACD Hist (モメンタム)</i>: {macd_hist_str} | <i>ADX (強度)</i>: {adx_str}\n" 
+            f"  - <i>ニュース感情</i>: {sentiment_pct:.1f}% Positive (ソース: {CCXT_CLIENT_NAME})\n"
+            f"\n"
+            f"<b>【BOTの判断】: 現在はエントリーせず、様子見が最適です。</b>"
         )
 
     # --- 2. トレードシグナル通知 ---
@@ -688,6 +693,7 @@ def format_telegram_message(signal: Dict) -> str:
     side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
     source = signal.get('source', 'N/A')
 
+    # スコアに基づく推奨ロットとアクション
     if score >= 0.80: 
         score_icon = "🔥🔥🔥"; lot_size = "MAX"; action = "積極的なエントリー"
     elif score >= 0.65: 
@@ -703,22 +709,25 @@ def format_telegram_message(signal: Dict) -> str:
     adx_str = f"{tech_data.get('adx', 25):.1f}"
     cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
     sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+    depth_ratio = signal.get('depth_ratio', 0.5)
+    depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
+
 
     return (
-        f"{score_icon} **{signal['symbol']} - {side_icon} シグナル発生!** {score_icon}\n"
+        f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
         f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
         f"-----------------------------------------\n"
-        f"• <b>現在価格</b>: ${format_price(signal['price'])}\n"
+        f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"\n"
-        f"🎯 <b>エントリー</b>: **${format_price(signal['entry'])}**\n"
-        f"🟢 <b>利確 (TP1)</b>: **${format_price(signal['tp1'])}**\n"
-        f"🔴 <b>損切 (SL)</b>: **${format_price(signal['sl'])}**\n"
+        f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
+        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1'])}</code>**\n"
+        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
         f"\n"
-        f"📈 <b>複合分析</b>:\n"
-        f"  - <i>RSI / MACD Hist</i>: {rsi_str} / {macd_hist_str}\n"
-        f"  - <i>ADX (強度) / CCI (過熱)</i>: {adx_str} / {cci_str}\n" 
-        f"• <i>ニュース感情</i>: {sentiment_pct:.1f}% Positive | <i>波形</i>: {signal['wave_phase']}\n"
-        f"• <i>マクロ環境</i>: {vix_status} | {gvix_status} (ソース: {source})\n"
+        f"📈 <b>複合分析詳細</b>:\n"
+        f"  - <i>トレンド/波形</i>: {signal['wave_phase']} ({signal['regime']}) | ADX (強度): {adx_str}\n"
+        f"  - <i>モメンタム/過熱</i>: RSI: {rsi_str} | MACD Hist: {macd_hist_str} | CCI: {cci_str}\n"
+        f"  - <i>需給/感情</i>: {depth_status} (比率: {depth_ratio:.2f}) | 感情: {sentiment_pct:.1f}% Positive\n"
+        f"  - <i>マクロ環境</i>: {vix_status} | {gvix_status} (ソース: {source})\n"
         f"\n"
         f"💰 <b>取引示唆</b>:\n"
         f"  - <b>推奨ロット</b>: {lot_size}\n"
