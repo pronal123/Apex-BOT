@@ -1,7 +1,5 @@
 # ====================================================================================
-# Apex BOT v10.3.1 - 構文エラー修正 & 長期足 4h 100本への再変更版
-# 変更点: format_telegram_message() 内の f-string 構文エラーを修正。
-#         長期データ取得の安定性を高めるため、TIMEFRAMES['long'] を '4h' 100本に維持。
+# Apex BOT v9.0.0 - 流動性・環境優位性 強化版
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,33 +35,19 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v10.3.1 時間軸設定 - 4h 100本を維持
-TIMEFRAMES = {
-    "short": '15m', # 短期: エントリータイミング、モメンタム
-    "mid": '1h',    # 中期: 主要トレンド、波形フェーズ
-    "long": '4h'    # ✅ 長期: 4h足 100本に維持
-}
-
-# 📌 v10.3.1 期間設定 - 時間軸ごとに設定
-OHLCV_LIMIT: Dict[str, int] = {
-    "short": 100,  
-    "mid": 100,    
-    "long": 100    # 4時間 * 100本 = 400時間 (約2週間分)
-}
-
-# 共通設定 (v9.0.0から維持)
-LOOP_INTERVAL = 60      # メイン分析ループ間隔 (秒)
-PING_INTERVAL = 8       # 自己Ping間隔 (秒)
-PING_TIMEOUT = 12       # Pingのタイムアウト時間 (秒)
+# 📌 v9.0.0 設定
+LOOP_INTERVAL = 60      # メイン分析ループ間隔を60秒に維持
+PING_INTERVAL = 8       # 自己Ping間隔を8秒に維持 (Renderのアイドルタイムアウト回避)
+PING_TIMEOUT = 12       # Pingのタイムアウト時間を12秒に維持
 DYNAMIC_UPDATE_INTERVAL = 600 # マクロ分析/銘柄更新間隔 (10分)
-REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (秒)
-MIN_SLEEP_AFTER_IO = 0.005 # IO解放のための最小スリープ時間 (秒)
+REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (0.5秒)
+MIN_SLEEP_AFTER_IO = 0.005 # IO解放のための最小スリープ時間
 
 # 突発変動検知設定 (v8.9.5から維持)
 INSTANT_CHECK_INTERVAL = 15 # 即時価格チェック間隔（秒）
 MAX_PRICE_DEVIATION_PCT = 1.5 # 15分間の価格変動率の閾値（%）
 INSTANT_CHECK_WINDOW_MIN = 15 # 変動をチェックする期間（分）
-ORDER_BOOK_DEPTH_LEVELS = 10 # オーダーブック分析の深度
+ORDER_BOOK_DEPTH_LEVELS = 10 # 📌 オーダーブック分析の深度を10層に増加 (v9.0.0で強化)
 
 # ログ設定
 logging.basicConfig(level=logging.INFO,
@@ -90,7 +74,7 @@ PRICE_HISTORY: Dict[str, List[Tuple[float, float]]] = {}
 
 
 # ====================================================================================
-# UTILITIES & CLIENTS
+# UTILITIES & CLIENTS (変更なし、一部共通ユーティリティを流用)
 # ====================================================================================
 
 def initialize_ccxt_client():
@@ -107,16 +91,15 @@ def initialize_ccxt_client():
 
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
-    # 初期ヘルスは全クライアントを同等に設定
     ACTIVE_CLIENT_HEALTH = {name: time.time() for name in CCXT_CLIENT_NAMES}
 
 
 async def send_test_message():
-    """起動テスト通知 (v10.3.1に更新)"""
+    """起動テスト通知 (v9.0.0に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v10.3.1 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.0.0 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>戦略調整: 長期データ ($4h$ $100$本) 維持と、前回の構文エラーを修正しました。</b>"
+        f"<b>機能強化: 流動性分析・市場環境適応ロジックを大幅に強化しました。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -147,20 +130,19 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 
 
 # ====================================================================================
-# CORE ANALYSIS FUNCTIONS 
+# CORE ANALYSIS FUNCTIONS (v9.0.0 強化)
 # ====================================================================================
 
 def get_tradfi_macro_context() -> Dict:
     """伝統的金融市場（VIXなど）からマクロ環境のコンテクストを取得（ブロッキング関数）"""
     context = {"trend": "中立", "vix_level": 0.0, "gvix_level": 0.0, "risk_appetite_boost": 0.0}
     try:
-        # VIXの最新データを取得 (ブロッキングI/O)
         vix = yf.Ticker("^VIX").history(period="1d", interval="1h")
         if not vix.empty:
             vix_level = vix['Close'].iloc[-1]
             context["vix_level"] = vix_level
             
-            # VIXに基づくリスクセンチメントの調整
+            # 📌 VIXに基づくリスクセンチメントの調整 (v9.0.0強化)
             if vix_level < 15:
                 context["trend"] = "リスクオン (VIX低)"
                 context["risk_appetite_boost"] = 0.05 # リスクオン環境でロングにボーナス
@@ -172,12 +154,11 @@ def get_tradfi_macro_context() -> Dict:
 
         context["gvix_level"] = random.uniform(40, 60) # 簡易的な仮想通貨ボラティリティ指標
     except Exception:
-        # 取得失敗時はデフォルト値を使用
         pass
     return context
 
-def calculate_trade_levels(closes: pd.Series, side: str, score: float, adx_level: float, long_term_direction: str) -> Dict:
-    """価格データと信頼度スコア、ADX、長期方向からエントリー/決済レベルを計算（v10.0.0 維持）"""
+def calculate_trade_levels(closes: pd.Series, side: str, score: float, adx_level: float) -> Dict:
+    """価格データと信頼度スコア、ADXからエントリー/決済レベルを計算（v9.0.0 強化）"""
     if len(closes) < 20:
         current_price = closes.iloc[-1]
         return {"entry": current_price, "sl": current_price, "tp1": current_price, "tp2": current_price}
@@ -185,39 +166,273 @@ def calculate_trade_levels(closes: pd.Series, side: str, score: float, adx_level
     current_price = closes.iloc[-1]
     volatility_range = closes.diff().abs().std() * 2 
     
-    # ADXに基づくTP/SL幅の動的調整
-    adx_factor = np.clip((adx_level - 20) / 20, 0.5, 1.5) 
+    # 📌 ADXに基づくTP/SL幅の動的調整 (v9.0.0 強化)
+    # ADXが高い（トレンド）ほどTP幅を広げ、SLをタイトに（トレンドフォロー）
+    # ADXが低い（レンジ）ほどTP幅を狭く、SLを広く（レンジ逆張り）
+    adx_factor = np.clip((adx_level - 20) / 20, 0.5, 1.5) # ADX 20で1.0、40で1.5、10で0.5
+    
+    # スコアとADXを統合した最終調整係数
     multiplier = (1.0 + score * 0.5) * adx_factor 
-    
-    # 長期方向とのアライメントによるSL/TP調整 (v10.0.0 維持)
-    long_term_alignment_boost = 1.0
-    sl_factor_adjustment = 1.0
-    
-    # long_term_direction が '不明' でない場合にのみ調整を行う
-    if long_term_direction != "不明":
-        if (side == "ロング" and long_term_direction == "ロング") or \
-           (side == "ショート" and long_term_direction == "ショート"):
-            long_term_alignment_boost = 1.15 # TP拡大
-            sl_factor_adjustment = 0.85 # SLを少し広げる (ノイズ耐性)
-        
-    multiplier *= long_term_alignment_boost 
     
     if side == "ロング":
         entry = current_price * 0.9995 
-        sl_base = current_price - (volatility_range * (2.0 - adx_factor)) 
-        sl = sl_base * (1.0 + (1.0 - sl_factor_adjustment) / 2) # SL調整
+        sl = current_price - (volatility_range * (2.0 - adx_factor)) # レンジではSLを広く
         tp1 = current_price + (volatility_range * 1.5 * multiplier) 
         tp2 = current_price + (volatility_range * 3.0 * multiplier)
     else:
         entry = current_price * 1.0005 
-        sl_base = current_price + (volatility_range * (2.0 - adx_factor))
-        sl = sl_base * (1.0 - (1.0 - sl_factor_adjustment) / 2) # SL調整
+        sl = current_price + (volatility_range * (2.0 - adx_factor))
         tp1 = current_price - (volatility_range * 1.5 * multiplier)
         tp2 = current_price - (volatility_range * 3.0 * multiplier)
         
     return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2}
 
 
+# -----------------------------------------------------------------------------------
+# CCXT WRAPPER FUNCTIONS (v9.0.0 強化)
+# -----------------------------------------------------------------------------------
+
+async def fetch_order_book_depth_async(symbol: str) -> Dict:
+    """オーダーブックの深度を取得し、買い/売り圧の比率を計算（v9.0.0 強化）"""
+    client = CCXT_CLIENTS_DICT.get(CCXT_CLIENT_NAME)
+    if client is None: return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5, "total_depth": 0}
+
+    market_symbol = f"{symbol}/USDT" 
+
+    try:
+        await asyncio.sleep(REQUEST_DELAY)
+        # 深度をORDER_BOOK_DEPTH_LEVELSで定義した層数（10層）まで取得
+        order_book = await client.fetch_order_book(market_symbol, limit=20) 
+        await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
+        
+        # 📌 上位10層のボリュームを加重平均（v9.0.0 強化）
+        # 価格に近い層ほど重み付けを大きくする (価格*量の合計)
+        bid_volume_weighted = sum(amount * price for price, amount in order_book['bids'][:ORDER_BOOK_DEPTH_LEVELS])
+        ask_volume_weighted = sum(amount * price for price, amount in order_book['asks'][:ORDER_BOOK_DEPTH_LEVELS])
+
+        total_volume = bid_volume_weighted + ask_volume_weighted
+        depth_ratio = bid_volume_weighted / total_volume if total_volume > 0 else 0.5
+
+        return {"bid_volume": bid_volume_weighted, "ask_volume": ask_volume_weighted, 
+                "depth_ratio": depth_ratio, "total_depth": total_volume}
+
+    except Exception:
+        return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5, "total_depth": 0}
+
+async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
+    """単一銘柄に対する分析を実行し、シグナル候補を生成（v9.0.0 強化）"""
+    
+    sentiment_data = get_news_sentiment(symbol)
+    ohlcv_15m, ccxt_status = await fetch_ohlcv_single_client(client_name, symbol, '15m', 100)
+
+    if ccxt_status in ["RateLimit", "Timeout"]:
+        return {"symbol": symbol, "side": ccxt_status, "score": 0.0, "client": client_name}
+    if ccxt_status != "Success":
+        return None
+
+    win_prob, tech_data = get_ml_prediction(ohlcv_15m, sentiment_data)
+    closes = pd.Series([c[4] for c in ohlcv_15m])
+    
+    wave_score, wave_phase = calculate_elliott_wave_score(closes)
+    depth_data = await fetch_order_book_depth_async(symbol) 
+    source = client_name
+    adx_level = tech_data.get('adx', 25)
+
+    # --- 中立シグナル判定 ---
+    if 0.47 < win_prob < 0.53:
+        confidence = abs(win_prob - 0.5)
+        regime = "レンジ相場" if adx_level < 25 else "移行期"
+        return {"symbol": symbol, "side": "Neutral", "confidence": confidence, "regime": regime,
+                "macro_context": macro_context_data, "is_fallback": False,
+                "wave_phase": wave_phase, "depth_ratio": depth_data['depth_ratio'],
+                "total_depth": depth_data['total_depth'],
+                "tech_data": tech_data, "sentiment_score": sentiment_data["sentiment_score"]}
+
+    # --- トレードシグナル判定とスコアリング (v9.0.0 強化) ---
+    side = "ロング" if win_prob >= 0.53 else "ショート"
+    
+    # 1. 基本スコア
+    base_score = abs(win_prob - 0.5) * 2 
+    base_score *= (0.8 + wave_score * 0.4) 
+
+    # 2. ADX（トレンド強度）調整
+    if adx_level > 30: 
+        adx_boost = 0.1 # トレンドに乗る
+        regime = "トレンド相場"
+    elif adx_level < 20: 
+        adx_boost = -0.05 # レンジならスコア減点 (予測の難易度上昇)
+        regime = "レンジ相場"
+    else: 
+        adx_boost = 0.0
+        regime = "移行期"
+
+    # 3. センチメント調整 (ニュース感情)
+    sentiment_boost = (sentiment_data["sentiment_score"] - 0.5) * 0.2
+    if side == "ショート": sentiment_boost *= -1 
+
+    # 4. 深度（板の厚み）調整 (v9.0.0 強化: 調整幅を拡大)
+    depth_adjustment = 0.0
+    if side == "ロング":
+        # 買い圧が高ければ（0.5超）ブースト、低ければペナルティ
+        depth_adjustment = (depth_data['depth_ratio'] - 0.5) * 0.4 
+    else:
+        # 売り圧が高ければ（0.5未満）ブースト
+        depth_adjustment = (0.5 - depth_data['depth_ratio']) * 0.4 
+
+    # 5. マクロ環境調整 (v9.0.0 強化)
+    macro_boost = macro_context_data.get('risk_appetite_boost', 0.0)
+    if side == "ショート": macro_boost *= -1 # リスクオンではショートにペナルティ
+
+    # 6. 最終スコア算出
+    final_score = np.clip((base_score + depth_adjustment + adx_boost + sentiment_boost + macro_boost), 0.0, 1.0)
+
+    # 7. トレードレベル計算 (ADX情報も渡す)
+    trade_levels = calculate_trade_levels(closes, side, final_score, adx_level)
+
+    return {"symbol": symbol, "side": side, "price": closes.iloc[-1], "score": final_score,
+            "entry": trade_levels['entry'], "sl": trade_levels['sl'],
+            "tp1": trade_levels['tp1'], "tp2": trade_levels['tp2'],
+            "regime": regime, "is_fallback": False,
+            "wave_phase": wave_phase, "depth_ratio": depth_data['depth_ratio'],
+            "total_depth": depth_data['total_depth'],
+            "vix_level": macro_context_data['vix_level'], "macro_context": macro_context_data,
+            "source": source, "sentiment_score": sentiment_data["sentiment_score"],
+            "tech_data": tech_data}
+
+
+# -----------------------------------------------------------------------------------
+# TELEGRAM FORMATTING (v9.0.0 強化)
+# -----------------------------------------------------------------------------------
+
+def format_telegram_message(signal: Dict) -> str:
+    """シグナルデータからTelegram通知メッセージを整形（v9.0.0 強化）"""
+    
+    # 共通情報の取得
+    vix_level = signal['macro_context']['vix_level']
+    vix_status = f"VIX: {vix_level:.1f}" if vix_level > 0 else "VIX: N/A"
+    macro_trend = signal['macro_context']['trend']
+    tech_data = signal.get('tech_data', {})
+    adx_str = f"{tech_data.get('adx', 25):.1f}"
+    depth_ratio = signal.get('depth_ratio', 0.5)
+    total_depth = signal.get('total_depth', 0)
+    
+    # 流動性ステータス
+    if total_depth > 10000000: # 例: $10M以上
+        liquidity_status = f"非常に厚い (${total_depth/1e6:.1f}M)"
+    elif total_depth > 1000000: # 例: $1M以上
+        liquidity_status = f"厚い (${total_depth/1e6:.1f}M)"
+    else:
+        liquidity_status = f"普通〜薄い (${total_depth/1e6:.1f}M)"
+    
+    depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
+    format_price = lambda p: format_price_utility(p, signal['symbol'])
+    
+    # --- 1. 中立/ヘルス通知 ---
+    if signal['side'] == "Neutral":
+        
+        # システムヘルス通知
+        if signal.get('is_fallback', False):
+            # (ヘルス通知のロジックはv8.9.5から変更なし)
+            stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
+            error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
+            last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
+            return (
+                f"🚨 <b>Apex BOT v9.0.0 - 死活監視 (システム正常)</b> 🟢\n"
+                f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
+                f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
+                f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
+                f"<b>【BOTの判断】: データ取得に問題はありませんが、待機中です。</b>"
+            )
+
+        # 通常の中立分析結果 (v9.0.0 強化)
+        rsi_str = f"{tech_data.get('rsi', 50):.1f}"
+        macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
+        cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
+        sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+        confidence_pct = signal['confidence'] * 200
+
+        return (
+            f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
+            f"<b>信頼度: {confidence_pct:.1f}%</b>\n"
+            f"---------------------------\n"
+            f"• <b>市場環境/レジーム</b>: {signal['regime']} (ADX: {adx_str}) | {macro_trend} ({vix_status})\n"
+            f"• <b>流動性/需給</b>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
+            f"• <b>波形</b>: {signal['wave_phase']}\n"
+            f"\n"
+            f"📊 <b>テクニカル詳細</b>:\n"
+            f"  - <i>RSI/CCI</i>: {rsi_str} / {cci_str} | <i>MACD Hist</i>: {macd_hist_str}\n" 
+            f"  - <i>ニュース感情</i>: {sentiment_pct:.1f}% Positive\n"
+            f"\n"
+            f"<b>【BOTの判断】: 現在はボラティリティが低く、方向性が不鮮明です。様子見推奨。</b>"
+        )
+
+    # --- 2. トレードシグナル通知 ---
+    score = signal['score']
+    side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
+    source = signal.get('source', 'N/A')
+
+    # スコアに基づく推奨ロットとアクション
+    if score >= 0.80: score_icon = "🔥🔥🔥"; lot_size = "MAX"; action = "積極的なエントリー"
+    elif score >= 0.65: score_icon = "🔥🌟"; lot_size = "中〜大"; action = "標準的なエントリー"
+    elif score >= 0.55: score_icon = "✨"; lot_size = "小"; action = "慎重なエントリー"
+    else: score_icon = "🔹"; lot_size = "最小限"; action = "見送りまたは極めて慎重に"
+
+    rsi_str = f"{tech_data.get('rsi', 50):.1f}"
+    macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
+    cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
+    sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+
+    return (
+        f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
+        f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
+        f"-----------------------------------------\n"
+        f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
+        f"\n"
+        f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
+        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1'])}</code>**\n"
+        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
+        f"\n"
+        f"📈 <b>複合分析詳細</b>:\n"
+        f"  - <i>市場レジーム</i>: {signal['regime']} (ADX: {adx_str}) | <i>波形</i>: {signal['wave_phase']}\n"
+        f"  - <i>流動性/需給</i>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
+        f"  - <i>モメンタム/過熱</i>: RSI: {rsi_str} | MACD Hist: {macd_hist_str} | CCI: {cci_str}\n"
+        f"  - <i>マクロ環境</i>: {macro_trend} ({vix_status}) | 感情: {sentiment_pct:.1f}% Positive (ソース: {source})\n"
+        f"\n"
+        f"💰 <b>取引示唆</b>:\n"
+        f"  - <b>推奨ロット</b>: {lot_size}\n"
+        f"  - <b>推奨アクション</b>: {action}\n"
+        f"<b>【BOTの判断】: 取引計画に基づきエントリーを検討してください。</b>"
+    )
+
+# --- (他のタスク関数はv8.9.5から変更なし) ---
+
+async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: str, limit: int) -> Tuple[List[list], str]:
+    """単一のCCXTクライアントからOHLCVデータを取得し、I/O解放スリープを挿入"""
+    client = CCXT_CLIENTS_DICT.get(client_name)
+    if client is None: return [], "NoClient"
+    trial_symbols = [f"{symbol}/USDT"]
+    if client_name == 'Coinbase': trial_symbols.insert(0, f"{symbol}-USD")
+    elif client_name == 'Binance': trial_symbols.append(f"{symbol}/BUSD")
+    for market_symbol in trial_symbols:
+        try:
+            await asyncio.sleep(REQUEST_DELAY) 
+            ohlcv = await client.fetch_ohlcv(market_symbol, timeframe, limit=limit)
+            await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
+            if ohlcv and len(ohlcv) >= limit:
+                global ACTIVE_CLIENT_HEALTH
+                ACTIVE_CLIENT_HEALTH[client_name] = time.time() 
+                return ohlcv, "Success"
+        except ccxt_async.RateLimitExceeded:
+            logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) RateLimitExceeded。即時クライアント切り替え要求。")
+            return [], "RateLimit" 
+        except ccxt_async.RequestTimeout:
+            logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) RequestTimeout。即時クライアント切り替え要求。")
+            return [], "Timeout" 
+        except Exception:
+            continue
+    return [], "NoData"
+
+# ... (中略：get_news_sentiment, calculate_elliott_wave_score, calculate_technical_indicators, get_ml_prediction はv8.9.5から変更なし) ...
 def get_news_sentiment(symbol: str) -> Dict:
     """ニュース感情スコアを取得（実際はAPI利用だが、ここではダミー）"""
     sentiment_score = 0.5
@@ -246,9 +461,8 @@ def calculate_technical_indicators(ohlcv: List[list]) -> Dict:
     closes = pd.Series([c[4] for c in ohlcv])
     highs = pd.Series([c[2] for c in ohlcv])
     lows = pd.Series([c[3] for c in ohlcv])
-    
     if len(closes) < 50:
-         return {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
+        return {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
     # 1. RSI (14)
     delta = closes.diff()
@@ -299,7 +513,6 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
 
         news_sentiment = sentiment.get("sentiment_score", 0.5)
         
-        # 短期予測ロジック (RSI, MACD, ニュース、CCIに基づく簡易ロジック)
         base_prob = 0.5 + ((rsi - 50) / 100) * 0.5 
         cci_boost = np.clip(cci / 500, -0.05, 0.05) * -1 
 
@@ -312,374 +525,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
     except Exception:
         return 0.5, {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
-
-# -----------------------------------------------------------------------------------
-# CCXT WRAPPER FUNCTIONS (v10.3.1 維持)
-# -----------------------------------------------------------------------------------
-
-async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: str, limit: int) -> Tuple[List[list], str]:
-    """単一のCCXTクライアントからOHLCVデータを取得し、I/O解放スリープを挿入"""
-    client = CCXT_CLIENTS_DICT.get(client_name)
-    if client is None: return [], "NoClient"
-    # 複数のシンボル形式を試行
-    trial_symbols = [f"{symbol}/USDT"]
-    if client_name == 'Coinbase': trial_symbols.insert(0, f"{symbol}-USD")
-    elif client_name == 'Binance': trial_symbols.append(f"{symbol}/BUSD")
-    for market_symbol in trial_symbols:
-        try:
-            await asyncio.sleep(REQUEST_DELAY) 
-            ohlcv = await client.fetch_ohlcv(market_symbol, timeframe, limit=limit)
-            await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
-            if ohlcv and len(ohlcv) >= limit:
-                global ACTIVE_CLIENT_HEALTH
-                # 成功時、ヘルスを最新に更新
-                ACTIVE_CLIENT_HEALTH[client_name] = time.time() 
-                return ohlcv, "Success"
-        except ccxt_async.RateLimitExceeded:
-            logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) RateLimitExceeded。即時クライアント切り替え要求。")
-            return [], "RateLimit" 
-        except ccxt_async.RequestTimeout:
-            logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) RequestTimeout。即時クライアント切り替え要求。")
-            return [], "Timeout" 
-        except Exception:
-            continue
-    return [], "NoData"
-
-
-async def fetch_ohlcv_multiple_timeframes(client_name: str, symbol: str) -> Tuple[Dict[str, List[list]], str]:
-    """複数の時間軸のOHLCVデータを取得する（v10.3.1 維持）"""
-    ohlcv_data: Dict[str, List[list]] = {}
-    
-    for tf_key, timeframe in TIMEFRAMES.items():
-        # 📌 v10.3.1: Coinbase利用時は長期分析をスキップ (長期間データが不安定なため)
-        if client_name == 'Coinbase' and tf_key == 'long':
-            logging.info(f"ℹ️ {symbol}: Coinbase利用のため、長期分析 ({timeframe}) のデータ取得をスキップします。")
-            continue
-            
-        limit = OHLCV_LIMIT.get(tf_key, 100)
-        ohlcv, status = await fetch_ohlcv_single_client(client_name, symbol, timeframe, limit)
-        
-        if status in ["RateLimit", "Timeout"]:
-            # ひとつでもレート制限が出たら即座に切り替えを要求
-            return ohlcv_data, status
-            
-        if status == "NoData":
-            logging.warning(f"⚠️ {symbol} の {timeframe} データ（{limit}本）が不足しています。スキップします。")
-            
-            # 🚨 v10.3.1: 長期足（'long'）のデータ不足は重大なエラーとして扱い、クライアント切り替えを促す
-            if tf_key == 'long':
-                 logging.error(f"❌ {client_name} - {symbol} の長期データ取得失敗。クライアント切り替え要求。")
-                 # この新しいステータスコードを返して、メインループでペナルティを与える
-                 return ohlcv_data, "LongDataMissing" 
-            continue
-            
-        ohlcv_data[tf_key] = ohlcv
-        
-    # 長期をスキップした場合は、データが一つ少ない状態で PartialSuccess を返す
-    if client_name == 'Coinbase' and len(ohlcv_data) == len(TIMEFRAMES) - 1:
-        return ohlcv_data, "PartialSuccess_Coinbase"
-        
-    if len(ohlcv_data) < len(TIMEFRAMES) - (1 if client_name == 'Coinbase' else 0):
-        return ohlcv_data, "PartialData"
-
-    return ohlcv_data, "Success"
-
-async def fetch_order_book_depth_async(symbol: str) -> Dict:
-    """オーダーブックの深度を取得し、買い/売り圧の比率を計算（v9.0.0 維持）"""
-    client = CCXT_CLIENTS_DICT.get(CCXT_CLIENT_NAME)
-    if client is None: return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5, "total_depth": 0}
-
-    market_symbol = f"{symbol}/USDT" 
-
-    try:
-        await asyncio.sleep(REQUEST_DELAY)
-        # 深度をORDER_BOOK_DEPTH_LEVELSで定義した層数（10層）まで取得
-        order_book = await client.fetch_order_book(market_symbol, limit=20) 
-        await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
-        
-        # 上位10層のボリュームを加重平均（価格*量の合計）
-        bid_volume_weighted = sum(amount * price for price, amount in order_book['bids'][:ORDER_BOOK_DEPTH_LEVELS])
-        ask_volume_weighted = sum(amount * price for price, amount in order_book['asks'][:ORDER_BOOK_DEPTH_LEVELS])
-
-        total_volume = bid_volume_weighted + ask_volume_weighted
-        depth_ratio = bid_volume_weighted / total_volume if total_volume > 0 else 0.5
-
-        return {"bid_volume": bid_volume_weighted, "ask_volume": ask_volume_weighted, 
-                "depth_ratio": depth_ratio, "total_depth": total_volume}
-
-    except Exception:
-        return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5, "total_depth": 0}
-
-async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
-    """多時間軸分析を実行し、シグナル候補を生成（v10.3.1 維持）"""
-    
-    sentiment_data = get_news_sentiment(symbol)
-    
-    # 1. 多時間軸OHLCVデータの取得 (Async I/O)
-    ohlcv_all, ccxt_status = await fetch_ohlcv_multiple_timeframes(client_name, symbol)
-
-    if ccxt_status in ["RateLimit", "Timeout", "LongDataMissing"]:
-        # エラーをメインループに報告
-        return {"symbol": symbol, "side": ccxt_status, "score": 0.0, "client": client_name}
-        
-    # Coinbaseの長期スキップ、またはその他のPartialDataの場合
-    if ccxt_status not in ["Success", "PartialSuccess_Coinbase"]:
-        return None 
-
-    # 2. 短期 (15m) 分析 - エントリータイミング/モメンタム
-    ohlcv_short = ohlcv_all.get('short')
-    if not ohlcv_short: return None # 短期データがなければ分析不可
-    win_prob_short, tech_data_short = get_ml_prediction(ohlcv_short, sentiment_data)
-    closes_short = pd.Series([c[4] for c in ohlcv_short])
-    adx_short = tech_data_short.get('adx', 25)
-    
-    # 3. 中期 (1h) 分析 - メジャートレンド/波形
-    ohlcv_mid = ohlcv_all.get('mid')
-    if not ohlcv_mid: return None # 中期データがなければ分析不可
-    win_prob_mid, tech_data_mid = get_ml_prediction(ohlcv_mid, sentiment_data)
-    closes_mid = pd.Series([c[4] for c in ohlcv_mid])
-    wave_score_mid, wave_phase_mid = calculate_elliott_wave_score(closes_mid)
-    
-    # 4. 長期 (4h, 100本) 分析 - 全体的な方向性
-    long_direction = "不明" # デフォルト値
-    win_prob_long = 0.5 # デフォルト値
-    
-    ohlcv_long = ohlcv_all.get('long')
-    if ohlcv_long: # 長期データが存在する場合のみ計算
-        win_prob_long, _ = get_ml_prediction(ohlcv_long, sentiment_data)
-        long_direction = "ロング" if win_prob_long >= 0.5 else "ショート"
-    
-    # 5. オーダーブック深度 (Async I/O)
-    depth_data = await fetch_order_book_depth_async(symbol) 
-    
-    # 6. 短期予測に基づくシグナル方向の決定
-    side = "ロング" if win_prob_short >= 0.53 else "ショート"
-    
-    # --- 中立シグナル判定 ---
-    if 0.47 < win_prob_short < 0.53:
-        confidence = abs(win_prob_short - 0.5)
-        regime = "レンジ相場" if adx_short < 25 else "移行期"
-        
-        return {"symbol": symbol, "side": "Neutral", "confidence": confidence, "regime": regime,
-                "macro_context": macro_context_data, "is_fallback": False,
-                "depth_ratio": depth_data['depth_ratio'], "total_depth": depth_data['total_depth'],
-                "short_data": tech_data_short, 
-                "mid_direction": "ロング" if win_prob_mid >= 0.5 else "ショート",
-                "long_direction": long_direction, # 長期が不明でもそのまま返す
-                "wave_phase": wave_phase_mid}
-        
-    # --- トレードシグナル判定とスコアリング ---
-    
-    # 1. 基本スコア (短期予測に基づく)
-    base_score = abs(win_prob_short - 0.5) * 2 
-    
-    # 2. 時間軸アライメントブースト
-    alignment_boost = 0.0
-    mid_direction = "ロング" if win_prob_mid >= 0.5 else "ショート"
-    
-    # 中期は必ずデータがあるためチェック
-    if mid_direction == side: alignment_boost += 0.15 
-    
-    # 長期データが存在する場合のみアライメントボーナス/ペナルティを適用
-    if long_direction != "不明":
-        if long_direction == side: alignment_boost += 0.15 
-        else: alignment_boost -= 0.10 # 長期トレンドと逆行する場合、ペナルティ
-    
-    # 3. 流動性/深度調整 
-    depth_adjustment = 0.0
-    if side == "ロング":
-        depth_adjustment = (depth_data['depth_ratio'] - 0.5) * 0.4 
-    else:
-        depth_adjustment = (0.5 - depth_data['depth_ratio']) * 0.4 
-        
-    # 4. マクロ環境調整 
-    macro_boost = macro_context_data.get('risk_appetite_boost', 0.0)
-    if side == "ショート": macro_boost *= -1 
-
-    # 5. 最終スコア算出
-    final_score = np.clip((base_score + alignment_boost + depth_adjustment + macro_boost), 0.0, 1.0)
-    
-    # 6. トレードレベル計算
-    trade_levels = calculate_trade_levels(closes_short, side, final_score, adx_short, long_direction)
-
-    return {"symbol": symbol, "side": side, "price": closes_short.iloc[-1], "score": final_score,
-            "entry": trade_levels['entry'], "sl": trade_levels['sl'],
-            "tp1": trade_levels['tp1'], "tp2": trade_levels['tp2'],
-            "regime": "トレンド相場" if adx_short >= 30 else "移行期",
-            "source": client_name, "sentiment_score": sentiment_data["sentiment_score"],
-            "depth_ratio": depth_data['depth_ratio'], "total_depth": depth_data['total_depth'],
-            "vix_level": macro_context_data['vix_level'], "macro_context": macro_context_data,
-            "short_data": tech_data_short, 
-            "mid_direction": mid_direction,
-            "long_direction": long_direction, # '不明' の可能性あり
-            "wave_phase": wave_phase_mid
-            }
-
-
-# -----------------------------------------------------------------------------------
-# TELEGRAM FORMATTING (v10.3.1 修正済み)
-# -----------------------------------------------------------------------------------
-
-def get_direction_icon(direction: str, current_side: str) -> str:
-    """方向性に応じてアイコンと色を返す"""
-    icon_map = {
-        "ロング": "⬆️",
-        "ショート": "⬇️",
-        "不明": "❓", 
-        "ニュートラル": "➖"
-    }
-    
-    if direction == "不明":
-        return f"⚪️ {icon_map.get(direction, '❓')} <b>{direction}</b>" 
-    elif direction == current_side:
-        # 一致: 緑
-        return f"🟢 {icon_map.get(direction, '➖')} <b>{direction}</b>"
-    elif direction != current_side and direction != "ニュートラル":
-        # 不一致: 赤
-        return f"🔴 {icon_map.get(direction, '➖')} <b>{direction}</b>"
-    else:
-        # ニュートラル/不明: 黄
-        return f"🟡 {icon_map.get(direction, '➖')} <b>{direction}</b>"
-
-def format_price_utility(price, symbol):
-    """価格のフォーマットヘルパー"""
-    if symbol in ["BTC", "ETH"]: return f"{price:,.2f}"
-    return f"{price:,.4f}"
-
-def format_instant_message(symbol: str, side: str, change_pct: float, window_min: int, latest_price: float, oldest_price: float) -> str:
-    """突発変動検知用の緊急通知メッセージを整形"""
-    icon = "🔥🚨🔥" if change_pct > 0 else "💥📉💥"
-    change_sign = "+" if change_pct > 0 else ""
-    format_price = lambda p: format_price_utility(p, symbol)
-
-    return (
-        f"{icon} <b>{symbol} - 突発変動 {side} 🚨</b> {icon}\n"
-        f"-----------------------------------------\n"
-        f"• **変動率**: <b>{change_sign}{change_pct:.2f}%</b>\n"
-        f"• **期間**: 過去 {window_min} 分間\n"
-        f"📉 <b>価格情報</b>:\n"
-        f"  - <b>現在価格</b>: <code>${format_price(latest_price)}</code>\n"
-        f"  - <b>開始価格</b>: <code>${format_price(oldest_price)}</code>\n"
-        f"  - <b>検知時刻</b>: {datetime.now(JST).strftime('%H:%M:%S')} JST\n"
-        f"<b>【BOTの判断】: 極端なボラティリティの発生。市場の動向を即座に確認してください。</b>"
-    )
-
-def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形（v10.3.1 修正）"""
-    
-    # 共通情報の取得
-    tech_data_short = signal.get('short_data', {})
-    adx_short = f"{tech_data_short.get('adx', 25):.1f}"
-    depth_ratio = signal.get('depth_ratio', 0.5)
-    total_depth = signal.get('total_depth', 0)
-    vix_level = signal['macro_context']['vix_level']
-    vix_status = f"VIX: {vix_level:.1f}" if vix_level > 0 else "VIX: N/A"
-    macro_trend = signal['macro_context']['trend']
-    format_price = lambda p: format_price_utility(p, signal['symbol'])
-    
-    # 流動性ステータス
-    if total_depth > 10000000: liquidity_status = f"非常に厚い (${total_depth/1e6:.1f}M)"
-    elif total_depth > 1000000: liquidity_status = f"厚い (${total_depth/1e6:.1f}M)"
-    else: liquidity_status = f"普通〜薄い (${total_depth/1e6:.1f}M)"
-    depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
-    
-    # --- 1. 中立/ヘルス通知 ---
-    if signal['side'] == "Neutral":
-        
-        # ヘルス通知
-        if signal.get('is_fallback', False):
-            stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
-            error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
-            last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
-            return (
-                f"🚨 <b>Apex BOT v10.3.1 - 死活監視 (システム正常)</b> 🟢\n"
-                f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
-                f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
-                f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
-                f"<b>【BOTの判断】: データ取得に問題はありませんが、待機中です。</b>"
-            )
-
-        # 通常の中立分析結果 
-        confidence_pct = signal['confidence'] * 200
-        mid_dir_str = get_direction_icon(signal['mid_direction'], "ニュートラル")
-        long_dir = signal.get('long_direction', '不明')
-        long_dir_str = get_direction_icon(long_dir, "ニュートラル")
-
-        return (
-            f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
-            f"<b>信頼度: {confidence_pct:.1f}%</b>\n"
-            f"---------------------------\n"
-            f"<b>⏱️ 時間軸アライメント (現在の方向性なし)</b>\n"
-            f"• <b>中期 ({TIMEFRAMES['mid']})</b>: {mid_dir_str}\n"
-            f"• <b>長期 ({TIMEFRAMES['long']}) ({OHLCV_LIMIT['long']}本)</b>: {long_dir_str}\n" 
-            f"---------------------------\n"
-            f"• <b>市場環境/レジーム</b>: {signal['regime']} (短期ADX: {adx_short}) | {macro_trend}\n"
-            f"• <b>流動性/需給</b>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
-            f"• <b>波形 (1h)</b>: {signal['wave_phase']}\n"
-            f"<b>【BOTの判断】: 現在はボラティリティが低く、方向性が不鮮明です。様子見推奨。</b>"
-        )
-
-    # --- 2. トレードシグナル通知 ---
-    score = signal['score']
-    side = signal['side']
-    side_icon = "⬆️ LONG" if side == "ロング" else "⬇️ SHORT"
-    
-    # スコアに基づく推奨ロットとアクション
-    if score >= 0.85: score_icon = "🚀🚀🚀"; lot_size = "MAX"; action = "積極的なエントリー (高確度アライメント)"
-    elif score >= 0.70: score_icon = "🔥🔥🔥"; lot_size = "大"; action = "標準的なエントリー (良好アライメント)"
-    elif score >= 0.60: score_icon = "🔥🌟"; lot_size = "中"; action = "慎重なエントリー"
-    else: score_icon = "✨"; lot_size = "小"; action = "見送りまたは極めて慎重に"
-
-    rsi_str = f"{tech_data_short.get('rsi', 50):.1f}"
-    macd_hist_str = f"{tech_data_short.get('macd_hist', 0):.4f}"
-    
-    # 時間軸アライメントの文字列を生成 
-    mid_dir_str = get_direction_icon(signal['mid_direction'], side)
-    long_dir = signal.get('long_direction', '不明')
-    long_dir_str = get_direction_icon(long_dir, side)
-
-    # 長期データ取得元の表示 (Coinbaseは取得本数が少ないため注意喚起)
-    long_data_note = ""
-    if signal['source'] == 'Coinbase' and long_dir == '不明':
-        long_data_note = f" (Coinbase: {TIMEFRAMES['long']} スキップ)"
-    elif long_dir != '不明':
-        long_data_note = f" ({OHLCV_LIMIT['long']}本)"
-
-    return (
-        f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
-        f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
-        f"-----------------------------------------\n"
-        f"<b>⏱️ 時間軸アライメント (ソース: {signal['source']})</b>\n"
-        f"• <b>短期 ({TIMEFRAMES['short']})</b>: 🟢 ⬆️/⬇️ <b>{side}</b>\n"
-        f"• <b>中期 ({TIMEFRAMES['mid']})</b>: {mid_dir_str}\n"
-        f"• <b>長期 ({TIMEFRAMES['long']})</b>: {long_dir_str}{long_data_note}\n"
-        f"-----------------------------------------\n"
-        f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
-        f"\n"
-        f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
-        # 📌 修正済み: 括弧を修正
-        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1'])}</code>**\n"
-        # 📌 修正済み: 括弧を修正
-        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
-        # 📌 修正済み: 括弧を修正
-        f"💰 <b>利確 (TP2)</b>: **<code>${format_price(signal['tp2'])}</code>**\n"
-        f"\n"
-        f"📈 <b>複合分析詳細 (短期目線)</b>:\n"
-        f"  - <i>市場レジーム</i>: {signal['regime']} (ADX: {adx_short}) | <i>波形 (1h)</i>: {signal['wave_phase']}\n"
-        f"  - <i>流動性/需給</i>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
-        f"  - <i>モメンタム/過熱</i>: RSI: {rsi_str} | MACD Hist: {macd_hist_str}\n"
-        f"  - <i>マクロ環境</i>: {macro_trend} ({vix_status})\n"
-        f"\n"
-        f"💰 <b>取引示唆</b>:\n"
-        f"  - <b>推奨ロット</b>: {lot_size}\n"
-        f"  - <b>推奨アクション</b>: {action}\n"
-        f"<b>【BOTの判断】: 取引計画に基づきエントリーを検討してください。</b>"
-    )
-
-# -----------------------------------------------------------------------------------
-# ASYNC TASKS & MAIN LOOP
-# -----------------------------------------------------------------------------------
-
+# ... (中略：update_monitor_symbols_dynamically, instant_price_check_task, self_ping_task はv8.9.5から変更なし) ...
 async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) -> None:
     """取引量の多い上位銘柄を動的に取得し、監視リストを更新"""
     global CURRENT_MONITOR_SYMBOLS
@@ -798,6 +644,7 @@ async def self_ping_task(interval: int = PING_INTERVAL):
         )
         await asyncio.sleep(interval)
         
+# ... (中略：メインループ、FastAPI関連関数はv8.9.5から変更なし) ...
 
 async def main_loop():
     """BOTのメイン実行ループ。分析、クライアント切り替え、通知を行う。"""
@@ -807,7 +654,6 @@ async def main_loop():
 
     loop = asyncio.get_event_loop()
     
-    # 初回マクロデータ取得と起動通知
     macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
     LAST_UPDATE_TIME = time.time()
     
@@ -819,13 +665,12 @@ async def main_loop():
         try:
             await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
             current_time = time.time()
-            # ヘルスが最も良好なクライアントを選択
             CCXT_CLIENT_NAME = max(ACTIVE_CLIENT_HEALTH, key=ACTIVE_CLIENT_HEALTH.get, default=CCXT_CLIENT_NAMES[0])
 
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v10.3.1 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v9.0.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -840,13 +685,10 @@ async def main_loop():
             candidates = await asyncio.gather(*candidate_tasks)
 
             # --- エラーハンドリングとクライアント切り替え ---
-            # RateLimit, Timeout, LongDataMissing のいずれかが含まれるかチェック
-            error_statuses = ["RateLimit", "Timeout", "LongDataMissing"]
-            rate_limit_error_found = any(isinstance(c, dict) and c.get('side') in error_statuses for c in candidates)
-            
+            rate_limit_error_found = any(isinstance(c, dict) and c.get('side') in ["RateLimit", "Timeout"] for c in candidates)
             if rate_limit_error_found:
-                penalized_time = time.time() - 3600 # 1時間のペナルティ
-                logging.error(f"❌ {CCXT_CLIENT_NAME}でデータ取得エラー発生 (RateLimit/Timeout/LongDataMissing)。ヘルスをペナルティ値 {penalized_time:.0f} にリセット。")
+                penalized_time = time.time() - 3600
+                logging.error(f"❌ レート制限/タイムアウトエラー発生: クライアント {CCXT_CLIENT_NAME} のヘルスを {penalized_time:.0f} にリセット。")
                 ACTIVE_CLIENT_HEALTH[CCXT_CLIENT_NAME] = penalized_time
                 next_client = max(ACTIVE_CLIENT_HEALTH, key=ACTIVE_CLIENT_HEALTH.get, default=CCXT_CLIENT_NAMES[0])
                 logging.info(f"➡️ 即時クライアント切り替え：次回は {next_client} を優先試行。")
@@ -854,7 +696,7 @@ async def main_loop():
                 continue 
 
             # --- シグナル選定と通知 ---
-            valid_candidates_and_neutral = [c for c in candidates if c is not None and c.get('side') not in error_statuses]
+            valid_candidates_and_neutral = [c for c in candidates if c is not None and c.get('side') not in ["RateLimit", "Timeout"]]
             success_count = len(valid_candidates_and_neutral)
             
             TOTAL_ANALYSIS_ATTEMPTS += len(CURRENT_MONITOR_SYMBOLS)
@@ -884,17 +726,13 @@ async def main_loop():
                 
                 if neutral_candidates:
                     best_neutral = max(neutral_candidates, key=lambda c: c['confidence'])
-                    mid_dir = best_neutral.get('mid_direction', 'ニュートラル')
-                    long_dir = best_neutral.get('long_direction', '不明')
-                    final_signal_data = {**best_neutral, 'analysis_stats': analysis_stats,
-                                         "mid_direction": mid_dir, "long_direction": long_dir}
+                    final_signal_data = {**best_neutral, 'analysis_stats': analysis_stats}
                 else:
                     final_signal_data = {
                         "side": "Neutral", "symbol": "FALLBACK", "confidence": 0.0,
                         "regime": "データ不足/レンジ", "is_fallback": True,
                         "macro_context": macro_context_data, "wave_phase": "N/A", "depth_ratio": 0.5, "total_depth": 0,
-                        "analysis_stats": analysis_stats, "sentiment_score": 0.5,
-                        "mid_direction": 'ニュートラル', "long_direction": '不明'
+                        "analysis_stats": analysis_stats, "sentiment_score": 0.5
                     }
                 
                 neutral_msg = format_telegram_message(final_signal_data)
@@ -911,16 +749,34 @@ async def main_loop():
             logging.error(f"メインループで予期せぬエラーが発生しました: {type(e).__name__}: {e}。{LOOP_INTERVAL}秒後に再試行します。")
             await asyncio.sleep(LOOP_INTERVAL)
 
+def format_price_utility(price, symbol):
+    """価格のフォーマットヘルパー"""
+    if symbol in ["BTC", "ETH"]: return f"{price:,.2f}"
+    return f"{price:,.4f}"
 
-# ====================================================================================
-# FASTAPI / WEB SERVICE
-# ====================================================================================
+def format_instant_message(symbol: str, side: str, change_pct: float, window_min: int, latest_price: float, oldest_price: float) -> str:
+    """突発変動検知用の緊急通知メッセージを整形"""
+    icon = "🔥🚨🔥" if change_pct > 0 else "💥📉💥"
+    change_sign = "+" if change_pct > 0 else ""
+    format_price = lambda p: format_price_utility(p, symbol)
+
+    return (
+        f"{icon} <b>{symbol} - 突発変動 {side} 🚨</b> {icon}\n"
+        f"-----------------------------------------\n"
+        f"• **変動率**: <b>{change_sign}{change_pct:.2f}%</b>\n"
+        f"• **期間**: 過去 {window_min} 分間\n"
+        f"📉 <b>価格情報</b>:\n"
+        f"  - <b>現在価格</b>: <code>${format_price(latest_price)}</code>\n"
+        f"  - <b>開始価格</b>: <code>${format_price(oldest_price)}</code>\n"
+        f"  - <b>検知時刻</b>: {datetime.now(JST).strftime('%H:%M:%S')} JST\n"
+        f"<b>【BOTの判断】: 極端なボラティリティの発生。市場の動向を即座に確認してください。</b>"
+    )
 
 app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("Starting Apex BOT Web Service (v10.3.1 - Multi-Timeframe/4h Strategy)...")
+    logging.info("Starting Apex BOT Web Service (v9.0.0 - Liquidity & Regime Enhanced)...")
     initialize_ccxt_client()
     port = int(os.environ.get("PORT", 8000))
     logging.info(f"Web service attempting to bind to port: {port}")
@@ -941,7 +797,7 @@ async def read_root(request: Request):
     last_health_str = datetime.fromtimestamp(last_health_time).strftime('%H:%M:%S') if last_health_time > 0 else "N/A"
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v10.3.1 (Multi-Timeframe/4h Strategy)",
+        "service": "Apex BOT v9.0.0 (Liquidity & Regime Enhanced)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
