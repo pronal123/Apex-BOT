@@ -1,5 +1,6 @@
 # ====================================================================================
-# Apex BOT v9.1.8 - データ不足銘柄自動除外版 (フルコード)
+# Apex BOT v9.1.9 - 除外シンボル修正版 (フルコード)
+# 修正点: データ不足時の自動除外シンボルをマーケットシンボルからベースシンボルへ修正
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -36,7 +37,7 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v9.1.8 設定
+# 📌 v9.1.9 設定
 LOOP_INTERVAL = 60       
 PING_INTERVAL = 8        
 PING_TIMEOUT = 12        
@@ -45,7 +46,7 @@ REQUEST_DELAY = 1.0
 MIN_SLEEP_AFTER_IO = 0.005
 MAX_CONCURRENT_TASKS = 10 
 
-# データ不足銘柄除外設定 (v9.1.8 新規)
+# データ不足銘柄除外設定
 DATA_SHORTAGE_HISTORY: Dict[str, List[float]] = {}
 DATA_SHORTAGE_GRACE_PERIOD = 60 * 60 * 24 # 24時間データ不足履歴を保持
 DATA_SHORTAGE_THRESHOLD = 3 # 24時間以内に3回データ不足なら除外
@@ -140,11 +141,11 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
 
 async def send_test_message():
-    """起動テスト通知 (v9.1.8に更新)"""
+    """起動テスト通知 (v9.1.9に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.8 - 起動テスト通知 (データ不足銘柄自動除外版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.9 - 起動テスト通知 (データ不足銘柄除外ロジック修正版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: 永続的なデータ不足銘柄を一時的に監視対象から自動除外するロジックを導入しました。</b>"
+        f"<b>機能強化: データ不足による基軸通貨の誤除外を防ぐため、除外ロジックのシンボル抽出を修正しました。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -239,12 +240,12 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
-            # v9.1.8 修正: 除外銘柄の情報を追加
+            # v9.1.9 修正: 除外銘柄の情報を追加
             excluded_count = len(EXCLUDED_SYMBOLS)
             exclusion_info = f"（除外銘柄: {excluded_count}）" if excluded_count > 0 else ""
             
             return (
-                f"🚨 <b>Apex BOT v9.1.8 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.1.9 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) {exclusion_info}\n"
@@ -502,7 +503,7 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
                 return ohlcv, "Success"
             
             if ohlcv is not None and len(ohlcv) < required_threshold:
-                # v9.1.6 変更点継続: データ不足はエラーだが、レート制限ではないためクライアントを冷却しない
+                # データ不足はエラーだが、レート制限ではないためクライアントを冷却しない
                 logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}, {timeframe}) データ不足: {len(ohlcv)}/{limit}本 (しきい値:{required_threshold:.0f}本)。")
                 return ohlcv, "DataShortage"
 
@@ -529,25 +530,30 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     ohlcv, status = await fetch_ohlcv_single_client(client_name, symbol, timeframe, limit)
 
     # RateLimit/Timeoutはメインループで処理するため、ここで返却
-    if status in ["Success", "RateLimit", "Timeout"]: 
+    if status in ["RateLimit", "Timeout"]: 
         return ohlcv, status
     
-    # 📌 v9.1.8 修正: DataShortage/NoDataの場合は、銘柄の履歴を更新する
+    # 📌 v9.1.9 修正: DataShortage/NoDataの場合は、銘柄の履歴を更新する
     if status in ["DataShortage", "NoData"]:
         current_time = time.time()
-        if symbol not in DATA_SHORTAGE_HISTORY:
-            DATA_SHORTAGE_HISTORY[symbol] = []
-        DATA_SHORTAGE_HISTORY[symbol].append(current_time)
+        
+        # ログに記録し、除外対象とするのはベースシンボル (例: XPL)
+        target_symbol = symbol 
+        
+        if target_symbol not in DATA_SHORTAGE_HISTORY:
+            DATA_SHORTAGE_HISTORY[target_symbol] = []
+        DATA_SHORTAGE_HISTORY[target_symbol].append(current_time)
         
         # 24時間以上前の履歴を削除
         cutoff = current_time - DATA_SHORTAGE_GRACE_PERIOD
-        DATA_SHORTAGE_HISTORY[symbol] = [t for t in DATA_SHORTAGE_HISTORY[symbol] if t >= cutoff]
+        DATA_SHORTAGE_HISTORY[target_symbol] = [t for t in DATA_SHORTAGE_HISTORY[target_symbol] if t >= cutoff]
         
         # 閾値を超えたら除外リストに追加
-        if len(DATA_SHORTAGE_HISTORY[symbol]) >= DATA_SHORTAGE_THRESHOLD:
+        if len(DATA_SHORTAGE_HISTORY[target_symbol]) >= DATA_SHORTAGE_THRESHOLD:
             global EXCLUDED_SYMBOLS
-            EXCLUDED_SYMBOLS[symbol] = current_time + EXCLUSION_PERIOD
-            logging.warning(f"🚨 データ不足閾値超過: {symbol} を次の {EXCLUSION_PERIOD / 3600:.1f}時間、監視対象から除外します。")
+            EXCLUDED_SYMBOLS[target_symbol] = current_time + EXCLUSION_PERIOD
+            # ログも target_symbol を使用
+            logging.warning(f"🚨 データ不足閾値超過: {target_symbol} を次の {EXCLUSION_PERIOD / 3600:.1f}時間、監視対象から除外します。")
             
         
     if status in ["DataShortage", "NoData"] and timeframe in FALLBACK_MAP: # NoDataもフォールバック対象に
@@ -644,7 +650,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     required_15m = REQUIRED_OHLCV_LIMITS['15m'] * 0.95
     required_4h = REQUIRED_OHLCV_LIMITS['4h'] * 0.95
     
-    # 🚨 v9.1.8 修正: 15mデータが不足している場合は、データ不足エラーで除外リストに追加されているはずなので、ここでスキップ
+    # 🚨 v9.1.9 修正: 15mデータが不足している場合は、データ不足エラーで除外リストに追加されているはずなので、ここでスキップ
     if not ohlcv_15m or len(ohlcv_15m) < required_15m:
         logging.debug(f"分析スキップ: {symbol} - 15mデータが不足 ({len(ohlcv_15m)}/{required_15m:.0f}本)。")
         return None 
@@ -727,7 +733,7 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
     client = CCXT_CLIENTS_DICT.get(client_name)
     current_time = time.time()
     
-    # 📌 v9.1.8 修正: 除外期間が終了した銘柄をリストから削除
+    # 📌 v9.1.9 修正: 除外期間が終了した銘柄をリストから削除 (ロジックはv9.1.8のまま)
     EXCLUDED_SYMBOLS = {
         sym: end_time 
         for sym, end_time in EXCLUDED_SYMBOLS.items() 
@@ -765,7 +771,7 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
             elif '-' in sym and ('USD' in sym):
                 base_sym = sym.split('-')[0]
             
-            if base_sym and base_sym not in EXCLUDED_SYMBOLS: # 📌 v9.1.8 修正: 除外リストにない銘柄のみ追加
+            if base_sym and base_sym not in EXCLUDED_SYMBOLS: # 📌 v9.1.9 修正: 除外リストにない銘柄のみ追加
                 new_symbols_raw.append(base_sym)
             
             if len(new_symbols_raw) >= limit: break
@@ -892,7 +898,7 @@ async def main_loop():
         await asyncio.sleep(MIN_SLEEP_AFTER_IO)
         current_time = time.time()
         
-        # --- 1. 最適なCCXTクライアントの選択ロジック (v9.1.7のものを維持) ---
+        # --- 1. 最適なCCXTクライアントの選択ロジック (v9.1.9維持) ---
         available_clients = {
             name: health_time 
             for name, health_time in ACTIVE_CLIENT_HEALTH.items() 
@@ -926,12 +932,13 @@ async def main_loop():
 
         # --- 2. 動的銘柄リストの更新とマクロ環境の取得 ---
         if current_time - LAST_UPDATE_TIME > DYNAMIC_UPDATE_INTERVAL:
-            await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=30)
+            # 銘柄選定時にも除外リストが参照されるため、更新が必要
+            await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=30) 
             macro_context_data = await asyncio.to_thread(get_tradfi_macro_context)
             LAST_UPDATE_TIME = current_time
 
         # --- 3. 分析の実行 ---
-        # 📌 v9.1.8 修正: 分析開始時にも除外銘柄をチェックし、ログに反映
+        # 📌 v9.1.9 修正: 分析開始時にも除外銘柄をチェックし、ログに反映
         symbols_for_analysis = [sym for sym in CURRENT_MONITOR_SYMBOLS if sym not in EXCLUDED_SYMBOLS]
         
         logging.info(f"🔍 分析開始 (データソース: {CCXT_CLIENT_NAME}, 銘柄数: {len(symbols_for_analysis)}/{len(CURRENT_MONITOR_SYMBOLS)}銘柄)")
@@ -1006,7 +1013,7 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.1.8")
+app = FastAPI(title="Apex BOT API", version="v9.1.9")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1015,7 +1022,7 @@ async def startup_event():
     global CCXT_CLIENT_NAME
     if CCXT_CLIENT_NAMES:
         CCXT_CLIENT_NAME = CCXT_CLIENT_NAMES[0] # 初期の優先クライアントを設定
-    logging.info(f"🚀 Apex BOT v9.1.8 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
+    logging.info(f"🚀 Apex BOT v9.1.9 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
     asyncio.create_task(main_loop())
 
 
@@ -1024,11 +1031,11 @@ def get_status():
     """Render/Kubernetesヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.1.8",
+        "bot_version": "v9.1.9",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "current_client": CCXT_CLIENT_NAME,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
-        "excluded_symbols_count": len(EXCLUDED_SYMBOLS) # v9.1.8 追加
+        "excluded_symbols_count": len(EXCLUDED_SYMBOLS) # v9.1.9 追加
     }
     return JSONResponse(content=status_msg)
 
