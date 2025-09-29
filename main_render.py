@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v9.1.1 - エラー解決・堅牢性強化版
+# Apex BOT v9.1.2 - 定義順序修正・堅牢性強化版
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -32,10 +32,11 @@ JST = timezone(timedelta(hours=9))
 # 📌 初期監視対象銘柄リスト 
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 
+# 環境変数から取得（テスト用ダミー値あり）
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v9.1.1 設定
+# 📌 v9.1.2 設定
 LOOP_INTERVAL = 60      
 PING_INTERVAL = 8       
 PING_TIMEOUT = 12       
@@ -86,7 +87,7 @@ def format_price_utility(price: float, symbol: str) -> str:
 
 
 # ====================================================================================
-# UTILITIES & CLIENTS (NameError回避のため関数定義順序を調整)
+# UTILITIES & CLIENTS 
 # ====================================================================================
 
 def initialize_ccxt_client():
@@ -127,11 +128,11 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
 
 async def send_test_message():
-    """起動テスト通知 (v9.1.1に更新)"""
+    """起動テスト通知 (v9.1.2に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.1 - 起動テスト通知 (エラー修正版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.2 - 起動テスト通知 (エラー修正版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: 致命的なNameErrorと自己Pingの問題を修正しました。</b>"
+        f"<b>機能強化: 致命的なNameError（定義順序エラー）を最終修正しました。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -140,7 +141,7 @@ async def send_test_message():
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
 
 def blocking_ping(ping_url: str, timeout: int):
-    """メインループから分離して実行されるブロッキングPing関数（NameError修正）"""
+    """メインループから分離して実行されるブロッキングPing関数"""
     try:
         # FastAPIのGET /statusエンドポイントを使用
         response = requests.get(ping_url + "status", timeout=timeout)
@@ -148,12 +149,11 @@ def blocking_ping(ping_url: str, timeout: int):
         logging.debug(f"✅ Self-ping successful (Threaded). Status: {response.status_code}")
         return True
     except requests.exceptions.RequestException as e:
-        # HEAD / で発生した405エラーを回避するため GET /status に変更
         logging.warning(f"❌ Self-ping failed (Threaded, {type(e).__name__}): {e}. Retrying.")
         return False
 
 async def fetch_current_price_single(client_name: str, symbol: str) -> Optional[float]:
-    """単一のクライアントから現在の価格を取得（NameError修正）"""
+    """単一のクライアントから現在の価格を取得"""
     client = CCXT_CLIENTS_DICT.get(client_name)
     market_symbol = f"{symbol}/USDT"
     if client_name == 'Coinbase': market_symbol = f"{symbol}-USD"
@@ -190,10 +190,121 @@ def get_tradfi_macro_context() -> Dict:
 
 
 # ====================================================================================
+# TELEGRAM FORMATTING (NameError回避のため、メインループの前に配置)
+# ====================================================================================
+
+def format_price_lambda(symbol):
+    return lambda p: format_price_utility(p, symbol)
+
+def format_telegram_message(signal: Dict) -> str:
+    """シグナルデータからTelegram通知メッセージを整形"""
+    
+    vix_level = signal['macro_context']['vix_level']
+    vix_status = f"VIX: {vix_level:.1f}" if vix_level > 0 else "VIX: N/A"
+    macro_trend = signal['macro_context']['trend']
+    tech_data = signal.get('tech_data', {})
+    adx_str = f"{tech_data.get('adx', 25):.1f}"
+    depth_ratio = signal.get('depth_ratio', 0.5)
+    total_depth = signal.get('total_depth', 0)
+    
+    if total_depth > 10000000: 
+        liquidity_status = f"非常に厚い (${total_depth/1e6:.1f}M)"
+    elif total_depth > 1000000: 
+        liquidity_status = f"厚い (${total_depth/1e6:.1f}M)"
+    else:
+        liquidity_status = f"普通〜薄い (${total_depth/1e6:.1f}M)"
+    
+    depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
+    format_price = format_price_lambda(signal['symbol'])
+    
+    # --- 1. 中立/ヘルス通知 ---
+    if signal['side'] == "Neutral":
+        
+        if signal.get('is_fallback', False):
+            stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
+            error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
+            last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
+            return (
+                f"🚨 <b>Apex BOT v9.1.2 - 死活監視 (システム正常)</b> 🟢\n"
+                f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
+                f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
+                f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
+                f"<b>【BOTの判断】: データ取得に問題はありませんが、待機中です。</b>"
+            )
+
+        rsi_str = f"{tech_data.get('rsi', 50):.1f}"
+        macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
+        cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
+        sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+        confidence_pct = signal['confidence'] * 200
+
+        return (
+            f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
+            f"<b>信頼度: {confidence_pct:.1f}%</b>\n"
+            f"---------------------------\n"
+            f"• <b>市場環境/レジーム</b>: {signal['regime']} (ADX: {adx_str}) | {macro_trend} ({vix_status})\n"
+            f"• <b>流動性/需給</b>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
+            f"• <b>波形</b>: {signal['wave_phase']}\n"
+            f"\n"
+            f"📊 <b>テクニカル詳細</b>:\n"
+            f"  - <i>RSI/CCI</i>: {rsi_str} / {cci_str} | <i>MACD Hist</i>: {macd_hist_str}\n" 
+            f"  - <i>ニュース感情</i>: {sentiment_pct:.1f}% Positive\n"
+            f"\n"
+            f"<b>【BOTの判断】: 現在はボラティリティが低く、方向性が不鮮明です。様子見推奨。</b>"
+        )
+
+    # --- 2. トレードシグナル通知 ---
+    score = signal['score']
+    side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
+    source = signal.get('source', 'N/A')
+
+    if score >= 0.80: score_icon = "🔥🔥🔥"; lot_size = "MAX"; action = "積極的なエントリー"
+    elif score >= 0.65: score_icon = "🔥🌟"; lot_size = "中〜大"; action = "標準的なエントリー"
+    elif score >= 0.55: score_icon = "✨"; lot_size = "小"; action = "慎重なエントリー"
+    else: score_icon = "🔹"; lot_size = "最小限"; action = "見送りまたは極めて慎重に"
+
+    rsi_str = f"{tech_data.get('rsi', 50):.1f}"
+    macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
+    cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
+    sentiment_pct = signal.get('sentiment_score', 0.5) * 100
+
+    return (
+        f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
+        f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
+        f"-----------------------------------------\n"
+        f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
+        f"\n"
+        f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
+        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1']}</code>**\n"
+        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
+        f"\n"
+        f"📈 <b>複合分析詳細</b>:\n"
+        f"  - <i>市場レジーム</i>: {signal['regime']} (ADX: {adx_str}) | <i>波形</i>: {signal['wave_phase']}\n"
+        f"  - <i>流動性/需給</i>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
+        f"  - <i>モメンタム/過熱</i>: RSI: {rsi_str} | MACD Hist: {macd_hist_str} | CCI: {cci_str}\n"
+        f"  - <i>マクロ環境</i>: {macro_trend} ({vix_status}) | 感情: {sentiment_pct:.1f}% Positive (ソース: {source})\n"
+        f"\n"
+        f"💰 <b>取引示唆</b>:\n"
+        f"  - <b>推奨ロット</b>: {lot_size}\n"
+        f"  - <b>推奨アクション</b>: {action}\n"
+        f"<b>【BOTの判断】: 取引計画に基づきエントリーを検討してください。</b>"
+    )
+
+def format_instant_message(symbol, side, change_pct, window, price, old_price):
+    """突発変動のメッセージ整形"""
+    format_p = format_price_lambda(symbol)
+    return (
+        f"🚨 <b>突発変動警報: {symbol} が {window}分間で{side}!</b> 💥\n"
+        f"• **変動率**: <code>{change_pct:.2f}%</code>\n"
+        f"• **現在価格**: <code>${format_p(price)}</code> (始点: <code>${format_p(old_price)}</code>)\n"
+        f"<b>【BOTの判断】: 市場が急激に動いています。ポジションの確認を推奨します。</b>"
+    )
+
+# ====================================================================================
 # CORE ANALYSIS FUNCTIONS
 # ====================================================================================
 # ... (calculate_trade_levels, get_news_sentiment, calculate_elliott_wave_score, 
-#      calculate_technical_indicators, get_ml_prediction は元のコードから変更なし) ...
+#      calculate_technical_indicators, get_ml_prediction は変更なし) ...
 
 def calculate_trade_levels(closes: pd.Series, side: str, score: float, adx_level: float) -> Dict:
     if len(closes) < 20:
@@ -307,7 +418,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
         return 0.5, {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
 # -----------------------------------------------------------------------------------
-# CCXT WRAPPER FUNCTIONS (v9.1.1 調整)
+# CCXT WRAPPER FUNCTIONS (v9.1.2 調整)
 # -----------------------------------------------------------------------------------
 
 def _aggregate_ohlcv(ohlcv_source: List[list], target_timeframe: str) -> List[list]:
@@ -383,7 +494,15 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     if status == "DataShortage" and timeframe in FALLBACK_MAP:
         source_tf = FALLBACK_MAP[timeframe]
         
-        tf_ratio = int(timeframe.replace('h', '')) / int(source_tf.replace('h', '').replace('m', ''))
+        # 1h -> 4h 変換の場合、比率の計算が複雑になるため、ここでは単純な係数でシミュレーション
+        if 'h' in timeframe and 'h' in source_tf:
+             tf_ratio = int(timeframe.replace('h', '')) / int(source_tf.replace('h', ''))
+        elif 'm' in timeframe and 'm' in source_tf:
+             tf_ratio = int(timeframe.replace('m', '')) / int(source_tf.replace('m', ''))
+        else:
+             # 例外的な組み合わせを回避
+             tf_ratio = 4 
+
         source_limit = int(limit * tf_ratio)
         
         logging.info(f"--- ⚠️ {timeframe} データ不足を検知。{source_tf} ({source_limit}本)での模擬データ生成を試行 ---")
@@ -512,115 +631,6 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 
 
 # -----------------------------------------------------------------------------------
-# TELEGRAM FORMATTING (NameError回避のため関数定義順序を調整)
-# -----------------------------------------------------------------------------------
-
-def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形（NameError修正）"""
-    
-    vix_level = signal['macro_context']['vix_level']
-    vix_status = f"VIX: {vix_level:.1f}" if vix_level > 0 else "VIX: N/A"
-    macro_trend = signal['macro_context']['trend']
-    tech_data = signal.get('tech_data', {})
-    adx_str = f"{tech_data.get('adx', 25):.1f}"
-    depth_ratio = signal.get('depth_ratio', 0.5)
-    total_depth = signal.get('total_depth', 0)
-    
-    if total_depth > 10000000: 
-        liquidity_status = f"非常に厚い (${total_depth/1e6:.1f}M)"
-    elif total_depth > 1000000: 
-        liquidity_status = f"厚い (${total_depth/1e6:.1f}M)"
-    else:
-        liquidity_status = f"普通〜薄い (${total_depth/1e6:.1f}M)"
-    
-    depth_status = "買い圧優勢" if depth_ratio > 0.52 else ("売り圧優勢" if depth_ratio < 0.48 else "均衡")
-    format_price = lambda p: format_price_utility(p, signal['symbol'])
-    
-    # --- 1. 中立/ヘルス通知 ---
-    if signal['side'] == "Neutral":
-        
-        if signal.get('is_fallback', False):
-            stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
-            error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
-            last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
-            return (
-                f"🚨 <b>Apex BOT v9.1.1 - 死活監視 (システム正常)</b> 🟢\n"
-                f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
-                f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
-                f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
-                f"<b>【BOTの判断】: データ取得に問題はありませんが、待機中です。</b>"
-            )
-
-        rsi_str = f"{tech_data.get('rsi', 50):.1f}"
-        macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
-        cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
-        sentiment_pct = signal.get('sentiment_score', 0.5) * 100
-        confidence_pct = signal['confidence'] * 200
-
-        return (
-            f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
-            f"<b>信頼度: {confidence_pct:.1f}%</b>\n"
-            f"---------------------------\n"
-            f"• <b>市場環境/レジーム</b>: {signal['regime']} (ADX: {adx_str}) | {macro_trend} ({vix_status})\n"
-            f"• <b>流動性/需給</b>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
-            f"• <b>波形</b>: {signal['wave_phase']}\n"
-            f"\n"
-            f"📊 <b>テクニカル詳細</b>:\n"
-            f"  - <i>RSI/CCI</i>: {rsi_str} / {cci_str} | <i>MACD Hist</i>: {macd_hist_str}\n" 
-            f"  - <i>ニュース感情</i>: {sentiment_pct:.1f}% Positive\n"
-            f"\n"
-            f"<b>【BOTの判断】: 現在はボラティリティが低く、方向性が不鮮明です。様子見推奨。</b>"
-        )
-
-    # --- 2. トレードシグナル通知 ---
-    score = signal['score']
-    side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
-    source = signal.get('source', 'N/A')
-
-    if score >= 0.80: score_icon = "🔥🔥🔥"; lot_size = "MAX"; action = "積極的なエントリー"
-    elif score >= 0.65: score_icon = "🔥🌟"; lot_size = "中〜大"; action = "標準的なエントリー"
-    elif score >= 0.55: score_icon = "✨"; lot_size = "小"; action = "慎重なエントリー"
-    else: score_icon = "🔹"; lot_size = "最小限"; action = "見送りまたは極めて慎重に"
-
-    rsi_str = f"{tech_data.get('rsi', 50):.1f}"
-    macd_hist_str = f"{tech_data.get('macd_hist', 0):.4f}"
-    cci_str = f"{tech_data.get('cci_signal', 0):.1f}"
-    sentiment_pct = signal.get('sentiment_score', 0.5) * 100
-
-    return (
-        f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
-        f"<b>信頼度スコア: {score * 100:.2f}%</b>\n"
-        f"-----------------------------------------\n"
-        f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
-        f"\n"
-        f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
-        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1'])}</code>**\n"
-        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
-        f"\n"
-        f"📈 <b>複合分析詳細</b>:\n"
-        f"  - <i>市場レジーム</i>: {signal['regime']} (ADX: {adx_str}) | <i>波形</i>: {signal['wave_phase']}\n"
-        f"  - <i>流動性/需給</i>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
-        f"  - <i>モメンタム/過熱</i>: RSI: {rsi_str} | MACD Hist: {macd_hist_str} | CCI: {cci_str}\n"
-        f"  - <i>マクロ環境</i>: {macro_trend} ({vix_status}) | 感情: {sentiment_pct:.1f}% Positive (ソース: {source})\n"
-        f"\n"
-        f"💰 <b>取引示唆</b>:\n"
-        f"  - <b>推奨ロット</b>: {lot_size}\n"
-        f"  - <b>推奨アクション</b>: {action}\n"
-        f"<b>【BOTの判断】: 取引計画に基づきエントリーを検討してください。</b>"
-    )
-
-def format_instant_message(symbol, side, change_pct, window, price, old_price):
-    """突発変動のメッセージ整形"""
-    format_p = lambda p: format_price_utility(p, symbol)
-    return (
-        f"🚨 <b>突発変動警報: {symbol} が {window}分間で{side}!</b> 💥\n"
-        f"• **変動率**: <code>{change_pct:.2f}%</code>\n"
-        f"• **現在価格**: <code>${format_p(price)}</code> (始点: <code>${format_p(old_price)}</code>)\n"
-        f"<b>【BOTの判断】: 市場が急激に動いています。ポジションの確認を推奨します。</b>"
-    )
-
-
-# -----------------------------------------------------------------------------------
 # ASYNC TASKS
 # -----------------------------------------------------------------------------------
 
@@ -671,7 +681,6 @@ async def instant_price_check_task():
         await asyncio.sleep(INSTANT_CHECK_INTERVAL)
         current_time = time.time()
         symbols_to_check = list(CURRENT_MONITOR_SYMBOLS)
-        # fetch_current_price_single は UTILITIES セクションで定義済
         price_tasks = [fetch_current_price_single(CCXT_CLIENT_NAME, sym) for sym in symbols_to_check] 
         prices = await asyncio.gather(*price_tasks)
         
@@ -709,14 +718,12 @@ async def self_ping_task(interval: int = PING_INTERVAL):
         logging.warning("⚠️ RENDER_EXTERNAL_URL環境変数が設定されていません。自己Pingは無効です。")
         return
     
-    # 修正: HEAD / ではなく GET /status へPingを送信
     logging.info(f"🟢 自己Pingタスクを開始します (インターバル: {interval}秒, T/O: {PING_TIMEOUT}秒, 方式: GET /status)。URL: {render_url}")
     if not render_url.startswith('http'):
         render_url = f"https://{render_url}"
     ping_url = render_url.rstrip('/') + '/' 
     
     while True:
-        # blocking_ping は UTILITIES セクションで定義済
         await asyncio.to_thread(lambda: blocking_ping(ping_url, PING_TIMEOUT)) 
         await asyncio.sleep(interval)
         
@@ -731,7 +738,6 @@ async def main_loop():
     global LAST_SUCCESS_TIME, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS
     global CCXT_CLIENT_NAME, ACTIVE_CLIENT_HEALTH
 
-    # get_tradfi_macro_context は UTILITIES セクションで定義済
     macro_context_data = await asyncio.to_thread(get_tradfi_macro_context)
     LAST_UPDATE_TIME = time.time()
     
@@ -749,7 +755,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v9.1.1 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v9.1.2 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await asyncio.to_thread(get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -790,7 +796,6 @@ async def main_loop():
                 best_signal = max(valid_candidates, key=lambda c: c['score'])
                 is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(best_signal['symbol'], 0) > 3600
                 if is_not_recently_notified:
-                    # format_telegram_message は TELEGRAM FORMATTING セクションで定義済
                     message = format_telegram_message(best_signal) 
                     await asyncio.to_thread(lambda: send_telegram_html(message, is_emergency=True))
                     NOTIFIED_SYMBOLS[best_signal['symbol']] = current_time
@@ -802,7 +807,6 @@ async def main_loop():
                 neutral_check_signal = {"symbol": "System Health", "side": "Neutral", "confidence": 0.0, 
                                         "macro_context": macro_context_data, "is_fallback": True, "analysis_stats": stats,
                                         "tech_data": {"rsi": 50, "adx": 25}}
-                # format_telegram_message は TELEGRAM FORMATTING セクションで定義済
                 message = format_telegram_message(neutral_check_signal) 
                 await asyncio.to_thread(lambda: send_telegram_html(message, is_emergency=False))
                 NEUTRAL_NOTIFIED_TIME = current_time
@@ -824,7 +828,7 @@ app = FastAPI()
 @app.get("/")
 async def health_check(request: Request):
     """FastAPIのデフォルトエンドポイントを維持"""
-    return {"status": "ok", "message": "Apex BOT v9.1.1 is running."}
+    return {"status": "ok", "message": "Apex BOT v9.1.2 is running."}
 
 @app.get("/status")
 async def get_status():
@@ -848,7 +852,7 @@ async def startup_event():
     """アプリケーション起動時に初期化とメインループタスクを開始"""
     initialize_ccxt_client()
     asyncio.create_task(main_loop())
-    logging.info("🚀 Apex BOT v9.1.1 Startup Complete.")
+    logging.info("🚀 Apex BOT v9.1.2 Startup Complete.")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get('PORT', 8080)))
