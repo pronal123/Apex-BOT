@@ -45,6 +45,11 @@ DYNAMIC_UPDATE_INTERVAL = 600 # マクロ分析/銘柄更新間隔 (10分)
 REQUEST_DELAY = 0.5     # CCXTリクエスト間の遅延 (0.5秒)
 MIN_SLEEP_AFTER_IO = 0.005 # IO解放のための最小スリープ時間
 
+# 📌 突発変動検知設定 (新規追加)
+INSTANT_CHECK_INTERVAL = 15 # 即時価格チェック間隔（秒）
+MAX_PRICE_DEVIATION_PCT = 1.5 # 15分間の価格変動率の閾値（%）。これを超えると即時通知。
+INSTANT_CHECK_WINDOW_MIN = 15 # 変動をチェックする期間（分）
+
 # ログ設定
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -66,6 +71,7 @@ LAST_SUCCESS_TIME: float = 0.0
 TOTAL_ANALYSIS_ATTEMPTS: int = 0
 TOTAL_ANALYSIS_ERRORS: int = 0
 ACTIVE_CLIENT_HEALTH: Dict[str, float] = {} # クライアントごとの最終成功時刻（レート制限対策）
+PRICE_HISTORY: Dict[str, List[Tuple[float, float]]] = {} # 銘柄ごとの価格履歴 (時刻, 価格)
 
 
 # ====================================================================================
@@ -127,6 +133,95 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.info(f"✅ Telegram通知成功。Response Status: {response.status_code}")
     except requests.exceptions.RequestException as e:
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
+
+# ====================================================================================
+# INSTANT CHECK TASK (突発変動検知 - 15秒間隔)
+# ====================================================================================
+
+async def fetch_current_price_single(client_name: str, symbol: str) -> Optional[float]:
+    """単一のクライアントから現在の価格を取得"""
+    client = CCXT_CLIENTS_DICT.get(client_name)
+    market_symbol = f"{symbol}/USDT"
+    if client_name == 'Coinbase': market_symbol = f"{symbol}-USD"
+    
+    if client is None: return None
+    try:
+        ticker = await client.fetch_ticker(market_symbol)
+        await asyncio.sleep(MIN_SLEEP_AFTER_IO)
+        return ticker['last']
+    except Exception:
+        return None
+
+async def instant_price_check_task():
+    """
+    15秒ごとに監視銘柄の価格を取得し、突発的な変動をチェックする。
+    """
+    global PRICE_HISTORY, CCXT_CLIENT_NAME
+    
+    # 突発通知のクールダウン（同じ銘柄の通知を頻繁に送りすぎないため）
+    INSTANT_NOTIFICATION_COOLDOWN = 180 # 3分間
+
+    logging.info(f"⚡ 突発変動即時チェックタスクを開始します (インターバル: {INSTANT_CHECK_INTERVAL}秒)。")
+
+    loop = asyncio.get_event_loop()
+
+    while True:
+        await asyncio.sleep(INSTANT_CHECK_INTERVAL)
+        current_time = time.time()
+        
+        # 現在の監視銘柄をコピー
+        symbols_to_check = list(CURRENT_MONITOR_SYMBOLS)
+        
+        # 価格取得タスクを実行
+        price_tasks = [fetch_current_price_single(CCXT_CLIENT_NAME, sym) for sym in symbols_to_check]
+        prices = await asyncio.gather(*price_tasks)
+        
+        for symbol, price in zip(symbols_to_check, prices):
+            if price is None:
+                continue
+
+            # 1. 価格履歴の更新
+            if symbol not in PRICE_HISTORY:
+                PRICE_HISTORY[symbol] = []
+            
+            # 現在の時刻と価格を追加
+            PRICE_HISTORY[symbol].append((current_time, price))
+            
+            # 2. 監視期間外の古いデータを削除
+            cutoff_time = current_time - INSTANT_CHECK_WINDOW_MIN * 60
+            PRICE_HISTORY[symbol] = [
+                (t, p) for t, p in PRICE_HISTORY[symbol] if t >= cutoff_time
+            ]
+
+            history = PRICE_HISTORY[symbol]
+            if len(history) < 2:
+                continue
+
+            # 3. 突発変動の計算
+            oldest_price = history[0][1]
+            latest_price = price
+            
+            if oldest_price == 0: continue
+            
+            # 変化率を計算
+            change_pct = (latest_price - oldest_price) / oldest_price * 100
+            
+            # 4. 閾値チェック
+            if abs(change_pct) >= MAX_PRICE_DEVIATION_PCT:
+                
+                # クールダウンチェック
+                is_not_recently_notified = current_time - NOTIFIED_SYMBOLS.get(symbol, 0) > INSTANT_NOTIFICATION_COOLDOWN
+                
+                if is_not_recently_notified:
+                    side = "急騰" if change_pct > 0 else "急落"
+                    
+                    message = format_instant_message(
+                        symbol, side, change_pct, INSTANT_CHECK_WINDOW_MIN, latest_price, oldest_price
+                    )
+                    
+                    await loop.run_in_executor(None, lambda: send_telegram_html(message, is_emergency=True))
+                    NOTIFIED_SYMBOLS[symbol] = current_time # 通知時間を更新
+                    logging.warning(f"🚨 突発変動検知: {symbol} が {INSTANT_CHECK_WINDOW_MIN}分間で {change_pct:.2f}% {side}しました。即時通知実行。")
 
 
 # ====================================================================================
@@ -513,7 +608,7 @@ async def self_ping_task(interval: int = PING_INTERVAL):
 
 
 # ====================================================================================
-# MAIN LOOP & TELEGRAM FORMATTING (表示強化版)
+# MAIN LOOP & TELEGRAM FORMATTING
 # ====================================================================================
 
 async def main_loop():
@@ -529,8 +624,9 @@ async def main_loop():
     LAST_UPDATE_TIME = time.time()
     
     await send_test_message()
-    # 📌 自己Pingタスクを別スレッドで実行開始
+    # 📌 バックグラウンドタスクの起動
     asyncio.create_task(self_ping_task(interval=PING_INTERVAL)) 
+    asyncio.create_task(instant_price_check_task()) # ⚡ 即時価格チェックタスクの起動
 
     while True:
         try:
@@ -606,9 +702,11 @@ async def main_loop():
                 final_signal_data = None
                 
                 if neutral_candidates:
+                    # 信頼度が最も高い中立シグナルを選択
                     best_neutral = max(neutral_candidates, key=lambda c: c['confidence'])
                     final_signal_data = {**best_neutral, 'analysis_stats': analysis_stats}
                 else:
+                    # フォールバック（システムヘルスチェック）
                     final_signal_data = {
                         "side": "Neutral", "symbol": "FALLBACK", "confidence": 0.0,
                         "regime": "データ不足/レンジ", "is_fallback": True,
@@ -630,6 +728,11 @@ async def main_loop():
             logging.error(f"メインループで予期せぬエラーが発生しました: {type(e).__name__}: {e}。{LOOP_INTERVAL}秒後に再試行します。")
             await asyncio.sleep(LOOP_INTERVAL)
             
+def format_price_utility(price, symbol):
+    """価格のフォーマットヘルパー"""
+    if symbol in ["BTC", "ETH"]: return f"{price:,.2f}"
+    return f"{price:,.4f}"
+
 def format_telegram_message(signal: Dict) -> str:
     """シグナルデータからTelegram通知メッセージを整形（表示強化版）"""
     
@@ -642,10 +745,7 @@ def format_telegram_message(signal: Dict) -> str:
     stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
     last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
 
-    def format_price(price):
-        """BTC/ETHは小数点以下2桁、それ以外は4桁でフォーマット"""
-        if signal['symbol'] in ["BTC", "ETH"]: return f"{price:,.2f}"
-        return f"{price:,.4f}"
+    format_price = lambda p: format_price_utility(p, signal['symbol'])
 
     # --- 1. 中立/ヘルス通知 ---
     if signal['side'] == "Neutral":
@@ -733,6 +833,28 @@ def format_telegram_message(signal: Dict) -> str:
         f"  - <b>推奨ロット</b>: {lot_size}\n"
         f"  - <b>推奨アクション</b>: {action}\n"
         f"<b>【BOTの判断】: 取引計画に基づきエントリーを検討してください。</b>"
+    )
+
+def format_instant_message(symbol: str, side: str, change_pct: float, window_min: int, latest_price: float, oldest_price: float) -> str:
+    """突発変動検知用の緊急通知メッセージを整形"""
+    
+    icon = "🔥🚨🔥" if side == "急騰" else "💥📉💥"
+    change_sign = "+" if change_pct > 0 else ""
+    
+    format_price = lambda p: format_price_utility(p, symbol)
+
+    return (
+        f"{icon} <b>{symbol} - 突発変動 {side} 🚨</b> {icon}\n"
+        f"-----------------------------------------\n"
+        f"• **変動率**: <b>{change_sign}{change_pct:.2f}%</b>\n"
+        f"• **期間**: 過去 {window_min} 分間\n"
+        f"\n"
+        f"📉 <b>価格情報</b>:\n"
+        f"  - <b>現在価格</b>: <code>${format_price(latest_price)}</code>\n"
+        f"  - <b>開始価格</b>: <code>${format_price(oldest_price)}</code>\n"
+        f"  - <b>検知時刻</b>: {datetime.now(JST).strftime('%H:%M:%S')} JST\n"
+        f"\n"
+        f"<b>【BOTの判断】: 極端なボラティリティの発生。市場の動向を即座に確認してください。</b>"
     )
 
 # ====================================================================================
