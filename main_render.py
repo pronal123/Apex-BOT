@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v10.3.0 - 長期足 4h 100本への再変更 & クライアントヘルス強化版
-# 変更点: 長期データ取得の安定性を高めるため、TIMEFRAMES['long'] を '1h' 400本から '4h' 100本に戻します。
-#         Coinbase利用時の長期スキップ、データ不足時のクライアントペナルティは維持します。
+# Apex BOT v10.3.1 - 構文エラー修正 & 長期足 4h 100本への再変更版
+# 変更点: format_telegram_message() 内の f-string 構文エラーを修正。
+#         長期データ取得の安定性を高めるため、TIMEFRAMES['long'] を '4h' 100本に維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,18 +37,18 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v10.3.0 時間軸設定 - 4h 100本へ再設定
+# 📌 v10.3.1 時間軸設定 - 4h 100本を維持
 TIMEFRAMES = {
     "short": '15m', # 短期: エントリータイミング、モメンタム
     "mid": '1h',    # 中期: 主要トレンド、波形フェーズ
-    "long": '4h'    # ✅ 長期: 安定性を高めるため 4h足 100本へ再変更
+    "long": '4h'    # ✅ 長期: 4h足 100本に維持
 }
 
-# 📌 v10.3.0 期間設定 - 時間軸ごとに設定
+# 📌 v10.3.1 期間設定 - 時間軸ごとに設定
 OHLCV_LIMIT: Dict[str, int] = {
-    "short": 100,  # 15分 * 100本 = 25時間
-    "mid": 100,    # 1時間 * 100本 = 100時間
-    "long": 100    # ✅ 4時間 * 100本 = 400時間 (約2週間分)
+    "short": 100,  
+    "mid": 100,    
+    "long": 100    # 4時間 * 100本 = 400時間 (約2週間分)
 }
 
 # 共通設定 (v9.0.0から維持)
@@ -112,11 +112,11 @@ def initialize_ccxt_client():
 
 
 async def send_test_message():
-    """起動テスト通知 (v10.3.0に更新)"""
+    """起動テスト通知 (v10.3.1に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v10.3.0 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v10.3.1 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>戦略調整: 長期データ ($4h$ $100$本) への再変更と、Coinbase長期スキップロジックの維持を行いました。</b>"
+        f"<b>戦略調整: 長期データ ($4h$ $100$本) 維持と、前回の構文エラーを修正しました。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -314,7 +314,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
 
 
 # -----------------------------------------------------------------------------------
-# CCXT WRAPPER FUNCTIONS (v10.3.0 維持)
+# CCXT WRAPPER FUNCTIONS (v10.3.1 維持)
 # -----------------------------------------------------------------------------------
 
 async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: str, limit: int) -> Tuple[List[list], str]:
@@ -347,11 +347,11 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
 
 
 async def fetch_ohlcv_multiple_timeframes(client_name: str, symbol: str) -> Tuple[Dict[str, List[list]], str]:
-    """複数の時間軸のOHLCVデータを取得する（v10.3.0 維持）"""
+    """複数の時間軸のOHLCVデータを取得する（v10.3.1 維持）"""
     ohlcv_data: Dict[str, List[list]] = {}
     
     for tf_key, timeframe in TIMEFRAMES.items():
-        # 📌 v10.3.0: Coinbase利用時は長期分析をスキップ (長期間データが不安定なため)
+        # 📌 v10.3.1: Coinbase利用時は長期分析をスキップ (長期間データが不安定なため)
         if client_name == 'Coinbase' and tf_key == 'long':
             logging.info(f"ℹ️ {symbol}: Coinbase利用のため、長期分析 ({timeframe}) のデータ取得をスキップします。")
             continue
@@ -366,8 +366,7 @@ async def fetch_ohlcv_multiple_timeframes(client_name: str, symbol: str) -> Tupl
         if status == "NoData":
             logging.warning(f"⚠️ {symbol} の {timeframe} データ（{limit}本）が不足しています。スキップします。")
             
-            # 🚨 v10.3.0: 長期足（'long'）のデータ不足は重大なエラーとして扱い、クライアント切り替えを促す
-            # Coinbaseで長期をスキップした場合以外で長期データが不足した場合はペナルティ
+            # 🚨 v10.3.1: 長期足（'long'）のデータ不足は重大なエラーとして扱い、クライアント切り替えを促す
             if tf_key == 'long':
                  logging.error(f"❌ {client_name} - {symbol} の長期データ取得失敗。クライアント切り替え要求。")
                  # この新しいステータスコードを返して、メインループでペナルティを与える
@@ -412,7 +411,7 @@ async def fetch_order_book_depth_async(symbol: str) -> Dict:
         return {"bid_volume": 0, "ask_volume": 0, "depth_ratio": 0.5, "total_depth": 0}
 
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
-    """多時間軸分析を実行し、シグナル候補を生成（v10.3.0 維持）"""
+    """多時間軸分析を実行し、シグナル候補を生成（v10.3.1 維持）"""
     
     sentiment_data = get_news_sentiment(symbol)
     
@@ -518,7 +517,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 
 
 # -----------------------------------------------------------------------------------
-# TELEGRAM FORMATTING (v10.3.0 修正)
+# TELEGRAM FORMATTING (v10.3.1 修正済み)
 # -----------------------------------------------------------------------------------
 
 def get_direction_icon(direction: str, current_side: str) -> str:
@@ -526,12 +525,12 @@ def get_direction_icon(direction: str, current_side: str) -> str:
     icon_map = {
         "ロング": "⬆️",
         "ショート": "⬇️",
-        "不明": "❓", # NEW
+        "不明": "❓", 
         "ニュートラル": "➖"
     }
     
     if direction == "不明":
-        return f"⚪️ {icon_map.get(direction, '❓')} <b>{direction}</b>" # '不明' は白で表示
+        return f"⚪️ {icon_map.get(direction, '❓')} <b>{direction}</b>" 
     elif direction == current_side:
         # 一致: 緑
         return f"🟢 {icon_map.get(direction, '➖')} <b>{direction}</b>"
@@ -566,7 +565,7 @@ def format_instant_message(symbol: str, side: str, change_pct: float, window_min
     )
 
 def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形（v10.3.0 修正）"""
+    """シグナルデータからTelegram通知メッセージを整形（v10.3.1 修正）"""
     
     # 共通情報の取得
     tech_data_short = signal.get('short_data', {})
@@ -593,7 +592,7 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             return (
-                f"🚨 <b>Apex BOT v10.3.0 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v10.3.1 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -612,7 +611,7 @@ def format_telegram_message(signal: Dict) -> str:
             f"---------------------------\n"
             f"<b>⏱️ 時間軸アライメント (現在の方向性なし)</b>\n"
             f"• <b>中期 ({TIMEFRAMES['mid']})</b>: {mid_dir_str}\n"
-            f"• <b>長期 ({TIMEFRAMES['long']}) ({OHLCV_LIMIT['long']}本)</b>: {long_dir_str}\n" # long_dirが不明の可能性あり
+            f"• <b>長期 ({TIMEFRAMES['long']}) ({OHLCV_LIMIT['long']}本)</b>: {long_dir_str}\n" 
             f"---------------------------\n"
             f"• <b>市場環境/レジーム</b>: {signal['regime']} (短期ADX: {adx_short}) | {macro_trend}\n"
             f"• <b>流動性/需給</b>: {liquidity_status} | {depth_status} (比率: {depth_ratio:.2f})\n"
@@ -642,7 +641,7 @@ def format_telegram_message(signal: Dict) -> str:
     # 長期データ取得元の表示 (Coinbaseは取得本数が少ないため注意喚起)
     long_data_note = ""
     if signal['source'] == 'Coinbase' and long_dir == '不明':
-        long_data_note = f" (Coinbase: {TIMEFRAMES['long']} スキップ)" # v10.3.0: 4hに変更
+        long_data_note = f" (Coinbase: {TIMEFRAMES['long']} スキップ)"
     elif long_dir != '不明':
         long_data_note = f" ({OHLCV_LIMIT['long']}本)"
 
@@ -658,8 +657,12 @@ def format_telegram_message(signal: Dict) -> str:
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"\n"
         f"🎯 <b>エントリー (Entry)</b>: **<code>${format_price(signal['entry'])}</code>**\n"
-        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1']}</code>**\n"
-        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl']}</code>**\n"
+        # 📌 修正済み: 括弧を修正
+        f"🟢 <b>利確 (TP1)</b>: **<code>${format_price(signal['tp1'])}</code>**\n"
+        # 📌 修正済み: 括弧を修正
+        f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
+        # 📌 修正済み: 括弧を修正
+        f"💰 <b>利確 (TP2)</b>: **<code>${format_price(signal['tp2'])}</code>**\n"
         f"\n"
         f"📈 <b>複合分析詳細 (短期目線)</b>:\n"
         f"  - <i>市場レジーム</i>: {signal['regime']} (ADX: {adx_short}) | <i>波形 (1h)</i>: {signal['wave_phase']}\n"
@@ -822,7 +825,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v10.3.0 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v10.3.1 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
                 LAST_UPDATE_TIME = current_time
@@ -917,7 +920,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("Starting Apex BOT Web Service (v10.3.0 - Multi-Timeframe/4h Strategy)...")
+    logging.info("Starting Apex BOT Web Service (v10.3.1 - Multi-Timeframe/4h Strategy)...")
     initialize_ccxt_client()
     port = int(os.environ.get("PORT", 8000))
     logging.info(f"Web service attempting to bind to port: {port}")
@@ -938,7 +941,7 @@ async def read_root(request: Request):
     last_health_str = datetime.fromtimestamp(last_health_time).strftime('%H:%M:%S') if last_health_time > 0 else "N/A"
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v10.3.0 (Multi-Timeframe/4h Strategy)",
+        "service": "Apex BOT v10.3.1 (Multi-Timeframe/4h Strategy)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
