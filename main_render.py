@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v9.1.5 - データ要求緩和 & クライアント最適化版 (フルコード)
+# Apex BOT v9.1.6 - 安定化＆冷却ロジック修正版 (フルコード)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -30,13 +30,14 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 # 📌 初期監視対象銘柄リスト 
+# 🚀 変更: 安定化のため、DEFAULT_SYMBOLSを常に監視リストの先頭に追加するロジックを導入
 DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 
 # 環境変数から取得（テスト用ダミー値あり）
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v9.1.5 設定変更点
+# 📌 v9.1.6 設定
 LOOP_INTERVAL = 60       
 PING_INTERVAL = 8        
 PING_TIMEOUT = 12        
@@ -51,7 +52,6 @@ INSTANT_CHECK_WINDOW_MIN = 15
 ORDER_BOOK_DEPTH_LEVELS = 10 
 
 # データフォールバック設定 
-# 🚀 v9.1.5 変更: データ不足を解消するため、長期足の必須本数をさらに緩和 (200 -> 100)
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
 FALLBACK_MAP = {'4h': '1h'} 
 
@@ -98,10 +98,8 @@ def initialize_ccxt_client():
     """CCXTクライアントを初期化（複数クライアントで負荷分散）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
 
-    # 🚀 v9.1.5 変更: Binanceに加えて、地理的制限（403 Forbidden）があるBybitを無効化
+    # v9.1.5で実施: BinanceとBybitを無効化
     clients = {
-        # 'Binance': ccxt_async.binance({"enableRateLimit": True, "timeout": 20000}), # 無効化
-        # 'Bybit': ccxt_async.bybit({"enableRateLimit": True, "timeout": 30000}),    # 無効化 (403 Forbidden回避)
         'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 30000}),     
         'Coinbase': ccxt_async.coinbase({"enableRateLimit": True, "timeout": 20000,
                                          "options": {"defaultType": "spot", "fetchTicker": "public"}}),
@@ -136,11 +134,11 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
 
 async def send_test_message():
-    """起動テスト通知 (v9.1.5に更新)"""
+    """起動テスト通知 (v9.1.6に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.5 - 起動テスト通知 (クライアント最適化版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.6 - 起動テスト通知 (安定化＆冷却修正版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: データ要求本数の緩和と、利用不可なクライアントの無効化を実施しました。</b>"
+        f"<b>機能強化: クライアント冷却ロジックを修正し、データ不足での冷却を防止しました。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -235,7 +233,7 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             return (
-                f"🚨 <b>Apex BOT v9.1.5 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.1.6 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -436,7 +434,7 @@ def get_ml_prediction(ohlcv: List[list], sentiment: Dict) -> Tuple[float, Dict]:
         return 0.5, {"rsi": 50, "macd_hist": 0, "macd_direction_boost": 0, "adx": 25, "cci_signal": 0}
 
 # -----------------------------------------------------------------------------------
-# CCXT WRAPPER FUNCTIONS (v9.1.5 調整)
+# CCXT WRAPPER FUNCTIONS (v9.1.6 調整)
 # -----------------------------------------------------------------------------------
 
 def _aggregate_ohlcv(ohlcv_source: List[list], target_timeframe: str) -> List[list]:
@@ -490,10 +488,11 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
             required_threshold = limit * 0.95 
             if ohlcv and len(ohlcv) >= required_threshold: 
                 global ACTIVE_CLIENT_HEALTH
-                ACTIVE_CLIENT_HEALTH[client_name] = time.time() 
+                ACTIVE_CLIENT_HEALTH[client_name] = time.time() # 成功時はヘルスを現在時刻にリセット
                 return ohlcv, "Success"
             
             if ohlcv is not None and len(ohlcv) < required_threshold:
+                # 🚀 v9.1.6 変更: データ不足はエラーだが、レート制限ではないためクライアントを冷却しない
                 logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}, {timeframe}) データ不足: {len(ohlcv)}/{limit}本 (しきい値:{required_threshold:.0f}本)。")
                 return ohlcv, "DataShortage"
 
@@ -504,6 +503,7 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
             logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}) RequestTimeout。即時クライアント切り替え要求。")
             return [], "Timeout" 
         except Exception as e:
+            # 銘柄のティッカーがない、あるいは取引所エラー
             logging.debug(f"CCXT ({client_name}, {market_symbol}) 一般エラー: {type(e).__name__}")
             continue
             
@@ -518,11 +518,11 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     
     ohlcv, status = await fetch_ohlcv_single_client(client_name, symbol, timeframe, limit)
 
-    if status == "Success" or status == "RateLimit" or status == "Timeout": 
-        # RateLimit/Timeoutはメインループで処理するため、ここで返却
+    # RateLimit/Timeoutはメインループで処理するため、ここで返却
+    if status in ["Success", "RateLimit", "Timeout"]: 
         return ohlcv, status
     
-    if status == "DataShortage" and timeframe in FALLBACK_MAP:
+    if status in ["DataShortage", "NoData"] and timeframe in FALLBACK_MAP: # NoDataもフォールバック対象に
         source_tf = FALLBACK_MAP[timeframe]
         
         # 4h (240m) / 1h (60m) = 4 (タイムフレーム比率)
@@ -530,7 +530,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         source_tf_num = int(source_tf.replace('m','').replace('h',''))
         tf_ratio = int(tf_num / source_tf_num) if tf_num > source_tf_num else 4
 
-        # 🚀 v9.1.5 変更: 4h(100本)のフォールバックに必要な1hの本数は 100 * 4 = 400本
+        # 4h(100本)のフォールバックに必要な1hの本数は 100 * 4 = 400本
         source_limit = int(limit * tf_ratio) 
         
         logging.info(f"--- ⚠️ {timeframe} データ不足を検知。{source_tf} ({source_limit}本)での模擬データ生成を試行 ---")
@@ -538,7 +538,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         # 代替データソースはより多くの本数が必要
         ohlcv_source, source_status = await fetch_ohlcv_single_client(client_name, symbol, source_tf, source_limit)
 
-        # REQUIRED_OHLCV_LIMITS の 50% を下限とする
+        # REQUIRED_OHLCV_LIMITS の 50% を下限とする (1h: 400本の50% = 200本)
         min_source_threshold = int(source_limit * 0.5)
 
         if source_status in ["Success", "DataShortage"]:
@@ -602,12 +602,14 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     ohlcv_15m, ccxt_status_15m = await fetch_ohlcv_with_fallback(client_name, symbol, '15m')
     
     if ccxt_status_15m in ["RateLimit", "Timeout"]:
+        # メインループで処理するため、そのまま返却
         return {"symbol": symbol, "side": ccxt_status_15m, "score": 0.0, "client": client_name} 
     
     # 2. 4hデータの取得（長期トレンド用）
     ohlcv_4h, ccxt_status_4h = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
     
     if ccxt_status_4h in ["RateLimit", "Timeout"]:
+         # メインループで処理するため、そのまま返却
          return {"symbol": symbol, "side": ccxt_status_4h, "score": 0.0, "client": client_name} 
          
     # 3. データ不足時の処理
@@ -700,7 +702,7 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
         await client.load_markets()
         await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
         
-        # USDT/USDペアに絞り込み、取引高でソート
+        # 🚀 変更: fetch_tickersはI/O負荷が高いため、動的銘柄選定に失敗したクライアントは冷却する
         tickers = await client.fetch_tickers()
         await asyncio.sleep(MIN_SLEEP_AFTER_IO) 
         
@@ -730,11 +732,14 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
             
         new_symbols = list(set(new_symbols_raw))
         
-        if len(new_symbols) > 5:
-            CURRENT_MONITOR_SYMBOLS = new_symbols
-            logging.info(f"✅ 動的銘柄選定成功 ({client_name})。TOP{len(new_symbols)}銘柄を監視対象に設定。")
+        # 🚀 変更: DEFAULT_SYMBOLSを常にリストの先頭に追加
+        final_symbols = list(set(DEFAULT_SYMBOLS + new_symbols))[:limit]
+        
+        if len(final_symbols) > 5:
+            CURRENT_MONITOR_SYMBOLS = final_symbols
+            logging.info(f"✅ 動的銘柄選定成功 ({client_name})。TOP{len(final_symbols)}銘柄を監視対象に設定。")
         else:
-            logging.warning(f"⚠️ 動的銘柄選定に失敗 (銘柄数不足: {len(new_symbols)}), デフォルトリスト({len(DEFAULT_SYMBOLS)}銘柄)を維持。")
+            logging.warning(f"⚠️ 動的銘柄選定に失敗 (銘柄数不足: {len(final_symbols)}), デフォルトリスト({len(DEFAULT_SYMBOLS)}銘柄)を維持。")
             CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS
             
     except ccxt_async.ExchangeNotAvailable as e:
@@ -743,9 +748,9 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
              ACTIVE_CLIENT_HEALTH[client_name] = time.time() + CLIENT_COOLDOWN
     except Exception as e:
         # RateLimitExceededなどの場合は、クライアントを冷却する必要がある
-        if "RateLimitExceeded" in str(e) or "403 Forbidden" in str(e):
+        if "RateLimitExceeded" in str(e) or "403 Forbidden" in str(e) or "RequestTimeout" in str(e):
              cooldown_end_time = time.time() + CLIENT_COOLDOWN
-             logging.error(f"❌ 動的銘柄選定エラー (RateLimit/403): クライアント {client_name} を冷却します。: {type(e).__name__}: {e}")
+             logging.error(f"❌ 動的銘柄選定エラー (RateLimit/403/Timeout): クライアント {client_name} を冷却します。: {type(e).__name__}: {e}")
              ACTIVE_CLIENT_HEALTH[client_name] = cooldown_end_time
         else:
             logging.error(f"❌ 動的銘柄選定エラー: {type(e).__name__}: {e}。既存リスト({len(CURRENT_MONITOR_SYMBOLS)}銘柄)を維持。")
@@ -876,12 +881,20 @@ async def main_loop():
         logging.info(f"🔍 分析開始 (データソース: {CCXT_CLIENT_NAME}, 銘柄数: {len(CURRENT_MONITOR_SYMBOLS)})")
         TOTAL_ANALYSIS_ATTEMPTS += 1
         
-        analysis_tasks = [
-            generate_signal_candidate(symbol, macro_context_data, CCXT_CLIENT_NAME) 
-            for symbol in CURRENT_MONITOR_SYMBOLS
-        ]
+        # 🚀 変更: asyncio.gatherの並列実行数を制限し、サーバー負荷を軽減（例：10個ずつ）
+        MAX_CONCURRENT_TASKS = 10
+        signals: List[Optional[Dict]] = []
         
-        signals: List[Optional[Dict]] = await asyncio.gather(*analysis_tasks)
+        for i in range(0, len(CURRENT_MONITOR_SYMBOLS), MAX_CONCURRENT_TASKS):
+            batch_symbols = CURRENT_MONITOR_SYMBOLS[i:i + MAX_CONCURRENT_TASKS]
+            analysis_tasks = [
+                generate_signal_candidate(symbol, macro_context_data, CCXT_CLIENT_NAME) 
+                for symbol in batch_symbols
+            ]
+            batch_signals = await asyncio.gather(*analysis_tasks)
+            signals.extend(batch_signals)
+            await asyncio.sleep(1) # バッチ間に短いクールダウンを挟む
+
         
         # --- 4. シグナルとエラー処理 ---
         has_major_error = False
@@ -939,7 +952,7 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.1.5")
+app = FastAPI(title="Apex BOT API", version="v9.1.6")
 
 @app.on_event("startup")
 async def startup_event():
@@ -948,7 +961,7 @@ async def startup_event():
     global CCXT_CLIENT_NAME
     if CCXT_CLIENT_NAMES:
         CCXT_CLIENT_NAME = CCXT_CLIENT_NAMES[0] # 初期の優先クライアントを設定
-    logging.info(f"🚀 Apex BOT v9.1.5 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
+    logging.info(f"🚀 Apex BOT v9.1.6 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
     asyncio.create_task(main_loop())
 
 
@@ -957,8 +970,9 @@ def get_status():
     """Render/Kubernetesヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.1.5",
-        "last_success_time": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime('%Y-%m-%d %H:%M:%S') if LAST_SUCCESS_TIME > 0 else "N/A",
+        "bot_version": "v9.1.6",
+        # 🚀 変更: 負荷軽減のため、ヘルスチェック時に計算量の多いstrftimeを使わないようにする
+        "last_success_timestamp": LAST_SUCCESS_TIME,
         "current_client": CCXT_CLIENT_NAME,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS)
     }
