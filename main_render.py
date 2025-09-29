@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v8.9.4 - Render耐久性最終強化版 (省略なし完全版)
+# Apex BOT v8.9.5 - Render Ping頻度強化版 (省略なし完全版)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -35,10 +35,10 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v8.9.4 変更点: Render ReadTimeout対策強化 (スレッド分離)
+# 📌 v8.9.5 変更点: Render Ping頻度強化 (Final "Hail Mary" attempt on Render)
 LOOP_INTERVAL = 60      # メイン分析ループ間隔を60秒に維持
-PING_INTERVAL = 15      # 自己Ping間隔を15秒に維持
-PING_TIMEOUT = 12       # Pingのタイムアウト時間を12秒に設定
+PING_INTERVAL = 8       # 自己Ping間隔を8秒に短縮 (Renderのアイドルタイムアウトを回避するため)
+PING_TIMEOUT = 12       # Pingのタイムアウト時間を12秒に維持
 # ----------------------------------------------------------------------
 
 DYNAMIC_UPDATE_INTERVAL = 600 # マクロ分析/銘柄更新間隔 (10分)
@@ -92,11 +92,11 @@ def initialize_ccxt_client():
 
 
 async def send_test_message():
-    """起動テスト通知 (v8.9.4に更新)"""
+    """起動テスト通知 (v8.9.5に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v8.9.4 - 起動テスト通知</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v8.9.5 - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>Render ReadTimeout最終対策: 自己Pingをスレッド分離（Blocking I/O）で実行するように変更しました。</b>"
+        f"<b>Render最終対策: 自己Ping間隔を8秒に短縮しました。</b>"
     )
     try:
         loop = asyncio.get_event_loop()
@@ -471,7 +471,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 
 
 # ====================================================================================
-# PING TASK (v8.9.4の最も重要な変更点: Threaded Blocking I/O)
+# PING TASK (v8.9.5: Ping頻度8秒)
 # ====================================================================================
 
 def blocking_ping(ping_url: str, timeout: int):
@@ -505,7 +505,6 @@ async def self_ping_task(interval: int = PING_INTERVAL):
     
     while True:
         # 📌 Blocking I/O (requests.head)をスレッドプールで実行
-        # これにより、Pingリクエストがメインのイベントループでの分析/CCXTタスクを妨げなくなる
         await loop.run_in_executor(
             None, 
             lambda: blocking_ping(ping_url, PING_TIMEOUT)
@@ -546,7 +545,7 @@ async def main_loop():
             # --- 動的更新フェーズ (10分に一度) ---
             if (current_time - LAST_UPDATE_TIME) >= DYNAMIC_UPDATE_INTERVAL:
                 logging.info("==================================================")
-                logging.info(f"Apex BOT v8.9.4 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.info(f"Apex BOT v8.9.5 分析サイクル開始: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}")
                 # マクロコンテクストを更新 (Blocking I/O)
                 macro_context_data = await loop.run_in_executor(None, get_tradfi_macro_context)
                 await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME)
@@ -653,7 +652,7 @@ def format_telegram_message(signal: Dict) -> str:
         if signal.get('is_fallback', False) and signal['symbol'] == "FALLBACK":
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             return (
-                f"🚨 <b>Apex BOT v8.9.4 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v8.9.5 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {signal['macro_context']['trend']} ({vix_status} | {gvix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -736,7 +735,7 @@ app = FastAPI()
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始"""
-    logging.info("Starting Apex BOT Web Service (v8.9.4 - Final Stability Release)...")
+    logging.info("Starting Apex BOT Web Service (v8.9.5 - Final Stability Release)...")
     initialize_ccxt_client()
 
     port = int(os.environ.get("PORT", 8000))
@@ -765,7 +764,7 @@ async def read_root(request: Request):
     
     response_data = {
         "status": "Running",
-        "service": "Apex BOT v8.9.4 (Final Stability Release)",
+        "service": "Apex BOT v8.9.5 (Final Stability Release)",
         "monitoring_base": CCXT_CLIENT_NAME,
         "client_health": f"Last Success: {last_health_str}",
         "monitored_symbols": monitor_info,
