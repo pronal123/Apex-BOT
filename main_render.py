@@ -1132,10 +1132,10 @@ app = FastAPI(title="Apex BOT API", version="v9.1.12")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    global CCXT_CLIENT_NAME
+    global CCXT_CLIENT_NAME # グローバル変数の宣言を忘れずに
     if CCXT_CLIENT_NAMES:
-        CCXT_CLIENT_NAME = CCCT_CLIENT_NAMES[0] # 初期の優先クライアントを設定
-    logging.info(f"🚀 Apex BOT v9.1.12 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
+        CCXT_CLIENT_NAME = CCXT_CLIENT_NAMES[0] # ✅ 'CCCT' から 'CCXT' に修正
+    logging.info("🚀 Apex BOT v9.1.12 Startup Complete.")
     asyncio.create_task(main_loop())
 
 
