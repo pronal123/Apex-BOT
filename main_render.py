@@ -1,8 +1,9 @@
 # ====================================================================================
-# Apex BOT v9.1.11 - 有望銘柄の即時通知機能追加 (フルコード)
-# 修正点: main_loopからトレードシグナル通知ロジックを分離し、
-#         signal_notification_taskとして独立させることで、ロング/ショートの有望銘柄を
-#         急騰急落と同様に即時通知する機能を追加しました。
+# Apex BOT v9.1.12 - 12時間ごとの最良ポジション通知機能付き (フルコード)
+# 修正点:
+# 1. BEST_POSITION_INTERVAL の設定と、LAST_ANALYSIS_SIGNALS のグローバル変数追加。
+# 2. best_position_notification_task を追加し、12時間ごとの最良ポジション通知を実装。
+# 3. format_best_position_message で最良ポジションの通知メッセージを整形。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -39,7 +40,7 @@ DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 📌 v9.1.11 設定
+# 📌 v9.1.12 設定
 LOOP_INTERVAL = 60       
 PING_INTERVAL = 8        
 PING_TIMEOUT = 12        
@@ -48,6 +49,7 @@ REQUEST_DELAY = 1.0
 MIN_SLEEP_AFTER_IO = 0.005
 MAX_CONCURRENT_TASKS = 10 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # トレードシグナルの通知クールダウン (2時間)
+BEST_POSITION_INTERVAL = 60 * 60 * 12 # 📌 新規: 最良ポジション選定のインターバル (12時間)
 
 # データ不足銘柄除外設定
 DATA_SHORTAGE_HISTORY: Dict[str, List[float]] = {}
@@ -85,8 +87,10 @@ CCXT_CLIENT_NAME: str = 'Initializing'
 LAST_UPDATE_TIME: float = 0.0
 CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS
 NOTIFIED_SYMBOLS: Dict[str, float] = {} # 急騰急落の通知履歴
-TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} # 📌 v9.1.11 追加: トレードシグナルの通知履歴
+TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} # トレードシグナルの通知履歴
 NEUTRAL_NOTIFIED_TIME: float = 0
+LAST_ANALYSIS_SIGNALS: List[Dict] = [] # 📌 新規: 最後の分析結果（最良ポジション選定用）
+LAST_BEST_POSITION_TIME: float = 0 # 📌 新規: 最良ポジション通知の最終時刻
 LAST_SUCCESS_TIME: float = 0.0
 TOTAL_ANALYSIS_ATTEMPTS: int = 0
 TOTAL_ANALYSIS_ERRORS: int = 0
@@ -146,11 +150,11 @@ def send_telegram_html(text: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
 
 async def send_test_message():
-    """起動テスト通知 (v9.1.11に更新)"""
+    """起動テスト通知 (v9.1.12に更新)"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.11 - 起動テスト通知 (通知機能強化版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.12 - 起動テスト通知 (定期最良ポジション機能強化版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: 有望ロング/ショート銘柄発生時、即座に通知するロジックを実装しました。</b>"
+        f"<b>機能強化: 12時間ごとに全監視銘柄から最も勝率の高い「最良ポジション候補」を選定し通知します。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -245,13 +249,12 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
-            # v9.1.10 維持: 除外銘柄の情報を追加
             excluded_count = len(EXCLUDED_SYMBOLS)
             exclusion_info = f"（除外銘柄: {excluded_count}）" if excluded_count > 0 else ""
             
-            # 📌 v9.1.11: バージョンを更新
+            # 📌 v9.1.12: バージョンを更新
             return (
-                f"🚨 <b>Apex BOT v9.1.11 - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.1.12 - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} ({vix_status})\n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) {exclusion_info}\n"
@@ -326,6 +329,42 @@ def format_instant_message(symbol, side, change_pct, window, price, old_price):
         f"• **現在価格**: <code>${format_p(price)}</code> (始点: <code>${format_p(old_price)}</code>)\n"
         f"<b>【BOTの判断】: 市場が急激に動いています。ポジションの確認を推奨します。</b>"
     )
+
+def format_best_position_message(signal: Dict) -> str:
+    """最良ポジション選定メッセージを整形"""
+    score = signal['score']
+    side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
+    
+    vix_level = signal['macro_context']['vix_level']
+    vix_status = f"VIX: {vix_level:.1f}" if vix_level > 0 else "VIX: N/A"
+    macro_trend = signal['macro_context']['trend']
+    
+    tech_data = signal.get('tech_data', {})
+    adx_str = f"{tech_data.get('adx', 25):.1f}"
+    depth_ratio = signal.get('depth_ratio', 0.5)
+    
+    format_price = format_price_lambda(signal['symbol'])
+    
+    return (
+        f"👑 <b>{signal['symbol']} - 12時間 最良ポジション候補</b> {side_icon} 🔥\n"
+        f"<i>選定時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n"
+        f"-----------------------------------------\n"
+        f"• <b>選定スコア</b>: <code>{score * 100:.2f}%</code>\n"
+        f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
+        f"\n"
+        f"🎯 <b>取引計画 (推奨)</b>:\n"
+        f"  - エントリー: <code>${format_price(signal['entry'])}</code>\n"
+        f"  - 利確 (TP1): <code>${format_price(signal['tp1'])}</code>\n"
+        f"  - 損切 (SL): <code>${format_price(signal['sl'])}</code>\n"
+        f"\n"
+        f"💡 <b>選定理由</b>:\n"
+        f"  1. <b>レジーム</b>: {signal['regime']} (ADX: {adx_str}) - **{signal['wave_phase']}** の波形が強く出現しています。\n"
+        f"  2. <b>マクロ/需給</b>: {macro_trend} ({vix_status}) であり、流動性も {depth_ratio:.2f} と {signal['side']} に有利です。\n"
+        f"  3. <b>モメンタム</b>: 機械学習モデルが強いモメンタムの転換/継続を示唆しています。\n"
+        f"\n"
+        f"<b>【BOTの判断】: 市場の状況に関わらず、最も優位性のある取引機会です。</b>"
+    )
+
 
 # ====================================================================================
 # CORE ANALYSIS FUNCTIONS
@@ -485,7 +524,6 @@ def _aggregate_ohlcv(ohlcv_source: List[list], target_timeframe: str) -> List[li
     ]
     return resampled_ohlcv
 
-# 📌 v9.1.10 維持: データ不足を記録し、閾値を超えたら除外リストに追加するヘルパー関数
 async def record_data_shortage(base_symbol: str):
     """データ不足履歴を記録し、閾値を超えたら除外リストに追加するヘルパー関数"""
     current_time = time.time()
@@ -529,7 +567,7 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
                 return ohlcv, "Success"
             
             if ohlcv is not None and len(ohlcv) < required_threshold:
-                # 📌 v9.1.10 維持: データ不足を検知したら、ここでベースシンボルを記録
+                # データ不足を検知したら、ここでベースシンボルを記録
                 await record_data_shortage(symbol)
                 logging.warning(f"⚠️ CCXT ({client_name}, {market_symbol}, {timeframe}) データ不足: {len(ohlcv)}/{limit}本 (しきい値:{required_threshold:.0f}本)。")
                 return ohlcv, "DataShortage"
@@ -543,12 +581,12 @@ async def fetch_ohlcv_single_client(client_name: str, symbol: str, timeframe: st
         except Exception as e:
             # 銘柄のティッカーがない、あるいは取引所エラー
             if any(err in str(e) for err in ["InvalidSymbol", "Symbol not found"]):
-                # 📌 v9.1.10 維持: 銘柄データがない場合は、ここでベースシンボルを記録
+                # 銘柄データがない場合は、ここでベースシンボルを記録
                 await record_data_shortage(symbol)
             logging.debug(f"CCXT ({client_name}, {market_symbol}) 一般エラー: {type(e).__name__} - {e}")
             continue
             
-    # 📌 v9.1.10 維持: 全てのマーケットシンボルで失敗した場合も、ここでベースシンボルを記録
+    # 全てのマーケットシンボルで失敗した場合も、ここでベースシンボルを記録
     if timeframe == '4h': # 4hの取得に失敗した場合にのみ記録 (最も重要なデータソース)
         await record_data_shortage(symbol)
     return [], "NoData"
@@ -744,7 +782,7 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
     client = CCXT_CLIENTS_DICT.get(client_name)
     current_time = time.time()
     
-    # 📌 v9.1.10 維持: 除外期間が終了した銘柄をリストから削除
+    # 除外期間が終了した銘柄をリストから削除
     EXCLUDED_SYMBOLS = {
         sym: end_time 
         for sym, end_time in EXCLUDED_SYMBOLS.items() 
@@ -782,7 +820,7 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int = 30) 
             elif '-' in sym and ('USD' in sym):
                 base_sym = sym.split('-')[0]
             
-            if base_sym and base_sym not in EXCLUDED_SYMBOLS: # 📌 v9.1.10 維持: 除外リストにない銘柄のみ追加
+            if base_sym and base_sym not in EXCLUDED_SYMBOLS: # 除外リストにない銘柄のみ追加
                 new_symbols_raw.append(base_sym)
             
             if len(new_symbols_raw) >= limit: break
@@ -879,7 +917,6 @@ async def self_ping_task(interval: int = PING_INTERVAL):
         await asyncio.sleep(interval)
         
 
-# 📌 v9.1.11 追加: トレードシグナル通知の専用タスク
 async def signal_notification_task(signals: List[Optional[Dict]]):
     """
     メインループで生成されたシグナル候補を処理し、通知クールダウンを管理しながらTelegramに送信する。
@@ -923,11 +960,60 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
                 logging.info("✅ 強制ヘルスチェック通知を実行しました。")
 
 
+# 📌 v9.1.12 追加: 最良ポジション選定通知のタスク
+async def best_position_notification_task():
+    """12時間ごとに、最もスコアの高いシグナルを選定し通知する"""
+    global LAST_BEST_POSITION_TIME, LAST_ANALYSIS_SIGNALS
+    
+    logging.info(f"👑 最良ポジション選定タスクを開始します (インターバル: {BEST_POSITION_INTERVAL / 3600:.1f}時間)。")
+    
+    # 初回起動時に即座に通知しないための初期化
+    LAST_BEST_POSITION_TIME = time.time()
+    
+    while True:
+        await asyncio.sleep(60) # 1分ごとにチェック
+        current_time = time.time()
+        
+        # 1. 12時間経過したかチェック
+        if current_time - LAST_BEST_POSITION_TIME < BEST_POSITION_INTERVAL:
+            continue
+            
+        # 2. 過去の分析結果から最良シグナルを選定
+        if not LAST_ANALYSIS_SIGNALS:
+            logging.warning("⚠️ 最良ポジション選定: 過去の分析シグナルがありません。スキップします。")
+            LAST_BEST_POSITION_TIME = current_time 
+            continue
+            
+        # スコア >= 0.55 のシグナルのみを抽出
+        qualified_signals = [
+            s for s in LAST_ANALYSIS_SIGNALS 
+            if s['side'] != "Neutral" and s['score'] >= 0.55
+        ]
+
+        if not qualified_signals:
+            logging.info("ℹ️ 最良ポジション選定: 過去12時間でスコア0.55以上のシグナルはありませんでした。")
+            # スコアが低い場合は通知しないが、次回まで時間は進める
+            LAST_BEST_POSITION_TIME = current_time
+            continue
+
+        # スコアが最も高いシグナルを選定
+        best_signal = max(qualified_signals, key=lambda s: s['score'])
+        
+        # 3. Telegramに通知
+        message = format_best_position_message(best_signal)
+        # スコアが0.75以上なら緊急通知フラグを立てる
+        await asyncio.to_thread(lambda: send_telegram_html(message, is_emergency=(best_signal['score'] >= 0.75)))
+        
+        LAST_BEST_POSITION_TIME = current_time
+        logging.info(f"👑 最良ポジション候補 ({best_signal['symbol']} {best_signal['side']}, Score: {best_signal['score']:.2f}) を送信しました。")
+
+
 async def main_loop():
     """BOTのメイン実行ループ。分析、クライアント切り替え、通知を行う。"""
     global LAST_UPDATE_TIME, NOTIFIED_SYMBOLS, NEUTRAL_NOTIFIED_TIME
     global LAST_SUCCESS_TIME, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS
     global CCXT_CLIENT_NAME, ACTIVE_CLIENT_HEALTH, CCXT_CLIENT_NAMES
+    global LAST_ANALYSIS_SIGNALS # 📌 グローバル変数を参照
 
     macro_context_data = await asyncio.to_thread(get_tradfi_macro_context)
     LAST_UPDATE_TIME = time.time()
@@ -936,6 +1022,7 @@ async def main_loop():
     await send_test_message()
     asyncio.create_task(self_ping_task(interval=PING_INTERVAL)) 
     asyncio.create_task(instant_price_check_task())
+    asyncio.create_task(best_position_notification_task()) # 📌 最良ポジションタスクを起動
     
     # 起動時の初期クライアント設定
     if CCXT_CLIENT_NAMES:
@@ -1005,7 +1092,10 @@ async def main_loop():
         # --- 4. シグナルとエラー処理 ---
         has_major_error = False
         
-        # 📌 v9.1.11 修正: トレードシグナルとヘルスチェックの通知を専用タスクに委譲
+        # 📌 修正: 分析結果をグローバル変数に保存 (RateLimit/Timeoutを除外)
+        LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout"]]
+        
+        # トレードシグナルとヘルスチェックの通知を専用タスクに委譲
         asyncio.create_task(signal_notification_task(signals))
         
         # エラー/レート制限の処理はメインループに残す
@@ -1036,7 +1126,7 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.1.11")
+app = FastAPI(title="Apex BOT API", version="v9.1.12")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1044,8 +1134,8 @@ async def startup_event():
     initialize_ccxt_client()
     global CCXT_CLIENT_NAME
     if CCXT_CLIENT_NAMES:
-        CCXT_CLIENT_NAME = CCXT_CLIENT_NAMES[0] # 初期の優先クライアントを設定
-    logging.info(f"🚀 Apex BOT v9.1.11 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
+        CCXT_CLIENT_NAME = CCCT_CLIENT_NAMES[0] # 初期の優先クライアントを設定
+    logging.info(f"🚀 Apex BOT v9.1.12 Startup Complete. Initial Client: {CCXT_CLIENT_NAME}")
     asyncio.create_task(main_loop())
 
 
@@ -1054,7 +1144,7 @@ def get_status():
     """Render/Kubernetesヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.1.11",
+        "bot_version": "v9.1.12",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "current_client": CCXT_CLIENT_NAME,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
