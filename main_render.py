@@ -1,9 +1,6 @@
 # ====================================================================================
-# Apex BOT v11.3.4-KRAKEN TRADING FOCUS (レート制限回避のための最終調整)
-# 修正点: 
-# 1. SYMBOL_WAIT を 10.0 秒に大幅に延長しました (レート制限回避最優先)。
-# 2. CCXTクライアントの timeout と rateLimit を調整し、KrakenのAPI制限と戦います。
-# 3. バージョン情報を v11.3.4 に更新。
+# Apex BOT v11.0.0-KRAKEN TRADING FOCUS (ATR強化版)
+# 修正点: 監視クライアントをKrakenのみに集約。ATRを利用したポジション分析を強化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,9 +34,10 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
-TOP_SYMBOL_LIMIT = 10      
-LOOP_INTERVAL = 360        
-SYMBOL_WAIT = 10.0         # 🚨 修正1: 銘柄間の遅延を 10.0 秒に大幅に延長
+TOP_SYMBOL_LIMIT = 20      
+LOOP_INTERVAL = 360        # 🚨 修正: 360秒 (6分) に延長
+SYMBOL_WAIT = 4.5          # 🚨 修正: 4.5秒に延長 (レート制限回避の決定打)
+
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
@@ -50,8 +48,8 @@ TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
 CLIENT_COOLDOWN = 45 * 60  
-REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
-VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
+REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} # 🚨 修正: 必要OHLCVを100に削減
+VOLATILITY_BB_PENALTY_THRESHOLD = 5.0  
 
 # グローバル状態変数
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
@@ -82,28 +80,6 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 # ====================================================================================
 # UTILITIES & CLIENTS (CCXT実装)
 # ====================================================================================
-
-def send_telegram_html(message: str, is_emergency: bool = False):
-    """HTML形式のメッセージをTelegramに送信"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("❌ Telegram設定(トークン/ID)が不足しています。通知をスキップ。")
-        return
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML',
-        'disable_notification': not is_emergency
-    }
-    
-    try:
-        response = requests.post(url, data=payload, timeout=10)
-        response.raise_for_status() 
-    except requests.exceptions.HTTPError as e:
-        logging.error(f"❌ Telegram HTTPエラー: {response.status_code} - {response.text}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Telegram リクエストエラー: {e}")
 
 def format_price_utility(price: float, symbol: str) -> str:
     """価格表示をシンボルに応じて整形"""
@@ -139,9 +115,8 @@ def format_telegram_message(signal: Dict) -> str:
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
-            # 🚨 修正: バージョン情報
             return (
-                f"🚨 <b>Apex BOT v11.3.4-KRAKEN FOCUS - 死活監視 (システム正常)</b> 🟢\n" 
+                f"🚨 <b>Apex BOT v11.0.0-KRAKEN FOCUS - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -191,12 +166,7 @@ def format_telegram_message(signal: Dict) -> str:
     if signal.get('volatility_penalty_applied'):
         penalty_info = "⚠️ ボラティリティペナルティ適用済 (荒れた相場)"
         
-    rr_ratio = signal.get('rr_ratio', 0.0) 
-
-    # ATRの値が0の場合の警告メッセージを追加
-    atr_warning = ""
-    if atr_val == 0.0:
-         atr_warning = "⚠️ <b>ATR/TP/SLが0: データ不足または計算失敗。取引不可。</b>"
+    rr_ratio = signal.get('rr_ratio', 0.0) # 新しく追加
 
     return (
         f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
@@ -210,8 +180,8 @@ def format_telegram_message(signal: Dict) -> str:
         f"  - エントリー: **<code>${format_price(signal['entry'])}</code>**\n"
         f"🟢 <b>利確 (TP)</b>: **<code>${format_price(signal['tp1'])}</code>**\n" 
         f"🔴 <b>損切 (SL)</b>: **<code>${format_price(signal['sl'])}</code>**\n"
-        f"  - **リスクリワード比 (RRR)**: **<code>1:{rr_ratio:.2f}</code>** (スコアに基づく動的設定)\n" 
-        f"{atr_warning}\n" 
+        f"  - **リスクリワード比 (RRR)**: **<code>1:{rr_ratio:.2f}</code>** (スコアに基づく動的設定)\n" # ATR強化
+        f"\n"
         f"📈 <b>複合分析詳細</b>:\n"
         f"  - <b>マルチタイムフレーム (MTFA)</b>: {mtfa_summary} ({overall_judgment})\n"
         f"  - <i>市場レジーム</i>: {signal['regime']} (ADX: {adx_str}) | BBands幅: {bb_width_pct:.2f}%\n"
@@ -242,12 +212,8 @@ def format_best_position_message(signal: Dict) -> str:
     h4_trend = mtfa_data.get('h4_trend', 'N/A')
     
     format_price = format_price_lambda(signal['symbol'])
-    rr_ratio = signal.get('rr_ratio', 0.0) 
+    rr_ratio = signal.get('rr_ratio', 0.0) # 新しく追加
     
-    atr_warning = ""
-    if atr_val == 0.0:
-         atr_warning = "⚠️ <b>ATR/TP/SLが0: データ不足または計算失敗。取引不可。</b>"
-
     return (
         f"👑 <b>{signal['symbol']} - 12時間 最良ポジション候補</b> {side_icon} 🔥\n"
         f"<i>選定時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i> (データ元: {source_client})\n"
@@ -261,7 +227,7 @@ def format_best_position_message(signal: Dict) -> str:
         f"  - 利確 (TP): <code>${format_price(signal['tp1'])}</code>\n"
         f"  - 損切 (SL): <code>${format_price(signal['sl'])}</code>\n"
         f"  - **リスクリワード比 (RRR)**: <code>1:{rr_ratio:.2f}</code>\n"
-        f"{atr_warning}\n"
+        f"\n"
         f"💡 <b>選定理由 (MTFA/複合)</b>:\n"
         f"  1. <b>トレンド一致</b>: 1H ({h1_trend}) と 4H ({h4_trend}) が {side_icon.split()[1]} に一致。\n"
         f"  2. <b>レジーム</b>: {signal['regime']} (ADX: {adx_str}) で、BBands幅: {bb_width_pct}。\n"
@@ -274,24 +240,40 @@ def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
     
+    # 🚨 修正: Krakenのみに絞る
     clients = {
-        'Kraken': ccxt_async.kraken({
-            "enableRateLimit": True, 
-            "timeout": 40000, # 🚨 修正3: タイムアウトを 40 秒に延長
-            "rateLimit": 4000 # 🚨 修正3: レート制限を 4 秒あたり 1 リクエスト程度に調整
-        }), 
+        'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 30000}), 
     }
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
     ACTIVE_CLIENT_HEALTH = {name: time.time() for name in CCXT_CLIENT_NAMES}
     logging.info(f"✅ CCXTクライアント初期化完了。利用可能なクライアント: {CCXT_CLIENT_NAMES}")
 
+def send_telegram_html(text: str, is_emergency: bool = False):
+    """HTML形式でTelegramにメッセージを送信する（ブロッキング）"""
+    if 'YOUR' in TELEGRAM_TOKEN:
+        clean_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "").replace("<code>", "").replace("</code>", "").replace("\n", " ").replace("•", "").replace("-", "").strip()
+        logging.warning("⚠️ TELEGRAM_TOKENが初期値です。ログに出力されます。")
+        logging.info("--- TELEGRAM通知（ダミー）---\n" + clean_text)
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML",
+        "disable_web_page_preview": True, "disable_notification": not is_emergency
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except requests.exceptions.RequestException as e:
+        logging.error(f"❌ Telegram送信エラーが発生しました: {e}")
+
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v11.3.4-KRAKEN FOCUS - 起動テスト通知 (最終レート制限調整)</b> 🚀\n\n" 
+        f"🤖 <b>Apex BOT v11.0.0-KRAKEN FOCUS - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>安定構成: 銘柄間の待機時間を 10 秒に延長し、Krakenのレート制限を最大限回避します。</b>"
+        f"<b>安定構成: Krakenの単独監視体制に移行し、ATRに基づくポジション分析を強化しました。</b>\n"
+        f"<b>【主要変更点】: 分析レベルを向上させ、取引の優位性を追求します。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
@@ -304,14 +286,11 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return [], "ClientError", client_name
     
-    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
+    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 150)
     try:
         ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
-        
-        # データ不足の場合、DataShortageとして返す (最小行数35を基準にチェック)
-        if not ohlcv or len(ohlcv) < 35: 
-             return ohlcv, "DataShortage", client_name 
-
+        if len(ohlcv) < limit * 0.8: # データが大幅に不足している場合も警告
+            return ohlcv, "DataShortage", client_name
         return ohlcv, "Success", client_name
         
     except ccxt.NotSupported:
@@ -362,15 +341,19 @@ def get_news_sentiment(symbol: str) -> Dict:
 # ====================================================================================
 
 def calculate_trade_levels(price: float, side: str, atr_value: float, score: float) -> Dict:
-    """ATR値に基づいてエントリー、TP、SLを計算"""
-    if atr_value <= 0 or pd.isna(atr_value): 
-        return {"entry": price, "sl": price, "tp1": price, "rr_ratio": 0.0}
+    """🚨 強化: ATR値に基づいてエントリー、TP、SLを計算 (ATR分析レベル向上)"""
+    if atr_value <= 0: return {"entry": price, "sl": price, "tp1": price, "rr_ratio": 0.0}
     
+    # 1. SL距離 (ATRの乗数)
+    # 低スコア(0.55)では1.0 ATR、高スコア(1.0)では0.75 ATRをストップロス幅とする（優位性の高い取引ではよりタイトなSL）
     sl_multiplier = np.clip(1.0 - (score - 0.55) * 0.5, 0.75, 1.0) 
     sl_dist = sl_multiplier * atr_value
     
+    # 2. RRRの決定 (スコアに基づく動的な利確目標)
+    # スコアが高いほどRRRを上げる: 低スコア(0.55)でRRR=1.5、高スコア(1.0)でRRR=3.0
     rr_ratio = np.clip(1.5 + (score - 0.55) * 3.3, 1.5, 3.0) 
     
+    # 3. TP距離
     tp1_dist = rr_ratio * sl_dist
     
     entry = price
@@ -388,51 +371,32 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     """OHLCVからテクニカル指標 (RSI, MACD, ADX, ATR, BBands) を計算"""
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     
-    MIN_REQUIRED_ROWS = 35 
-    if len(df) < MIN_REQUIRED_ROWS:
-        logging.warning(f"⚠️ テクニカル指標の計算をスキップ: データ行数が {len(df)} (< {MIN_REQUIRED_ROWS})")
-        return {"rsi": 50, "macd_hist": 0, "adx": 25, "atr_value": 0.0, "bb_width_pct": 0, "ma_position_score": 0, "ma_position": "中立", "df": df}
+    if len(df) < 50:
+          return {"rsi": 50, "macd_hist": 0, "adx": 25, "atr_value": 0.0, "bb_width_pct": 0, "ma_position_score": 0, "ma_position": "中立", "df": df}
     
     df.ta.macd(append=True)
     df.ta.rsi(append=True)
     df.ta.adx(append=True)
     df.ta.atr(append=True)
     bbands = df.ta.bbands()
-    
-    # SMA20とSMA50の計算
     df.ta.sma(length=20, append=True)
-    try:
-        df.ta.sma(length=50, append=True)
-    except Exception:
-        pass 
-        
+    df.ta.sma(length=50, append=True)
+    
     last = df.iloc[-1]
     
     bb_width_col = bbands.columns[bbands.columns.str.contains('BBW_')].tolist()
     bb_width = last[bb_width_col[0]] if bb_width_col and not pd.isna(last[bb_width_col[0]]) else 0.0
-    bb_width_pct = bb_width / last['SMA_20'] * 100 if 'SMA_20' in df.columns and last['SMA_20'] > 0 and not pd.isna(last['SMA_20']) else 0
+    bb_width_pct = bb_width / last['SMA_20'] * 100 if last['SMA_20'] > 0 and not pd.isna(last['SMA_20']) else 0
     
     ma_pos_score = 0
     ma_position = "中立"
-    
-    sma20_exists = 'SMA_20' in df.columns
-    sma50_exists = 'SMA_50' in df.columns
-    
-    if sma20_exists and sma50_exists:
-        if last['Close'] > last['SMA_20'] and last['SMA_20'] > last['SMA_50']:
-            ma_pos_score = 0.3
-            ma_position = "強力なロングトレンド"
-        elif last['Close'] < last['SMA_20'] and last['SMA_20'] < last['SMA_50']:
-            ma_pos_score = -0.3
-            ma_position = "強力なショートトレンド"
-    elif sma20_exists:
-        if last['Close'] > last['SMA_20']:
-            ma_pos_score = 0.1
-            ma_position = "短期ロングバイアス"
-        elif last['Close'] < last['SMA_20']:
-            ma_pos_score = -0.1
-            ma_position = "短期ショートバイアス"
-            
+    if last['Close'] > last['SMA_20'] and last['SMA_20'] > last['SMA_50']:
+        ma_pos_score = 0.3
+        ma_position = "強力なロングトレンド"
+    elif last['Close'] < last['SMA_20'] and last['SMA_20'] < last['SMA_50']:
+        ma_pos_score = -0.3
+        ma_position = "強力なショートトレンド"
+        
     atr_col = df.columns[df.columns.str.startswith('ATR_')].tolist()
     atr_value = last[atr_col[0]] if atr_col and not pd.isna(last[atr_col[0]]) else 0.0 
     
@@ -488,7 +452,7 @@ def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: 
 def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Dict, tech_data_h4: Dict, sentiment_data: Dict, macro_context: Dict) -> Tuple[float, str, str, Dict, bool]:
     """市場分析と最終スコアリングロジック"""
     df_15m = tech_data_15m.get('df')
-    if df_15m is None or len(df_15m) < 35: return 0.5, "Neutral", "不明", {}, False 
+    if df_15m is None or len(df_15m) < 50: return 0.5, "Neutral", "不明", {}, False
     
     adx_15m = tech_data_15m.get('adx', 25)
     bb_width_pct_15m = tech_data_15m.get('bb_width_pct', 0)
@@ -563,21 +527,13 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     ohlcv_data = {'15m': results[0][0], '1h': results[1][0], '4h': results[2][0]}
     status_data = {'15m': results[0][1], '1h': results[1][1], '4h': results[2][1]} 
     
-    if status_data['15m'] in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]: 
+    if status_data['15m'] in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported"] or not ohlcv_data['15m']:
         return {"symbol": symbol, "side": status_data['15m'], "score": 0.0, "client": client_name} 
         
     tech_data_15m_full = calculate_technical_indicators(ohlcv_data['15m'])
     tech_data_h1_full = calculate_technical_indicators(ohlcv_data['1h'])
     tech_data_h4_full = calculate_technical_indicators(ohlcv_data['4h'])
     
-    if tech_data_15m_full.get('atr_value', 0) == 0.0 or tech_data_15m_full.get('macd_hist', 0) == 0:
-        logging.warning(f"⚠️ {symbol}: 15mのATR/MACD計算が0です。データ不足または計算失敗。Neutralとして処理します。")
-        # ATR/MACDが0の場合、データが極端に少ないか、テクニカル計算に必要なローソク足がないと判断
-        return {"symbol": symbol, "side": "Neutral", "confidence": 0.5, "regime": "Data Error",
-                "macro_context": macro_context_data, "is_fallback": True,
-                "tech_data": tech_data_15m_full, "client": client_name}
-
-
     tech_data_15m = {k: v for k, v in tech_data_15m_full.items() if k != 'df'}
     
     final_score, final_side, regime, mtfa_data, volatility_penalty_applied = market_analysis_and_score(
@@ -588,6 +544,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     current_price = tech_data_15m_full['df']['Close'].iloc[-1]
     atr_value = tech_data_15m.get('atr_value', 0)
     
+    # 🚨 強化されたトレードレベル計算
     trade_levels = calculate_trade_levels(current_price, final_side, atr_value, final_score)
     
     if final_side == "Neutral":
@@ -598,8 +555,8 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     source = client_name
     return {"symbol": symbol, "side": final_side, "price": current_price, "score": final_score,
             "entry": trade_levels['entry'], "sl": trade_levels['sl'],
-            "tp1": trade_levels['tp1'], "tp2": trade_levels['tp1'], 
-            "rr_ratio": trade_levels['rr_ratio'], 
+            "tp1": trade_levels['tp1'], "tp2": trade_levels['tp1'], # TP2はTP1と同じ値でダミーとして維持
+            "rr_ratio": trade_levels['rr_ratio'], # 新しく追加
             "regime": regime, "is_fallback": status_data['15m'] != "Success", 
             "macro_context": macro_context_data, "source": source, 
             "sentiment_score": sentiment_data["sentiment_score"],
@@ -614,50 +571,36 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 # -----------------------------------------------------------------------------------
 
 async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> List[str]:
-    """出来高上位銘柄リストをCCXTから取得し、/USDTペアに限定する。"""
+    """出来高上位銘柄リストをCCXTから取得。"""
     global CURRENT_MONITOR_SYMBOLS
     logging.info(f"🔄 銘柄リストを更新します。出来高TOP{limit}銘柄を取得試行... (クライアント: {client_name})")
     
-    client = CCXT_CLIENTS_DICT.get('Kraken') 
+    client = CCXT_CLIENTS_DICT.get('Kraken') # Krakenのみを使用
     if not client: 
         logging.error("致命的エラー: Krakenクライアントが見つかりません。")
         return DEFAULT_SYMBOLS
 
-    # USDペアとステーブルコインペアを排除
-    EXCLUDE_SYMBOLS_PARTIAL = [
-        '/USD', 
-        'USDC/', 'USDT/', 'DAI/', 'TUSD/', 'EUR/', 'GBP/', 'CAD/', 
-    ]
-
     try:
         tickers = await client.fetch_tickers()
         
-        # USDTペアのみに絞り込み、出来高の高いTOP銘柄を選択
         usdt_pairs = {
             symbol: ticker.get('quoteVolume', 0) 
             for symbol, ticker in tickers.items() 
-            if symbol.endswith('/USDT') 
-            and ticker.get('quoteVolume', 0) > 0
-            and not any(excl in symbol for excl in EXCLUDE_SYMBOLS_PARTIAL)
-            and not symbol.endswith('.d') 
-            and symbol not in ['ETH/USDT.d', 'BTC/USDT.d'] 
+            if (symbol.endswith('/USDT') or symbol.endswith('/USD')) and ticker.get('quoteVolume', 0) > 0
         }
 
         sorted_pairs = sorted(usdt_pairs.items(), key=lambda item: item[1], reverse=True)
         new_symbols = [symbol for symbol, volume in sorted_pairs[:limit]]
 
         if new_symbols:
-            # BTC/USDT, ETH/USDT, SOL/USDT が必ず含まれるようにする
-            stable_symbols = list(set(DEFAULT_SYMBOLS + new_symbols))[:limit]
-            
-            logging.info(f"✅ クライアント Kraken を使用し、出来高TOP{len(new_symbols)}の /USDT 銘柄を取得しました。")
-            CURRENT_MONITOR_SYMBOLS = stable_symbols
-            return stable_symbols
+            logging.info(f"✅ クライアント Kraken を使用し、出来高TOP{len(new_symbols)}銘柄を取得しました。")
+            CURRENT_MONITOR_SYMBOLS = new_symbols
+            return new_symbols
 
     except Exception as e:
         logging.warning(f"⚠️ クライアント Kraken で銘柄リスト取得エラーが発生しました: {type(e).__name__}。フォールバック銘柄を使用します。")
 
-    logging.warning(f"❌ 出来高TOP銘柄の取得に失敗しました。フォールバックとして {len(DEFAULT_SYMBOLS)} /USDT 銘柄を使用します。")
+    logging.warning(f"❌ 出来高TOP銘柄の取得に失敗しました。フォールバックとして {len(DEFAULT_SYMBOLS)}銘柄を使用します。")
     CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS
     return DEFAULT_SYMBOLS
 
@@ -694,11 +637,6 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
             asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(signal))))
             
         elif side in ["ロング", "ショート"] and score >= SIGNAL_THRESHOLD:
-            # TP/SLが0のシグナルは通知しない
-            if signal.get('rr_ratio', 0.0) == 0.0:
-                 logging.warning(f"⚠️ {symbol}: ATR/TP/SLが0のため、取引シグナル通知をスキップしました。")
-                 continue
-
             if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                 TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                 asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(signal))))
@@ -716,10 +654,6 @@ async def best_position_notification_task():
             
             for signal in LAST_ANALYSIS_SIGNALS:
                 if signal.get('side') in ["ロング", "ショート"] and signal['score'] > max_score:
-                    # TP/SLが0のシグナルは最良ポジションから除外
-                    if signal.get('rr_ratio', 0.0) == 0.0:
-                        continue
-                        
                     max_score = signal['score']
                     strongest_signal = signal
             
@@ -733,10 +667,12 @@ async def main_loop():
     global LAST_UPDATE_TIME, LAST_SUCCESS_TIME, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS
     global ACTIVE_CLIENT_HEALTH, CCXT_CLIENT_NAMES, LAST_ANALYSIS_SIGNALS, BTC_DOMINANCE_CONTEXT
 
+    # 初期設定とテスト
     BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
     LAST_UPDATE_TIME = time.time()
     await send_test_message()
     
+    # バックグラウンドタスクの開始
     asyncio.create_task(self_ping_task(interval=PING_INTERVAL)) 
     asyncio.create_task(instant_price_check_task())
     asyncio.create_task(best_position_notification_task()) 
@@ -751,11 +687,13 @@ async def main_loop():
         await asyncio.sleep(0.005)
         current_time = time.time()
         
+        # 銘柄リストとマクロ環境の更新
         if current_time - LAST_UPDATE_TIME > DYNAMIC_UPDATE_INTERVAL:
             await update_monitor_symbols_dynamically('Kraken', limit=TOP_SYMBOL_LIMIT)
             BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
             LAST_UPDATE_TIME = current_time
 
+        # クライアントの準備
         client_name = 'Kraken'
         if current_time < ACTIVE_CLIENT_HEALTH.get(client_name, 0):
             logging.warning("❌ Krakenクライアントがクールダウン中です。次のインターバルまで待機します。")
@@ -779,7 +717,8 @@ async def main_loop():
             signal = await generate_signal_candidate(symbol, BTC_DOMINANCE_CONTEXT, client_name)
             signals.append(signal)
 
-            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]:
+            # エラー処理
+            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported"]:
                 cooldown_end_time = time.time() + CLIENT_COOLDOWN
                 
                 error_msg = f"❌ {signal['side']}エラー発生: クライアント {client_name} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット ({CLIENT_COOLDOWN/60:.0f}分クールダウン)。"
@@ -787,17 +726,20 @@ async def main_loop():
                 
                 ACTIVE_CLIENT_HEALTH[client_name] = cooldown_end_time
                 
-                if signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "DataShortage"]:
+                if signal.get('side') in ["RateLimit", "Timeout", "ExchangeError"]:
                     asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(error_msg, is_emergency=False)))
                     has_major_error = True
                     TOTAL_ANALYSIS_ERRORS += 1
                 
+                # 単独クライアントなので、エラー発生時は分析を即座に中止
                 break 
                 
+            # 🚨 APIレート制限回避のための銘柄間遅延
             await asyncio.sleep(SYMBOL_WAIT) 
 
         
-        LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]]
+        # 最終シグナルと待機処理
+        LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported"]]
         asyncio.create_task(signal_notification_task(signals))
         
         if not has_major_error:
@@ -806,6 +748,7 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL) 
         else:
             logging.info("➡️ クライアントがクールダウン中のため、待機時間に移行します。")
+            # クールダウン終了まで待つ（最小1分、最大でLOOP_INTERVAL）
             sleep_to_cooldown = ACTIVE_CLIENT_HEALTH['Kraken'] - current_time
             await asyncio.sleep(min(max(60, sleep_to_cooldown), LOOP_INTERVAL)) 
 
@@ -813,13 +756,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v11.3.4-KRAKEN_FOCUS")
+app = FastAPI(title="Apex BOT API", version="v11.0.0-KRAKEN_FOCUS")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v11.3.4-KRAKEN TRADING FOCUS Startup Complete.") 
+    logging.info("🚀 Apex BOT v11.0.0-KRAKEN TRADING FOCUS Startup Complete.")
     
     asyncio.create_task(main_loop())
 
@@ -829,7 +772,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.3.4-KRAKEN_FOCUS (USDT ONLY, 10s WAIT)",
+        "bot_version": "v11.0.0-KRAKEN_FOCUS (TOP10)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": len(CCXT_CLIENT_NAMES) if time.time() >= ACTIVE_CLIENT_HEALTH.get('Kraken', 0) else 0,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -844,4 +787,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v11.3.4-KRAKEN_FOCUS, USDT ONLY, 10s WAIT)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.0.0-KRAKEN_FOCUS, TOP10)."}, status_code=200)
