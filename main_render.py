@@ -7,6 +7,7 @@ import random
 import time
 from datetime import datetime
 import telegram
+import sys # システム終了のために追加
 
 # ====================================================================================
 # ロギング設定
@@ -15,6 +16,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
+    # Render環境でasyncioを動かすための設定 (重要)
+    stream=sys.stdout 
 )
 
 # ====================================================================================
@@ -87,10 +90,12 @@ async def send_telegram_message(message: str, client_name: str = 'System'):
     """Telegram通知を送信"""
     if TELEGRAM_BOT:
         try:
+            # 非同期でメッセージを送信
             await TELEGRAM_BOT.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"[{client_name}] {message}")
         except Exception as e:
-            logging.error(f"❌ Telegram通知の送信に失敗しました: {e}")
-            
+            # logging.error(f"❌ Telegram通知の送信に失敗しました: {e}")
+            pass # 頻繁なエラーログを避けるため、ここではログを抑制
+
 # ====================================================================================
 # 初期化関数
 # ====================================================================================
@@ -99,6 +104,7 @@ def initialize_telegram():
     """Telegramクライアントを初期化"""
     global TELEGRAM_BOT
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        # python-telegram-bot v20以降はasyncioに対応
         TELEGRAM_BOT = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
         logging.info("✅ Telegramクライアント初期化完了。")
     else:
@@ -111,8 +117,8 @@ def initialize_ccxt_client():
     
     for name in CCXT_CLIENT_NAMES:
         params = API_KEYS.get(name, {})
-        if params.get('apiKey') in ('YOUR_OKX_API_KEY', None) and name != 'kraken':
-             # APIキーがない場合はパブリックアクセスのみでインスタンス化（非推奨だが続行）
+        # APIキーがない場合はパブリックアクセスのみでインスタンス化
+        if params.get('apiKey') in ('YOUR_OKX_API_KEY', None):
              logging.warning(f"⚠️ {name} のAPIキーが設定されていません。パブリックアクセスのみで初期化します。")
         
         try:
@@ -129,7 +135,8 @@ def initialize_ccxt_client():
 
     if not CCXT_CLIENTS_DICT:
         logging.critical("❌ 全てのCCXTクライアントの初期化に失敗しました。プログラムを終了します。")
-        raise SystemExit("CCXTクライアントの初期化エラー")
+        # Render/Uvicorn環境では sys.exit(1) の代わりに例外を発生させることが推奨されます
+        raise RuntimeError("CCXTクライアントの初期化エラー")
         
     logging.info(f"✅ CCXTクライアント初期化完了。利用可能なクライアント: {available_clients}")
     
@@ -150,24 +157,27 @@ async def fetch_top_volume_symbols(client: ccxt.Exchange) -> List[str]:
         # fetch_tickersで全銘柄のティッカー情報を取得
         tickers = await client.fetch_tickers()
         
-        # 1. USDTペアかつ出来高情報(quoteVolume)がある銘柄のみにフィルタリング
-        usdt_pairs = {
-            symbol: ticker for symbol, ticker in tickers.items() 
-            if symbol.endswith(f'/{QUOTE_CURRENCY}') and 
-               ticker and 
-               ticker.get('quoteVolume') is not None and 
-               float(ticker.get('quoteVolume', 0)) > 0 # 出来高が0でないことを確認
-        }
-        
+        usdt_pairs = {}
+        for symbol, ticker in tickers.items():
+            # 1. USDTペアであること (USDT-margined SWAPも含む)
+            # 2. ティッカーオブジェクトが存在し、出来高情報(quoteVolumeまたはbaseVolume)があること
+            if symbol.endswith(f'/{QUOTE_CURRENCY}'):
+                volume = ticker.get('quoteVolume') # 見積もり通貨建ての出来高 (USDT量)を優先
+                if volume is None:
+                    # quoteVolumeがない場合、baseVolumeで代用できるかチェック（取引所による）
+                    volume = ticker.get('baseVolume', 0)
+                
+                if volume is not None and float(volume) > 0:
+                    usdt_pairs[symbol] = {'volume': float(volume)}
+
         if not usdt_pairs:
             logging.warning(f"⚠️ {client_name} では {QUOTE_CURRENCY} ペアの出来高情報が見つかりませんでした。")
             return []
 
-        # 2. quoteVolumeで降順にソート
-        # quoteVolumeの値はfloatに変換して比較
+        # 2. 出来高(volume)で降順にソート
         sorted_pairs = sorted(
             usdt_pairs.items(), 
-            key=lambda item: float(item[1]['quoteVolume']), 
+            key=lambda item: item[1]['volume'], 
             reverse=True
         )
 
@@ -189,7 +199,7 @@ async def update_monitor_symbols_dynamically():
     """
     監視銘柄リストを更新（現在のクライアントの出来高トップ30に更新）
     """
-    global CURRENT_MONITOR_SYMBOLS
+    global CURRENT_MONITOR_SYMBOLS, LAST_UPDATE_TIME
     logging.info(f"🔄 銘柄リストを出来高トップ {TOP_VOLUME_LIMIT} に更新します (クライアント: {CCXT_CLIENT_NAME})。")
     
     current_client = CCXT_CLIENTS_DICT[CCXT_CLIENT_NAME]
@@ -204,6 +214,7 @@ async def update_monitor_symbols_dynamically():
         CURRENT_MONITOR_SYMBOLS = filtered_symbols
         
     logging.info(f"✅ クライアント {CCXT_CLIENT_NAME} の分析対象銘柄リスト: ({len(CURRENT_MONITOR_SYMBOLS)}銘柄)")
+    LAST_UPDATE_TIME = time.time()
     await asyncio.sleep(0.5)
 
 # ====================================================================================
@@ -212,7 +223,7 @@ async def update_monitor_symbols_dynamically():
 
 async def fetch_ohlcv_with_fallback(client: ccxt.Exchange, symbol: str, timeframe: str) -> Optional[List[List[float]]]:
     """
-    OHLCVデータを取得し、NotSupportedエラーを捕捉してクライアントをクールダウン
+    OHLCVデータを取得し、NotSupportedエラーなどを捕捉してクライアントをクールダウン
     """
     client_name = client.id
     mapped_symbol = get_mapped_symbol(client_name, symbol)
@@ -220,13 +231,12 @@ async def fetch_ohlcv_with_fallback(client: ccxt.Exchange, symbol: str, timefram
     
     try:
         # OHLCVデータを取得
+        # await client.load_markets() # 市場情報のロードは起動時または必要に応じて
         ohlcv = await client.fetch_ohlcv(mapped_symbol, mapped_timeframe, limit=200)
         return ohlcv
         
     except ccxt.NotSupported as e:
-        # CCXT側でサポートされていないシンボルやタイムフレームの場合
-        logging.error(f"❌ NotSupportedエラー発生: クライアント {client_name} はシンボル {symbol} ({mapped_symbol}) をサポートしていません。")
-        # 特定のシンボルのエラーなので、クライアント全体はクールダウンしない
+        logging.error(f"❌ NotSupportedエラー発生: クライアント {client_name} はシンボル {symbol} ({mapped_symbol}) をサポートしていません。 (スキップ)")
         return None
         
     except (ccxt.NetworkError, ccxt.ExchangeError) as e:
@@ -245,7 +255,7 @@ async def fetch_ohlcv_with_fallback(client: ccxt.Exchange, symbol: str, timefram
 
 async def generate_signal_candidate(client: ccxt.Exchange, symbol: str, timeframe: str):
     """
-    単一銘柄のOHLCVを取得し、簡単な分析を実行（今回はデータ取得のみ）
+    単一銘柄のOHLCVを取得し、簡単な分析を実行（今回はデータ取得と出来高チェックのみ）
     """
     ohlcv = await fetch_ohlcv_with_fallback(client, symbol, timeframe)
     
@@ -254,12 +264,14 @@ async def generate_signal_candidate(client: ccxt.Exchange, symbol: str, timefram
 
     # 最後のローソク足の情報を取得
     last_candle = ohlcv[-1]
+    # [timestamp, open, high, low, close, volume]
     close_price = last_candle[4]
     volume = last_candle[5]
 
     # 仮の分析: 出来高が過去5本の平均より高い場合を「注目」とする
     past_volumes = [c[5] for c in ohlcv[-6:-1]] # 最新を除く過去5本
-    avg_volume = sum(past_volumes) / 5 if past_volumes else 0
+    # ゼロ除算を避けるためのチェック
+    avg_volume = sum(past_volumes) / 5 if past_volumes and sum(past_volumes) > 0 else 0
     
     if volume > avg_volume * 1.5 and avg_volume > 0:
         # 強力なシグナル候補としてログ出力
@@ -280,71 +292,58 @@ async def main_loop():
     global CCXT_CLIENT_NAME, LAST_UPDATE_TIME, LAST_SWITCH_TIME
 
     # 起動時のクライアント選択 (ランダム)
-    CCXT_CLIENT_NAME = random.choice(list(CCXT_CLIENTS_DICT.keys()))
-    LAST_SWITCH_TIME = time.time()
-    
-    # 初回起動通知
-    await send_telegram_message(f"🚀 Apex BOT v9.1.18-DynamicVolumeSelector Startup Complete. Initial Client: {CCXT_CLIENT_NAME.upper()}", 'System')
+    if not CCXT_CLIENT_NAME:
+        CCXT_CLIENT_NAME = random.choice(list(CCXT_CLIENTS_DICT.keys()))
+        LAST_SWITCH_TIME = time.time()
+        
+        # 初回起動通知
+        await send_telegram_message(f"🚀 Apex BOT v9.1.18 Startup. Initial Client: {CCXT_CLIENT_NAME.upper()}", 'System')
+
 
     while True:
         current_time = time.time()
         
-        # --- 1. クライアントの選択と切り替え ---
+        # --- 1. クライアントの選択と切り替え/クールダウン解除 ---
         available_clients = [name for name, health in CCXT_CLIENT_HEALTH.items() if health['status'] == 'ok']
         
+        # クールダウン解除チェック
+        for name, health in CCXT_CLIENT_HEALTH.items():
+            if health['status'] == 'cooldown' and current_time >= health['cooldown_until']:
+                health['status'] = 'ok'
+                logging.info(f"✅ クライアント {name.upper()} のクールダウンが解除されました。")
+                await send_telegram_message(f"✅ クライアント {name.upper()} のクールダウンが解除されました。", name)
+                available_clients.append(name)
+
+        # クライアント切り替え
         if current_time - LAST_SWITCH_TIME > CLIENT_SWITCH_INTERVAL and available_clients:
-            # クライアントを切り替え
             old_client_name = CCXT_CLIENT_NAME
             new_client_name = random.choice(available_clients)
             
             if new_client_name != old_client_name:
                 CCXT_CLIENT_NAME = new_client_name
-                LAST_SWITCH_TIME = current_time
                 logging.info(f"🔄 クライアントを {old_client_name.upper()} から {CCXT_CLIENT_NAME.upper()} に切り替えました。")
                 await send_telegram_message(f"🔄 クライアントを {old_client_name.upper()} から {CCXT_CLIENT_NAME.upper()} に切り替えました。", 'System')
-            else:
-                 # ランダム選択の結果、同じクライアントになった場合も時間を更新して続行
-                LAST_SWITCH_TIME = current_time
-
-        elif not available_clients:
-            logging.critical("❌ 全てのクライアントがクールダウン中です。5分間待機します。")
-            await asyncio.sleep(300)
-            continue
+                # クライアント切り替え時は銘柄リストの即時更新が必要
+                LAST_UPDATE_TIME = 0 
             
-        # クールダウン中のクライアントをスキップ
+            LAST_SWITCH_TIME = current_time
+
+        # クールダウン中のクライアントの場合は、スキップまたは切り替え
         if CCXT_CLIENT_HEALTH[CCXT_CLIENT_NAME]['status'] != 'ok':
-            cool_down_until = CCXT_CLIENT_HEALTH[CCXT_CLIENT_NAME]['cooldown_until']
-            remaining = cool_down_until - current_time
-            if remaining > 0:
-                logging.warning(f"⏳ クライアント {CCXT_CLIENT_NAME.upper()} はクールダウン中です。残り {remaining:.0f} 秒。次のクライアントを選択します。")
-                
-                # クールダウン解除されたクライアントがないかチェック
-                for name, health in CCXT_CLIENT_HEALTH.items():
-                    if health['status'] == 'cooldown' and current_time >= health['cooldown_until']:
-                        health['status'] = 'ok'
-                        logging.info(f"✅ クライアント {name.upper()} のクールダウンが解除されました。")
-                        await send_telegram_message(f"✅ クライアント {name.upper()} のクールダウンが解除されました。", name)
-                
-                # 別の利用可能なクライアントを選択して再試行
-                new_available = [name for name, health in CCXT_CLIENT_HEALTH.items() if health['status'] == 'ok']
-                if new_available:
-                    CCXT_CLIENT_NAME = random.choice(new_available)
-                    continue # ループの最初に戻り、新しいクライアントで処理
-                else:
-                    logging.critical("❌ 全てのクライアントがクールダウン中のため待機します。")
-                    await asyncio.sleep(30)
-                    continue
+            logging.warning(f"⏳ 現在のクライアント {CCXT_CLIENT_NAME.upper()} はクールダウン中です。別のクライアントを選択します。")
+            new_available = [name for name, health in CCXT_CLIENT_HEALTH.items() if health['status'] == 'ok']
+            if new_available:
+                CCXT_CLIENT_NAME = random.choice(new_available)
+                LAST_UPDATE_TIME = 0 # クライアントが変わったので銘柄リストを更新
             else:
-                # クールダウン時間が経過
-                CCXT_CLIENT_HEALTH[CCXT_CLIENT_NAME]['status'] = 'ok'
-                logging.info(f"✅ クライアント {CCXT_CLIENT_NAME.upper()} のクールダウンが解除されました。")
-                await send_telegram_message(f"✅ クライアント {CCXT_CLIENT_NAME.upper()} のクールダウンが解除されました。", CCXT_CLIENT_NAME)
+                logging.critical("❌ 全てのクライアントがクールダウン中のため、30秒待機します。")
+                await asyncio.sleep(30)
+                continue # ループの最初に戻る
 
 
         # --- 2. 動的銘柄リストの更新 (出来高トップ30を取得) ---
         if current_time - LAST_UPDATE_TIME > DYNAMIC_UPDATE_INTERVAL or not CURRENT_MONITOR_SYMBOLS:
             await update_monitor_symbols_dynamically() 
-            LAST_UPDATE_TIME = current_time
 
         # --- 3. 分析の実行 ---
         if CURRENT_MONITOR_SYMBOLS:
@@ -359,24 +358,26 @@ async def main_loop():
             
             # 最大20秒まで待機（APIレートリミットを考慮して調整）
             try:
+                # gatherで全てのタスクの完了を待つ (ただしタイムアウトあり)
                 await asyncio.wait_for(asyncio.gather(*analysis_tasks), timeout=20.0)
             except asyncio.TimeoutError:
-                logging.warning(f"⏳ 分析タスクがタイムアウトしました ({CCXT_CLIENT_NAME.upper()})。レートリミットに注意してください。")
+                logging.warning(f"⏳ 分析タスクがタイムアウトしました ({CCXT_CLIENT_NAME.upper()})。APIレートリミットに注意が必要です。")
             except Exception as e:
                 logging.error(f"❌ 分析タスク中に予期せぬエラーが発生しました: {e}")
                 
         else:
             logging.warning("⚠️ 監視対象銘柄リストが空です。次の更新まで待機します。")
 
-        # レートリミットを尊重し、次のループまで待機
+        # レートリミットを尊重し、次の分析まで待機 (5秒)
         await asyncio.sleep(5) 
 
 # ====================================================================================
-# アプリケーション起動
+# アプリケーション起動 - Uvicorn/Render対応エントリポイント
 # ====================================================================================
 
 # Uvicorn/Renderデプロイ用に `main_render.py` から参照されるエントリポイント
-def app_startup():
+# この関数は非同期タスクとして実行される必要があります
+async def app_startup():
     """アプリケーションの起動ロジック"""
     
     # 1. 初期化
@@ -385,44 +386,33 @@ def app_startup():
     
     # 2. メインループの実行
     try:
-        # 非同期メインループを開始
-        asyncio.run(main_loop())
+        await main_loop()
         
     except KeyboardInterrupt:
         logging.info("ボットを停止します。")
         pass
-    except SystemExit:
-        logging.critical("初期化エラーにより停止しました。")
+    except RuntimeError as e:
+        logging.critical(f"初期化エラーにより停止しました: {e}")
+        # Uvicornに通知するために再raise
+        raise
     except Exception as e:
         logging.critical(f"ボット実行中に致命的なエラーが発生しました: {e}", exc_info=True)
     finally:
         # クライアント接続を閉じる
+        logging.info("全てのCCXT接続を閉じます。")
         for client in CCXT_CLIENTS_DICT.values():
-            asyncio.run(client.close())
+            try:
+                await client.close()
+            except Exception:
+                pass
         logging.info("全てのCCXT接続を閉じました。")
 
+
+# ローカル実行テスト用
 if __name__ == "__main__":
-    # Renderデプロイ環境では uvicorn でメインループを起動するため、このブロックは実行されないことが多い
-    # ローカル実行テスト用
-    app_startup()
-
-# ====================================================================================
-# Render/Uvicorn用エントリーポイント (main_render.py に記述する場合の雛形)
-# ====================================================================================
-# Uvicorn/FastAPIのアプリケーション構造に合わせるため、以下を別ファイル (main_render.py) に記述することが一般的。
-# Renderがログに表示する 'uvicorn main_render:app' の 'app' は、
-# 起動時に一度実行される非同期関数またはASGIアプリケーションを指します。
-
-# import uvicorn
-# from fastapi import FastAPI
-# from main_apex_mtfa_v_dynamic_volume_selector import app_startup 
-
-# app = FastAPI()
-
-# @app.on_event("startup")
-# async def startup_event():
-#     # バックグラウンドでボットのメインループを実行
-#     asyncio.create_task(app_startup())
-    
-# # Uvicornの起動コマンドは: uvicorn main_render:app --host 0.0.0.0 --port $PORT
-# # このメインファイルでは、app_startup()を直接呼び出すことで実行可能。
+    try:
+        # ローカル実行では asyncio.run() を使用
+        asyncio.run(app_startup())
+    except Exception as e:
+        logging.critical(f"ローカル実行エラー: {e}")
+        pass
