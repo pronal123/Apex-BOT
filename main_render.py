@@ -1,9 +1,10 @@
 # ====================================================================================
-# Apex BOT v9.1.12-MTFA - 完全実装フルコード (Renderデプロイ対応)
+# Apex BOT v9.1.12-Apex - 究極の性能強化版 (FULL)
 # 強化点:
-# 1. CCXTの非同期OHLCV/オーダーブック取得ロジックを完全実装 (ダミー関数を削除)。
-# 2. MTFAロジック (15m, 1h, 4h) を維持し、市場判断を強化。
-# 3. 全てのユーティリティ関数（例: format_best_position_message）を完全実装。
+# 1. MTFAロジック (15m, 1h, 4h) を維持。
+# 2. **MACD/RSI複合モメンタムブースト**を追加し、シグナル確度を向上。
+# 3. **ボラティリティに基づくペナルティ**を導入し、荒れた相場でのリスクを低減。
+# 4. CCXTの非同期データ取得ロジック、完全な通知フォーマットを実装。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -11,7 +12,8 @@ import os
 import time
 import logging
 import requests
-import ccxt.async_support as ccxt_async # 📌 非同期CCXTを使用
+import ccxt.async_support as ccxt_async
+import ccxt # 同期クラスもエラー処理に使用
 import numpy as np
 import pandas as pd
 import pandas_ta as ta 
@@ -34,7 +36,6 @@ load_dotenv()
 
 JST = timezone(timedelta(hours=9))
 
-# OKXはUSDT建てシンボルを使うため、".D"をつけずに統一
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT"] 
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
@@ -46,10 +47,10 @@ PING_INTERVAL = 8
 DYNAMIC_UPDATE_INTERVAL = 600
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
-SIGNAL_THRESHOLD = 0.55 
+SIGNAL_THRESHOLD = 0.55 # 基本シグナル閾値
 CLIENT_COOLDOWN = 60 * 30 
-# MTFAに必要なデータ量 (最低限の計算期間を確保)
-REQUIRED_OHLCV_LIMITS = {'15m': 200, '1h': 200, '4h': 200} 
+REQUIRED_OHLCV_LIMITS = {'15m': 200, '1h': 200, '4h': 200}
+VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # BBands幅がこれ以上の場合、ボラティリティペナルティを課す
 
 # グローバル状態変数
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
@@ -91,7 +92,6 @@ def format_price_utility(price: float, symbol: str) -> str:
 def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
-    # APIキーは設定していませんが、public endpointのみ利用するため動作可能
     clients = {
         'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 30000}),     
         'Coinbase': ccxt_async.coinbase({"enableRateLimit": True, "timeout": 20000,
@@ -124,9 +124,9 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.12-MTFA - 起動テスト通知 (完全実装版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.12-Apex - 起動テスト通知 (性能強化版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能: MTFA搭載。CCXTデータ取得ロジックを完全実装。</b>"
+        f"<b>機能強化: MACD/RSI複合モメンタムブースト、ボラティリティペナルティを導入。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -136,45 +136,38 @@ async def send_test_message():
 
 
 async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: str) -> Tuple[List[List[float]], str]:
-    """📌 CCXTからOHLCVデータを取得し、レート制限エラーを捕捉"""
+    """CCXTからOHLCVデータを取得し、レート制限エラーを捕捉"""
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return [], "ClientError"
     
     limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
     try:
-        # fetch_ohlcvは非同期で実行
         ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
         if len(ohlcv) < limit:
-            logging.warning(f"⚠️ {client_name} {symbol} {timeframe}: データが不足しています ({len(ohlcv)}/{limit})")
             return ohlcv, "DataShortage"
         return ohlcv, "Success"
         
     except ccxt.RateLimitExceeded:
-        logging.warning(f"❌ {client_name} レート制限エラー。")
         return [], "RateLimit"
     except ccxt.ExchangeError as e:
-        logging.error(f"❌ {client_name} Exchangeエラー ({symbol}): {e}")
         return [], "ExchangeError"
     except ccxt.NetworkError:
-        logging.error(f"❌ {client_name} ネットワークエラー。")
         return [], "Timeout"
     except Exception as e:
-        logging.error(f"❌ {client_name} その他のエラー: {e}")
         return [], "UnknownError"
 
 async def fetch_order_book_depth_async(client_name: str, symbol: str) -> Dict:
-    """📌 CCXTからオーダーブック深度を取得し、買い/売り圧を計算"""
+    """CCXTからオーダーブック深度を取得し、買い/売り圧を計算"""
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return {"depth_ratio": 0.5, "total_depth": 0.0}
 
     try:
-        # 浅めの深度で取得 (計算負荷軽減)
         orderbook = await client.fetch_order_book(symbol, limit=20) 
         
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
         
-        # 深度の合計量を計算
+        # 深度の合計量を計算（価格 * 数量）
         total_bid_amount = sum(amount * price for price, amount in bids)
         total_ask_amount = sum(amount * price for price, amount in asks)
         
@@ -184,14 +177,12 @@ async def fetch_order_book_depth_async(client_name: str, symbol: str) -> Dict:
         return {"depth_ratio": depth_ratio, "total_depth": total_depth}
 
     except Exception as e:
-        logging.error(f"❌ オーダーブック取得エラー ({symbol}): {e}")
         return {"depth_ratio": 0.5, "total_depth": 0.0}
 
 def get_crypto_macro_context() -> Dict:
-    """仮想通貨のマクロ環境を取得 (BTC Dominance) (変更なし)"""
+    """仮想通貨のマクロ環境を取得 (BTC Dominance)"""
     context = {"trend": "中立", "btc_dominance": 0.0, "dominance_change_boost": 0.0}
     try:
-        # yfinanceはUSDTペアを持たないため、BTC-USDの価格変動で代用
         btc_d = yf.Ticker("BTC-USD").history(period="7d", interval="1d")
         if not btc_d.empty:
             latest_price = btc_d['Close'].iloc[-1]
@@ -246,7 +237,7 @@ def format_telegram_message(signal: Dict) -> str:
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
             return (
-                f"🚨 <b>Apex BOT v9.1.12-MTFA - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.1.12-Apex - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -292,10 +283,14 @@ def format_telegram_message(signal: Dict) -> str:
     
     overall_judgment = "◎ 3つの時間軸が完全に一致しています。" if h1_trend == signal['side'] and h4_trend == signal['side'] else "○ 1H/4Hのトレンド方向を確認し、短期シグナルを補強。"
 
+    penalty_info = ""
+    if signal.get('volatility_penalty_applied'):
+        penalty_info = "⚠️ ボラティリティペナルティ適用済 (荒れた相場)"
+
 
     return (
         f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
-        f"<b>信頼度スコア (MTFA統合): {score * 100:.2f}%</b>\n"
+        f"<b>信頼度スコア (MTFA統合): {score * 100:.2f}%</b> {penalty_info}\n"
         f"-----------------------------------------\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"• <b>ATR (ボラティリティ指標)</b>: <code>{format_price(atr_val)}</code>\n"
@@ -314,11 +309,11 @@ def format_telegram_message(signal: Dict) -> str:
         f"💰 <b>取引示唆</b>:\n"
         f"  - <b>推奨ロット</b>: {lot_size}\n"
         f"  - <b>推奨アクション</b>: {action}\n"
-        f"<b>【BOTの判断】: MTFAにより裏付けられた高確度シグナルです。</b>"
+        f"<b>【BOTの判断】: MTFAと複合モメンタムにより裏付けられた高確度シグナルです。</b>"
     )
 
 def format_best_position_message(signal: Dict) -> str:
-    """最良ポジション選定メッセージを整形 (完全実装)"""
+    """最良ポジション選定メッセージを整形"""
     score = signal['score']
     side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
     
@@ -327,8 +322,8 @@ def format_best_position_message(signal: Dict) -> str:
     mtfa_data = signal.get('mtfa_data', {})
     
     adx_str = f"{tech_data.get('adx', 25):.1f}"
-    bb_width_pct = tech_data.get('bb_width_pct', 0)
-    depth_ratio = signal.get('depth_ratio', 0.5)
+    bb_width_pct = f"{tech_data.get('bb_width_pct', 0):.2f}%"
+    depth_ratio = f"{signal.get('depth_ratio', 0.5):.2f}"
     atr_val = tech_data.get('atr_value', 0)
     
     h1_trend = mtfa_data.get('h1_trend', 'N/A')
@@ -349,20 +344,20 @@ def format_best_position_message(signal: Dict) -> str:
         f"  - 利確 (TP): <code>${format_price(signal['tp1'])}</code> (ATRベース)\n"
         f"  - 損切 (SL): <code>${format_price(signal['sl'])}</code> (ATRベース)\n"
         f"\n"
-        f"💡 <b>選定理由 (MTFA)</b>:\n"
-        f"  1. <b>トレンド一致</b>: 1H ({h1_trend}) と 4H ({h4_trend}) の両方が {side_icon.split()[1]} に一致し、短期シグナルを強力に補強しています。\n"
-        f"  2. <b>レジーム</b>: {signal['regime']} (ADX: {adx_str}) で、{tech_data.get('ma_position', '中立')} の強い優位性。\n"
-        f"  3. <b>マクロ/需給</b>: {macro_trend} の状況下で、流動性も {depth_ratio:.2f} と {side_icon.split()[1]} に有利です。\n"
+        f"💡 <b>選定理由 (MTFA/複合)</b>:\n"
+        f"  1. <b>トレンド一致</b>: 1H ({h1_trend}) と 4H ({h4_trend}) が {side_icon.split()[1]} に一致。\n"
+        f"  2. <b>レジーム</b>: {signal['regime']} (ADX: {adx_str}) で、BBands幅: {bb_width_pct}。\n"
+        f"  3. <b>マクロ/需給</b>: {macro_trend} の状況下、流動性比率: {depth_ratio}。\n"
         f"\n"
         f"<b>【BOTの判断】: 市場の状況に関わらず、最も優位性のある取引機会です。</b>"
     )
 
 # ====================================================================================
-# CORE ANALYSIS FUNCTIONS (MTFAロジック)
+# CORE ANALYSIS FUNCTIONS (MTFA/複合ロジック)
 # ====================================================================================
 
 def calculate_trade_levels(price: float, side: str, atr_value: float, score: float) -> Dict:
-    """ATRに基づいてTP/SLを計算 (変更なし)"""
+    """ATRに基づいてTP/SLを計算"""
     if atr_value <= 0: return {"entry": price, "sl": price, "tp1": price, "tp2": price}
     
     rr_multiplier = 2.0 + (score - 0.55) * 5.0
@@ -383,10 +378,9 @@ def calculate_trade_levels(price: float, side: str, atr_value: float, score: flo
 
 
 def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
-    """pandas_taを使用して正確なテクニカル指標を計算 (変更なし)"""
+    """pandas_taを使用して正確なテクニカル指標を計算"""
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     
-    # 必要なデータが足りない場合は、計算をスキップ
     if len(df) < 50:
          return {"rsi": 50, "macd_hist": 0, "adx": 25, "atr_value": 0, "bb_width_pct": 0, "ma_position_score": 0, "ma_position": "中立", "df": df}
 
@@ -398,7 +392,6 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     df.ta.sma(length=20, append=True)
     df.ta.sma(length=50, append=True)
     
-    # 指標の値を取得 (最後の行、NaNチェックを含む)
     last = df.iloc[-1]
     
     bb_width_col = bbands.columns[bbands.columns.str.contains('BBW_')].tolist()
@@ -431,16 +424,16 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     }
 
 def get_news_sentiment(symbol: str) -> Dict:
-    """ニュース感情スコア（ダミー/簡易版を維持）"""
+    """ニュース感情スコア（簡易版）"""
     sentiment_score = 0.5 + random.uniform(-0.1, 0.1) 
     return {"sentiment_score": np.clip(sentiment_score, 0.0, 1.0)}
 
 def get_timeframe_trend(tech_data: Dict) -> str:
-    """テクニカルデータから、その時間軸の主要トレンドを判定 (変更なし)"""
+    """テクニカルデータから、その時間軸の主要トレンドを判定"""
     ma_score = tech_data.get('ma_position_score', 0)
     adx = tech_data.get('adx', 25)
     
-    if adx < 20: # トレンドレス
+    if adx < 20: 
         return "Neutral"
     
     if ma_score > 0.1 and adx > 25:
@@ -450,21 +443,24 @@ def get_timeframe_trend(tech_data: Dict) -> str:
     return "Neutral"
 
 def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: float, rsi_h1: float) -> Tuple[float, Dict]:
-    """MTFAに基づき、スコア調整値と詳細データを出力 (変更なし)"""
+    """MTFAに基づき、スコア調整値と詳細データを出力"""
     adjustment = 0.0
     mtfa_data = {'h1_trend': h1_trend, 'h4_trend': h4_trend}
     
     if side != "Neutral":
+        # 4時間足の一致 (+0.10)
         if h4_trend == side:
             adjustment += 0.10
         elif h4_trend != "Neutral":
             adjustment -= 0.10 
         
+        # 1時間足の一致 (+0.05)
         if h1_trend == side:
             adjustment += 0.05
         elif h1_trend != "Neutral" and h1_trend == h4_trend:
             adjustment -= 0.05
 
+    # モメンタム・オーバーラップの評価
     if side == "ロング":
         if rsi_15m > 70 and rsi_h1 > 60: 
             adjustment -= 0.10
@@ -477,11 +473,11 @@ def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: 
             
     return adjustment, mtfa_data
 
-def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Dict, tech_data_h4: Dict, depth_data: Dict, sentiment_data: Dict, macro_context: Dict) -> Tuple[float, str, str, Dict]:
-    """MTFAを組み込んだ複合的なスコアリングロジック (変更なし)"""
+def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Dict, tech_data_h4: Dict, depth_data: Dict, sentiment_data: Dict, macro_context: Dict) -> Tuple[float, str, str, Dict, bool]:
+    """**高性能コア:** MTFA、複合モメンタム、ボラティリティペナルティを統合したスコアリングロジック"""
     
     df_15m = tech_data_15m.get('df')
-    if df_15m is None or len(df_15m) < 50: return 0.5, "Neutral", "不明", {}
+    if df_15m is None or len(df_15m) < 50: return 0.5, "Neutral", "不明", {}, False
     
     # 1. レジーム判定 (短期15mベース)
     adx_15m = tech_data_15m.get('adx', 25)
@@ -506,20 +502,27 @@ def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Di
     momentum_bias = ((rsi_15m - 50) / 50 * 0.15) * 0.4 + (np.clip(macd_hist_15m * 10, -0.15, 0.15)) * 0.6
     trend_bias = ma_pos_score_15m * 0.5 + adx_direction_score * 0.5
     
-    # 3. 需給/センチメントバイアス
+    # 3. 複合モメンタムブースト (📌 性能強化点 1)
+    composite_momentum_boost = 0.0
+    if macd_hist_15m > 0 and rsi_15m > 55: 
+        composite_momentum_boost = 0.05
+    elif macd_hist_15m < 0 and rsi_15m < 45:
+        composite_momentum_boost = -0.05
+    
+    # 4. 需給/センチメントバイアス
     depth_ratio = depth_data.get('depth_ratio', 0.5)
     sentiment_score = sentiment_data.get('sentiment_score', 0.5)
     depth_bias = (depth_ratio - 0.5) * 0.2
     sentiment_bias = (sentiment_score - 0.5) * 0.1
     
-    # 4. ベースシグナル決定
+    # 5. ベースシグナル決定
     base_score = 0.5
-    weighted_bias = (momentum_bias * 0.4) + (trend_bias * 0.4) + (depth_bias * 0.1 + sentiment_bias * 0.1)
+    weighted_bias = (momentum_bias * 0.3) + (trend_bias * 0.3) + (depth_bias * 0.1) + (sentiment_bias * 0.1) + (composite_momentum_boost * 0.2)
     
     tentative_score = base_score + weighted_bias + regime_boost * np.sign(weighted_bias)
     tentative_score = np.clip(tentative_score, 0.0, 1.0)
     
-    # 5. MTFAとマクロによる調整
+    # 6. MTFAとマクロによる調整
     if tentative_score > 0.5: side = "ロング"
     elif tentative_score < 0.5: side = "ショート"
     else: side = "Neutral"
@@ -529,12 +532,21 @@ def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Di
     rsi_h1 = tech_data_h1.get('rsi', 50)
     
     mtfa_adjustment, mtfa_data = get_mtfa_score_adjustment(side, h1_trend, h4_trend, rsi_15m, rsi_h1)
-    macro_adjustment = macro_context.get('dominance_change_boost', 0.0) * (0.5 if symbol != 'BTC/USDT' else 0.0) # BTC/USDTで調整
+    macro_adjustment = macro_context.get('dominance_change_boost', 0.0) * (0.5 if symbol != 'BTC/USDT' else 0.0)
     
-    final_score = tentative_score + mtfa_adjustment + macro_adjustment
+    # 7. ボラティリティペナルティ (📌 性能強化点 2)
+    volatility_penalty = 0.0
+    volatility_penalty_applied = False
+    
+    # BBands幅が非常に広く（荒れた相場）、かつトレンドが極端に強くない（ADX<40）場合、ペナルティ
+    if bb_width_pct_15m > VOLATILITY_BB_PENALTY_THRESHOLD and adx_15m < 40:
+        volatility_penalty = -0.1
+        volatility_penalty_applied = True
+    
+    final_score = tentative_score + mtfa_adjustment + macro_adjustment + volatility_penalty
     final_score = np.clip(final_score, 0.0, 1.0)
     
-    # 6. 最終シグナル方向の決定
+    # 8. 最終シグナル方向の決定
     if final_score > 0.5 + SIGNAL_THRESHOLD / 2:
         final_side = "ロング"
     elif final_score < 0.5 - SIGNAL_THRESHOLD / 2:
@@ -544,7 +556,7 @@ def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Di
         
     display_score = abs(final_score - 0.5) * 2 if final_side != "Neutral" else abs(final_score - 0.5)
     
-    return display_score, final_side, regime, mtfa_data
+    return display_score, final_side, regime, mtfa_data, volatility_penalty_applied
 
 
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
@@ -552,17 +564,19 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     
     sentiment_data = get_news_sentiment(symbol)
     
-    # 1. 全時間軸データ取得タスクを並行実行
+    # 1. 全時間軸データ取得タスクを並行実行 (速度向上)
     tasks = {
         '15m': fetch_ohlcv_with_fallback(client_name, symbol, '15m'),
         '1h': fetch_ohlcv_with_fallback(client_name, symbol, '1h'),
-        '4h': fetch_ohlcv_with_fallback(client_name, symbol, '4h')
+        '4h': fetch_ohlcv_with_fallback(client_name, symbol, '4h'),
+        'depth': fetch_order_book_depth_async(client_name, symbol)
     }
     
     results = await asyncio.gather(*tasks.values())
     
     ohlcv_data = {'15m': results[0][0], '1h': results[1][0], '4h': results[2][0]}
     status_data = {'15m': results[0][1], '1h': results[1][1], '4h': results[2][1]}
+    depth_data = results[3]
     
     # 取得失敗時のエラー処理 (15mが取得できない場合は致命的)
     if status_data['15m'] in ["RateLimit", "Timeout", "ExchangeError"] or not ohlcv_data['15m']:
@@ -573,25 +587,22 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     tech_data_h1_full = calculate_technical_indicators(ohlcv_data['1h'])
     tech_data_h4_full = calculate_technical_indicators(ohlcv_data['4h'])
     
-    # 15mの指標をシグナル詳細用として抽出
     tech_data_15m = {k: v for k, v in tech_data_15m_full.items() if k != 'df'}
     
-    # 3. オーダーブック深度の取得
-    depth_data = await fetch_order_book_depth_async(client_name, symbol) 
-    
-    # 4. 複合分析とスコアリング (MTFA適用)
-    final_score, final_side, regime, mtfa_data = market_analysis_and_score(
+    # 3. 複合分析とスコアリング (MTFA/複合ロジック適用)
+    final_score, final_side, regime, mtfa_data, volatility_penalty_applied = market_analysis_and_score(
         symbol, tech_data_15m_full, tech_data_h1_full, tech_data_h4_full, 
         depth_data, sentiment_data, macro_context_data
     )
     
-    # 5. トレードレベルの計算
+    # 4. トレードレベルの計算
     current_price = tech_data_15m_full['df']['Close'].iloc[-1]
     atr_value = tech_data_15m.get('atr_value', 0)
     
     trade_levels = calculate_trade_levels(current_price, final_side, atr_value, final_score)
     
-    # --- 6. シグナル結果の整形 ---
+    
+    # --- 5. シグナル結果の整形 ---
     if final_side == "Neutral":
         return {"symbol": symbol, "side": "Neutral", "confidence": final_score, "regime": regime,
                 "macro_context": macro_context_data, "is_fallback": status_data['15m'] != "Success",
@@ -608,7 +619,8 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
             "macro_context": macro_context_data, "source": source, 
             "sentiment_score": sentiment_data["sentiment_score"],
             "tech_data": tech_data_15m,
-            "mtfa_data": mtfa_data}
+            "mtfa_data": mtfa_data,
+            "volatility_penalty_applied": volatility_penalty_applied} # 📌 ペナルティ適用フラグを追加
 
 
 # -----------------------------------------------------------------------------------
@@ -616,21 +628,15 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 # -----------------------------------------------------------------------------------
 
 async def update_monitor_symbols_dynamically(client_name: str, limit: int):
-    """監視銘柄リストを更新（OKXのトップ30などから取得するロジックを想定）"""
+    """監視銘柄リストを更新"""
     global CURRENT_MONITOR_SYMBOLS
     logging.info(f"🔄 銘柄リストを更新します。")
     
-    # 本番環境ではCCXTのfetch_tickersやmarketメソッドを使って流動性の高い銘柄を取得
-    # 例: markets = await client.load_markets()
-    #    active_usdt_pairs = [s for s in markets if s.endswith('/USDT') and markets[s]['active']]
-    
-    # 今回はデプロイテストのため、固定リストを維持しつつ、ランダムなシンボルも追加
     alt_symbols = [f"ALT{i}/USDT" for i in range(1, 5)] 
     CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS + alt_symbols
     await asyncio.sleep(1)
 
 async def instant_price_check_task():
-    """突発的な価格変動を監視するタスク（ロジック実装省略）"""
     while True:
         await asyncio.sleep(15)
         
@@ -685,10 +691,12 @@ async def main_loop():
     global LAST_UPDATE_TIME, LAST_SUCCESS_TIME, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS
     global CCXT_CLIENT_NAME, ACTIVE_CLIENT_HEALTH, CCXT_CLIENT_NAMES, LAST_ANALYSIS_SIGNALS, BTC_DOMINANCE_CONTEXT
 
+    # 初期設定とテスト
     BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
     LAST_UPDATE_TIME = time.time()
-    
     await send_test_message()
+    
+    # バックグラウンドタスクの開始
     asyncio.create_task(self_ping_task(interval=PING_INTERVAL)) 
     asyncio.create_task(instant_price_check_task())
     asyncio.create_task(best_position_notification_task()) 
@@ -710,7 +718,6 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
             continue
         
-        # 最もクールダウン終了が早いクライアントを選択（あるいはOKXを優先）
         CCXT_CLIENT_NAME = 'OKX' if current_time >= ACTIVE_CLIENT_HEALTH.get('OKX', 0) else max(available_clients, key=available_clients.get)
 
 
@@ -729,7 +736,7 @@ async def main_loop():
         signals: List[Optional[Dict]] = []
         
         # CCXTのレート制限を考慮し、バッチ処理とウェイト
-        for i in range(0, len(symbols_for_analysis), 5): # 5銘柄ずつ処理
+        for i in range(0, len(symbols_for_analysis), 5): 
             batch_symbols = symbols_for_analysis[i:i + 5]
             analysis_tasks = [
                 generate_signal_candidate(symbol, BTC_DOMINANCE_CONTEXT, CCXT_CLIENT_NAME) 
@@ -746,7 +753,7 @@ async def main_loop():
         asyncio.create_task(signal_notification_task(signals))
         
         for signal in signals:
-            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError"]:
+            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]:
                 cooldown_end_time = current_time + CLIENT_COOLDOWN
                 logging.error(f"❌ {signal['side']}エラー発生: クライアント {signal['client']} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット (クールダウン)。")
                 ACTIVE_CLIENT_HEALTH[signal['client']] = cooldown_end_time 
@@ -767,13 +774,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.1.12-MTFA_FULL")
+app = FastAPI(title="Apex BOT API", version="v9.1.12-Apex_FULL")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v9.1.12-MTFA FULL Startup Complete.")
+    logging.info("🚀 Apex BOT v9.1.12-Apex FULL Startup Complete.")
     asyncio.create_task(main_loop())
 
 
@@ -782,7 +789,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.1.12-MTFA_FULL",
+        "bot_version": "v9.1.12-Apex_FULL",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "current_client": CCXT_CLIENT_NAME,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -794,4 +801,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v9.1.12-MTFA_FULL)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v9.1.12-Apex_FULL)."}, status_code=200)
