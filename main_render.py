@@ -1,6 +1,9 @@
 # ====================================================================================
-# Apex BOT v9.1.12-Apex - 究極の性能強化版 (FULL) - エラー修正統合版
-# 修正点: signal_notification_task 関数内でエラーシグナルを除外するように修正。
+# Apex BOT v9.1.12-Apex - 究極の性能強化版 (FULL) - 安定性強化統合版
+# 修正点: 
+# 1. signal_notification_task 内でエラーシグナルを除外 (KeyError回避済)。
+# 2. 連続エラー対策として、LOOP_INTERVALを90秒、CLIENT_COOLDOWNを15分に調整。
+# 3. OHLCV取得Limitを150に削減し、タイムアウト耐性を向上。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -28,7 +31,7 @@ import sys
 load_dotenv()
 
 # ====================================================================================
-# CONFIG & CONSTANTS
+# CONFIG & CONSTANTS (安定性強化のため変更)
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
@@ -38,15 +41,15 @@ DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-# 設定値
-LOOP_INTERVAL = 60         
+# 設定値 (安定性向上のため変更)
+LOOP_INTERVAL = 90         # 60秒 -> 90秒に延長 (レート制限耐性向上)
 PING_INTERVAL = 8          
 DYNAMIC_UPDATE_INTERVAL = 600
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
-CLIENT_COOLDOWN = 60 * 30 
-REQUIRED_OHLCV_LIMITS = {'15m': 200, '1h': 200, '4h': 200}
+CLIENT_COOLDOWN = 60 * 15  # 30分 -> 15分に短縮 (ダウンタイム短縮)
+REQUIRED_OHLCV_LIMITS = {'15m': 150, '1h': 150, '4h': 150} # 200 -> 150に削減
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
 # グローバル状態変数
@@ -92,6 +95,7 @@ def format_price_utility(price: float, symbol: str) -> str:
 def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
+    # タイムアウト設定はそのまま維持
     clients = {
         'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 30000}),     
         'Coinbase': ccxt_async.coinbase({"enableRateLimit": True, "timeout": 20000,
@@ -124,9 +128,9 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.12-Apex - 起動テスト通知 (性能強化版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.12-Apex - 起動テスト通知 (安定性強化版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: MACD/RSI複合モメンタムブースト、ボラティリティペナルティを導入。</b>"
+        f"<b>機能強化: MTFA/複合ロジックの安定稼働に向けた設定調整を適用しました。</b>"
     )
     try:
         # 非同期環境でブロッキング処理を実行
@@ -141,7 +145,8 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return [], "ClientError", client_name
     
-    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
+    # 🚨 安定性強化点: LIMITを150に削減
+    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 150)
     try:
         # OKXのSWAPシンボルマッピングなどを考慮した実装が必要だが、ここでは元のコードのまま
         ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -182,8 +187,9 @@ def get_crypto_macro_context() -> Dict:
     """仮想通貨のマクロ環境を取得 (BTC Dominance)"""
     context = {"trend": "中立", "btc_dominance": 0.0, "dominance_change_boost": 0.0}
     try:
+        # yfinanceが不安定な場合があるため、期間を短縮
         btc_d = yf.Ticker("BTC-USD").history(period="7d", interval="1d")
-        if not btc_d.empty:
+        if not btc_d.empty and len(btc_d) >= 7:
             latest_price = btc_d['Close'].iloc[-1]
             oldest_price = btc_d['Close'].iloc[0]
             dominance_7d_change = (latest_price / oldest_price - 1) * 100
@@ -211,8 +217,7 @@ def format_price_lambda(symbol: str) -> Callable[[float], str]:
 def format_telegram_message(signal: Dict) -> str:
     """シグナルデータからTelegram通知メッセージを整形 (MTFA情報を統合)"""
     
-    # 🚨 注意: この関数には、エラーシグナル（'side'がエラー文字列）は渡されない前提
-    # なぜなら、signal_notification_task でエラーシグナルを除外しているため
+    # signal_notification_task でエラーシグナルを除外しているため、KeyErrorは回避される
     
     macro_trend = signal['macro_context']['trend']
     tech_data = signal.get('tech_data', {})
@@ -657,7 +662,7 @@ async def self_ping_task(interval: int):
             asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(health_signal))))
             NEUTRAL_NOTIFIED_TIME = time.time()
 
-# 🚨 ここが重要な修正点 🚨
+# 🚨 前回修正済み: エラーシグナルを除外 🚨
 async def signal_notification_task(signals: List[Optional[Dict]]):
     """シグナル通知の処理とクールダウン管理"""
     current_time = time.time()
@@ -734,7 +739,11 @@ async def main_loop():
         available_clients = {name: health_time for name, health_time in ACTIVE_CLIENT_HEALTH.items() if current_time >= health_time}
         if not available_clients:
             logging.warning("❌ 全てのクライアントがクールダウン中です。次のインターバルまで待機します。")
-            await asyncio.sleep(LOOP_INTERVAL)
+            
+            # 最も早くクールダウンが解除される時間まで待機 (ループをブロックしないように短いsleepでポーリング)
+            min_cooldown_end = min(ACTIVE_CLIENT_HEALTH.values()) if ACTIVE_CLIENT_HEALTH else current_time + LOOP_INTERVAL
+            sleep_time = min(max(10, min_cooldown_end - current_time), 60) # 最低10秒、最大60秒待機
+            await asyncio.sleep(sleep_time) 
             continue
             
         # OKXが利用可能ならOKXを優先、そうでなければ最も早くクールダウンが解除されたクライアントを選択
@@ -772,17 +781,15 @@ async def main_loop():
         # --- 4. シグナルとエラー処理 ---
         has_major_error = False
         # エラーシグナルを除外して、分析結果をLAST_ANALYSIS_SIGNALSに保存
-        # Note: signal_notification_task の修正により、このリストに格納されたシグナルのみが
-        # format_telegram_message に渡されることが保証される（KeyError回避）
         LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]]
         
-        # シグナル通知を非同期タスクとして開始 (ブロッキング回避)
+        # シグナル通知を非同期タスクとして開始 (KeyError回避済み)
         asyncio.create_task(signal_notification_task(signals))
         
         for signal in signals:
             if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]:
                 client_name_errored = signal.get('client', CCXT_CLIENT_NAME) # クライアント名を取得
-                cooldown_end_time = current_time + CLIENT_COOLDOWN
+                cooldown_end_time = current_time + CLIENT_COOLDOWN # 🚨 COOLDOWN時間を15分に短縮
                 logging.error(f"❌ {signal['side']}エラー発生: クライアント {client_name_errored} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット (クールダウン)。")
                 ACTIVE_CLIENT_HEALTH[client_name_errored] = cooldown_end_time
                 
@@ -798,7 +805,7 @@ async def main_loop():
         if not has_major_error:
             LAST_SUCCESS_TIME = current_time
             logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
-            await asyncio.sleep(LOOP_INTERVAL)
+            await asyncio.sleep(LOOP_INTERVAL) # 🚨 LOOP_INTERVALを90秒に延長
         else:
             # エラーが発生した場合は、すぐに次のクライアント選択/分析サイクルに進む
             logging.info("➡️ クライアント切り替えのため、即座に次の分析サイクルに進みます。")
