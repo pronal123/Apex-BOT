@@ -35,9 +35,9 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
-TOP_SYMBOL_LIMIT = 20      # 出来高TOP20に削減
-LOOP_INTERVAL = 180        # 分析サイクルを180秒（3分）に延長 (ULTRA STABILITY)
-SYMBOL_WAIT = 1.0          # 銘柄ごとの分析間に挿入する遅延を1.0秒に短縮 (4クライアント分散のため)
+TOP_SYMBOL_LIMIT = 20      
+LOOP_INTERVAL = 240        # 🚨 修正: 4分に延長し、API回復時間を与える
+SYMBOL_WAIT = 1.8          # 🚨 修正: 1銘柄あたり1.8秒に延長 (リクエストのバースト防止)
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
@@ -48,9 +48,9 @@ DYNAMIC_UPDATE_INTERVAL = 60 * 30
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
-CLIENT_COOLDOWN = 60 * 60  # 🚨 60分 (超保守クールダウンを維持)
+CLIENT_COOLDOWN = 30 * 60  # 🚨 修正: 30分 (早期回復のためのクールダウン時間短縮)
 REQUIRED_OHLCV_LIMITS = {'15m': 150, '1h': 150, '4h': 150} 
-VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
+VOLATILITY_BB_PENALTY_THRESHOLD = 5.0
 
 # グローバル状態変数
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
