@@ -36,7 +36,7 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
 TOP_SYMBOL_LIMIT = 20      
 LOOP_INTERVAL = 360        # 🚨 修正: 360秒 (6分) に延長
-SYMBOL_WAIT = 4.0          # 🚨 修正: 4.0秒に延長 (レート制限回避の決定打)
+SYMBOL_WAIT = 4.5          # 🚨 修正: 4.5秒に延長 (レート制限回避の決定打)
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
