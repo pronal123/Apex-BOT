@@ -604,7 +604,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 # -----------------------------------------------------------------------------------
 
 async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> List[str]:
-    """出来高上位銘柄リストをCCXTから取得。"""
+    """出来高上位銘柄リストをCCXTから取得し、不適切な銘柄を除外する。"""
     global CURRENT_MONITOR_SYMBOLS
     logging.info(f"🔄 銘柄リストを更新します。出来高TOP{limit}銘柄を取得試行... (クライアント: {client_name})")
     
@@ -613,17 +613,27 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
         logging.error("致命的エラー: Krakenクライアントが見つかりません。")
         return DEFAULT_SYMBOLS
 
+    # 🚨 修正: 除外リスト (USD建ての一部とステーブルコイン)
+    EXCLUDE_SYMBOLS_PARTIAL = ['USDC/USD', 'USDT/USD', 'DAI/USD', 'TUSD/USD']
+
     try:
         tickers = await client.fetch_tickers()
         
         usdt_pairs = {
             symbol: ticker.get('quoteVolume', 0) 
             for symbol, ticker in tickers.items() 
-            if (symbol.endswith('/USDT') or symbol.endswith('/USD')) and ticker.get('quoteVolume', 0) > 0
+            # 出来高があり、かつ除外リストに部分一致しないシンボルのみを抽出
+            if (symbol.endswith('/USDT') or symbol.endswith('/USD')) 
+            and ticker.get('quoteVolume', 0) > 0
+            and not any(excl in symbol for excl in EXCLUDE_SYMBOLS_PARTIAL)
         }
-
+        
+        # 出来高TOP銘柄を抽出
         sorted_pairs = sorted(usdt_pairs.items(), key=lambda item: item[1], reverse=True)
         new_symbols = [symbol for symbol, volume in sorted_pairs[:limit]]
+
+        # 出来高TOP10を取得後、BTC/USD, ETH/USDなどを手動で追加して安定性を確保 (TOP10に漏れた場合のため)
+        # ただし、今回はTOP10にこれらが含まれているため、まずはフィルタリングで安定させます。
 
         if new_symbols:
             logging.info(f"✅ クライアント Kraken を使用し、出来高TOP{len(new_symbols)}銘柄を取得しました。")
