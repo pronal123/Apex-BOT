@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v11.3.1-KRAKEN TRADING FOCUS (緊急修正版 - Telegram & SMAエラー対応)
+# Apex BOT v11.3.2-KRAKEN TRADING FOCUS (再度の緊急修正 - データ不足・全銘柄失敗対応)
 # 修正点: 
-# 1. 致命的なNameError 'send_telegram_html' の定義を追加。
-# 2. 致命的なKeyError 'SMA_50' の発生を防ぐため、SMA計算のフォールバックロジックを追加。
-# 3. TOP銘柄取得数を10に固定し、ログで確認された不安定なシンボルを全て除外リストに追加。
+# 1. TOP銘柄取得数 TOP_SYMBOL_LIMIT を再度 10 に固定しました。
+# 2. ログで確認された不安定なシンボル（SUI/USD, AVAX/USD, ZEC/USD, FARTCOIN/USD, XMR/USD, XAN/USDなど）をすべて除外リストに追加しました。
+# 3. バージョン情報を v11.3.2 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,9 +37,9 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
-TOP_SYMBOL_LIMIT = 20      # 安定のため20銘柄に固定
+TOP_SYMBOL_LIMIT = 10      # 🚨 修正1: 安定のため10銘柄に固定（ログから20銘柄が不安定と判断）
 LOOP_INTERVAL = 360        
-SYMBOL_WAIT = 4.5          # 銘柄間の遅延 (レート制限回避を強化)
+SYMBOL_WAIT = 4.5          
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
@@ -84,7 +84,6 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 # UTILITIES & CLIENTS (CCXT実装)
 # ====================================================================================
 
-# 🚨 修正1: Telegram送信関数の定義を追加
 def send_telegram_html(message: str, is_emergency: bool = False):
     """HTML形式のメッセージをTelegramに送信"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -96,7 +95,7 @@ def send_telegram_html(message: str, is_emergency: bool = False):
         'chat_id': TELEGRAM_CHAT_ID,
         'text': message,
         'parse_mode': 'HTML',
-        'disable_notification': not is_emergency # 緊急時のみ通知を鳴らす
+        'disable_notification': not is_emergency
     }
     
     try:
@@ -143,7 +142,7 @@ def format_telegram_message(signal: Dict) -> str:
             
             # 🚨 修正: バージョン情報
             return (
-                f"🚨 <b>Apex BOT v11.3.1-KRAKEN FOCUS - 死活監視 (システム正常)</b> 🟢\n" 
+                f"🚨 <b>Apex BOT v11.3.2-KRAKEN FOCUS - 死活監視 (システム正常)</b> 🟢\n" 
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -291,12 +290,11 @@ def initialize_ccxt_client():
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v11.3.1-KRAKEN FOCUS - 起動テスト通知 (緊急修正)</b> 🚀\n\n" # 🚨 修正: バージョン情報
+        f"🤖 <b>Apex BOT v11.3.2-KRAKEN FOCUS - 起動テスト通知 (データ不足・安定化)</b> 🚀\n\n" 
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>安定構成: TelegramエラーとSMA_50 KeyErrorを修正。TOP銘柄を10に固定し、安定動作を目指します。</b>"
+        f"<b>安定構成: TOP銘柄を10に固定し、ログで確認されたすべての不安定なUSDペアを徹底排除。</b>"
     )
     try:
-        # send_telegram_html関数が定義されたため、ここではNameErrorは発生しない
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
         logging.info("✅ Telegram 起動テスト通知を正常に送信しました。")
     except Exception as e:
@@ -404,12 +402,10 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     
     # SMA20とSMA50の計算
     df.ta.sma(length=20, append=True)
-    # 🚨 修正2: SMA50の計算は別途行い、カラムが存在するかチェック
-    # SMA50の計算に失敗する可能性があるため、ここではエラーを握りつぶし、後でチェック
     try:
         df.ta.sma(length=50, append=True)
     except Exception:
-        pass # SMA50の計算失敗を許容
+        pass 
         
     last = df.iloc[-1]
     
@@ -420,7 +416,6 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     ma_pos_score = 0
     ma_position = "中立"
     
-    # 🚨 修正2: SMAの存在チェックを強化し、KeyErrorを回避
     sma20_exists = 'SMA_20' in df.columns
     sma50_exists = 'SMA_50' in df.columns
     
@@ -432,7 +427,6 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
             ma_pos_score = -0.3
             ma_position = "強力なショートトレンド"
     elif sma20_exists:
-        # SMA50がない場合、SMA20のみで簡易判定
         if last['Close'] > last['SMA_20']:
             ma_pos_score = 0.1
             ma_position = "短期ロングバイアス"
@@ -579,6 +573,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     
     if tech_data_15m_full.get('atr_value', 0) == 0.0 or tech_data_15m_full.get('macd_hist', 0) == 0:
         logging.warning(f"⚠️ {symbol}: 15mのATR/MACD計算が0です。データ不足または計算失敗。Neutralとして処理します。")
+        # ATR/MACDが0の場合、データが極端に少ないか、テクニカル計算に必要なローソク足がないと判断
         return {"symbol": symbol, "side": "Neutral", "confidence": 0.5, "regime": "Data Error",
                 "macro_context": macro_context_data, "is_fallback": True,
                 "tech_data": tech_data_15m_full, "client": client_name}
@@ -629,18 +624,25 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
         logging.error("致命的エラー: Krakenクライアントが見つかりません。")
         return DEFAULT_SYMBOLS
 
-    # 🚨 修正3: ログで現れた不安定なシンボルを全て追加 (STBL/USD, DOGE/USD, ADA/USDも追加)
-    EXCLUDE_SYMBOLS_PARTIAL = ['USDC/USD', 'USDT/USD', 'DAI/USD', 'TUSD/USD', 'EUR/USD', 'GBP/USD', 'CAD/USD']
+    # 🚨 修正2: ログで現れた不安定なシンボルを全て追加し、徹底排除
+    EXCLUDE_SYMBOLS_PARTIAL = [
+        'USDC/USD', 'USDT/USD', 'DAI/USD', 'TUSD/USD', 'EUR/USD', 'GBP/USD', 'CAD/USD', 
+        'XPL/USD', 'PUMP/USD', 'STBL/USD', 'DOGE/USD', 'ADA/USD', 
+        'SUI/USD', 'AVAX/USD', 'LINK/USD', 'AVNT/USD', 'ZEC/USD', 'LTC/USD', 
+        'FARTCOIN/USD', 'XMR/USD', 'XAN/USD'
+    ]
 
     try:
         tickers = await client.fetch_tickers()
         
+        # USDおよびUSDTペアに絞り込み
         usdt_pairs = {
             symbol: ticker.get('quoteVolume', 0) 
             for symbol, ticker in tickers.items() 
             if (symbol.endswith('/USDT') or symbol.endswith('/USD')) 
             and ticker.get('quoteVolume', 0) > 0
-            and not any(excl in symbol for excl in EXCLUDE_SYMBOLS_PARTIAL)
+            and not any(excl in symbol for excl in EXCLUDE_SYMBOLS_PARTIAL) # 排除リストに含まれないことを確認
+            and not symbol.endswith('.d') # ダークプールやインデックスのペアを除外
         }
 
         sorted_pairs = sorted(usdt_pairs.items(), key=lambda item: item[1], reverse=True)
@@ -742,7 +744,6 @@ async def main_loop():
         logging.error("致命的エラー: 利用可能なCCXTクライアントがありません。ループを停止します。")
         return
 
-    # 🚨 TOP_SYMBOL_LIMITが10であることを使用
     await update_monitor_symbols_dynamically('Kraken', limit=TOP_SYMBOL_LIMIT)
 
     while True:
@@ -811,13 +812,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v11.3.1-KRAKEN_FOCUS")
+app = FastAPI(title="Apex BOT API", version="v11.3.2-KRAKEN_FOCUS")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v11.3.1-KRAKEN TRADING FOCUS Startup Complete.") 
+    logging.info("🚀 Apex BOT v11.3.2-KRAKEN TRADING FOCUS Startup Complete.") 
     
     asyncio.create_task(main_loop())
 
@@ -827,7 +828,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.3.1-KRAKEN_FOCUS (TOP10)",
+        "bot_version": "v11.3.2-KRAKEN_FOCUS (TOP10)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": len(CCXT_CLIENT_NAMES) if time.time() >= ACTIVE_CLIENT_HEALTH.get('Kraken', 0) else 0,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -842,4 +843,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v11.3.1-KRAKEN_FOCUS, TOP10)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.3.2-KRAKEN_FOCUS, TOP10)."}, status_code=200)
