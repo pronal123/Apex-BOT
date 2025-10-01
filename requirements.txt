@@ -1,8 +1,9 @@
 ccxt
-numpy
 pandas
-yfinance
-requests
-fastapi
-uvicorn[standard]
+numpy
+pandas-ta
 python-dotenv
+fastapi
+uvicorn
+requests
+yfinance
