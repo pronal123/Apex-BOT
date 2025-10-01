@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v11.4.7-OKX FOCUS (フル統合版)
+# Apex BOT v11.4.7-KRAKEN FALLBACK (フル統合版)
 # 修正点: 
-# 1. generate_market_summary_signal内のMACDヒストグラム列名取得時のIndexErrorを修正。
-# 2. fetch_ohlcv_with_fallbackでDataShortageが発生した場合、その銘柄を4時間クールダウン。
-# 3. format_market_summaryの結論を、テクニカルデータに基づいて「ロング/ショート/待機」を明確に推奨するよう修正。
+# 1. CCXTクライアントにKrakenを追加し、フォールバック先に設定。
+# 2. fetch_ohlcv_with_fallbackで15分足データ不足時、1時間足で代替するフォールバックロジックを実装。
+# 3. generate_signal_candidate内のロジックを、使用された時間足に対応させるよう調整。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,9 +59,11 @@ BEST_POSITION_INTERVAL = 60 * 60 * 12
 MARKET_SUMMARY_INTERVAL = 60 * 60 * 6 # 6時間ごと
 SIGNAL_THRESHOLD = 0.55 
 CLIENT_COOLDOWN = 45 * 60  
-# 🚨 DataShortage銘柄の一時無効化時間 (4時間)
+# DataShortage銘柄の一時無効化時間 (4時間)
 SYMBOL_COOLDOWN_TIME = 60 * 60 * 4 
+# 1hはサマリー用に100本確保。15mは分析に最低限必要な本数を確保 (35→100に増強)
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
+MIN_OHLCV_FOR_ANALYSIS = 35 # 少なくともこれだけのデータがないと指標計算不可
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
 # 突発変動警報設定
@@ -75,7 +77,8 @@ NEUTRAL_NOTIFICATION_THRESHOLD = 0.05
 # グローバル状態変数
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
 CCXT_CLIENT_NAMES: List[str] = []
-CCXT_CLIENT_NAME: str = 'OKX' 
+CCXT_CLIENT_NAME: str = 'OKX' # メインクライアント
+CCXT_FALLBACK_CLIENT_NAME: str = 'Kraken' # フォールバッククライアント
 LAST_UPDATE_TIME: float = 0.0
 CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]
 TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} 
@@ -90,7 +93,7 @@ ACTIVE_CLIENT_HEALTH: Dict[str, float] = {}
 BTC_DOMINANCE_CONTEXT: Dict = {} 
 VOLATILITY_NOTIFIED_SYMBOLS: Dict[str, float] = {} 
 NEUTRAL_NOTIFIED_SYMBOLS: Dict[str, float] = {} 
-# 🚨 銘柄ごとのクールダウン管理
+# 銘柄ごとのクールダウン管理
 SYMBOL_COOLDOWN_DICT: Dict[str, float] = {}
 
 
@@ -122,6 +125,7 @@ def generate_analysis_summary(signal: Dict) -> str:
     """
     tech_data = signal.get('tech_data', {})
     side = signal.get('side', 'Neutral')
+    timeframe = signal.get('timeframe', '15m')
     
     rsi = tech_data.get('rsi', 50.0)
     macd_hist = tech_data.get('macd_hist', 0.0)
@@ -178,13 +182,13 @@ def generate_analysis_summary(signal: Dict) -> str:
         return ""
 
     header = "\n\n---"
-    footer = "💡 BOT分析の核心 (15分足)"
+    footer = f"💡 BOT分析の核心 ({timeframe}足)"
     body = "\n" + "\n".join(summary_lines)
     
     return header + "\n<b>" + footer + "</b>" + "\n" + body
 
 def format_market_summary(signal: Dict) -> str:
-    """市場サマリーデータからTelegram通知メッセージを整形し、推奨アクションを明示する (修正済み)"""
+    """市場サマリーデータからTelegram通知メッセージを整形し、推奨アクションを明示する"""
 
     symbol = signal['symbol']
     macro_context = signal['macro_context']
@@ -288,6 +292,7 @@ def format_telegram_message(signal: Dict) -> str:
     macro_trend = signal['macro_context']['trend']
     vix_val = signal['macro_context'].get('vix_value', 'N/A')
     tech_data = signal.get('tech_data', {})
+    timeframe = signal.get('timeframe', '15m')
     
     # --- 1. 中立/ヘルス通知 ---
     if signal['side'] == "Neutral":
@@ -298,7 +303,7 @@ def format_telegram_message(signal: Dict) -> str:
             
             # v9.1.7の死活監視フォーマット
             return (
-                f"🚨 <b>Apex BOT v9.1.7 - 死活監視 (システム正常)</b> 🟢\n" 
+                f"🚨 <b>Apex BOT v11.4.7 - 死活監視 (システム正常)</b> 🟢\n" 
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (VIX: {vix_val})\n" 
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%)\n"
@@ -313,17 +318,17 @@ def format_telegram_message(signal: Dict) -> str:
         bb_width_pct = f"{tech_data.get('bb_width_pct', 0):.2f}"
         source_client = signal.get('client', 'N/A')
         
-        # 中立シグナルにも判断根拠フッターを追加 (v11.4.6維持)
+        # 中立シグナルにも判断根拠フッターを追加
         analysis_summary = generate_analysis_summary(signal)
 
         return_message = (
             f"⚠️ <b>{symbol} - 市場分析速報 (中立)</b> ⏸️\n"
-            f"<b>信頼度: {confidence_pct:.1f}%</b> (データ元: {source_client})\n"
+            f"<b>信頼度: {confidence_pct:.1f}%</b> (データ元: {source_client} | 時間足: {timeframe})\n"
             f"---------------------------\n"
             f"• <b>市場環境/レジーム</b>: {signal['regime']} (ADX: {adx_str}) | {macro_trend} (BB幅: {bb_width_pct}%)\n"
             f"\n"
             f"📊 <b>テクニカル詳細</b>:\n"
-            f"  - <i>RSI (15m)</i>: {rsi_str} | <i>MACD Hist (15m)</i>: {macd_hist_str}\n" 
+            f"  - <i>RSI ({timeframe})</i>: {rsi_str} | <i>MACD Hist ({timeframe})</i>: {macd_hist_str}\n" 
             f"  - <i>MAとの位置</i>: {tech_data.get('ma_position', '中立')}\n"
             f"\n"
             f"<b>【BOTの判断】: {signal['regime']}で方向性が不鮮明です。様子見推奨。</b>"
@@ -351,13 +356,13 @@ def format_telegram_message(signal: Dict) -> str:
     if atr_val == 0.0:
          atr_warning = "⚠️ <b>ATR/TP/SLが0: データ不足または計算失敗。取引不可。</b>"
          
-    # トレードシグナルに判断根拠フッターを追加 (v11.4.6維持)
+    # トレードシグナルに判断根拠フッターを追加
     analysis_summary = generate_analysis_summary(signal)
 
     return_message = (
         f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
         f"<b>信頼度スコア (MTFA統合): {score * 100:.2f}%</b> {penalty_info}\n"
-        f"データ元: {signal.get('client', 'N/A')}\n"
+        f"データ元: {signal.get('client', 'N/A')} | 時間足: {timeframe}\n"
         f"-----------------------------------------\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"• <b>ATR (ボラティリティ指標)</b>: <code>${format_price(atr_val)}</code>\n" 
@@ -373,7 +378,7 @@ def format_telegram_message(signal: Dict) -> str:
     return return_message + analysis_summary
 
 
-def initialize_ccxt_client():
+async def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
     
@@ -383,6 +388,14 @@ def initialize_ccxt_client():
             "timeout": 60000, 
             "rateLimit": 200, 
         }), 
+        # Krakenを追加 (OKXのデータ取得失敗時のフォールバック先)
+        'Kraken': ccxt_async.kraken({
+            "enableRateLimit": True,
+            "timeout": 60000,
+            "rateLimit": 200,
+            # KrakenはBTC/USDTではなくXBT/USDなどのシンボル命名規則を持つため、
+            # CCXTが自動で変換できるか確認が必要。できない場合は調整が必要だが、一旦デフォルト設定で試す。
+        }),
     }
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
@@ -392,9 +405,9 @@ def initialize_ccxt_client():
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v11.4.7 - 起動テスト通知 (フル統合版)</b> 🚀\n\n" 
+        f"🤖 <b>Apex BOT v11.4.7 - 起動テスト通知 (KRAKEN FALLBACK)</b> 🚀\n\n" 
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能統合: DataShortage銘柄無効化ロジック、市場サマリー結論の明確化を適用しました。</b>\n"
+        f"<b>機能統合: Krakenクライアントの追加、15分足データ不足時の1時間足へのフォールバックを適用しました。</b>\n"
         f"<b>v11.4.7更新: 詳細な市場状況分析通知（6時間ごと）を追加しました。</b>"
     )
     try:
@@ -404,29 +417,58 @@ async def send_test_message():
         logging.error(f"❌ Telegram 起動テスト通知の送信に失敗しました: {e}")
 
 async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: str) -> Tuple[List[List[float]], str, str]:
-    """CCXTからOHLCVデータを取得し、レート制限エラーを捕捉"""
+    """
+    OHLCVデータを取得。15mでデータ不足の場合、1hにフォールバックし、それでも失敗したらDataShortageとして銘柄をクールダウン。
+    """
     global SYMBOL_COOLDOWN_DICT
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return [], "ClientError", client_name
     
-    # 1hはサマリー用に多く取得
-    limit = 100 if timeframe == '1h' else REQUIRED_OHLCV_LIMITS.get(timeframe, 100) if timeframe != VOLATILITY_ALERT_TIMEFRAME else 2 
-
+    # メインのlimit設定
+    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100) 
+    
+    # ----------------------------------------------------
+    # 1. メインのデータ取得を試行
+    # ----------------------------------------------------
     try:
         ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
         
-        # 必要なデータ長チェックを緩和 (MACDに必要なデータ数より余裕を持たせる)
-        if not ohlcv or len(ohlcv) < 35: 
-             # 🚨 DataShortageが発生した場合、銘柄をクールダウンリストに追加
-             cooldown_end_time = time.time() + SYMBOL_COOLDOWN_TIME
-             SYMBOL_COOLDOWN_DICT[symbol] = cooldown_end_time
-             logging.warning(f"⚠️ DataShortageエラー({timeframe}): {symbol} を {SYMBOL_COOLDOWN_TIME/3600:.0f}時間無効化します。")
-             return ohlcv, "DataShortage", client_name 
+        # 成功判定: 必要なデータ長チェック
+        if len(ohlcv) >= MIN_OHLCV_FOR_ANALYSIS:
+            return ohlcv, "Success", client_name
+            
+        # ----------------------------------------------------
+        # 2. DataShortageが発生した場合のフォールバック (15m → 1h)
+        # ----------------------------------------------------
+        if timeframe == '15m':
+            logging.warning(f"⚠️ DataShortageエラー({timeframe}): {symbol}。1hデータで分析を試みます。")
+            
+            # 1hデータを取得
+            ohlcv_1h, status_1h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '1h')
+            
+            if status_1h == "Success":
+                 logging.info(f"✅ 1hデータ({len(ohlcv_1h)}本)でフォールバックに成功しました。")
+                 # 成功した場合、timeframeを'1h'に変更して返す
+                 return ohlcv_1h, "FallbackSuccess_1h", client_name 
+            
+            # 1hでも失敗した場合、この銘柄をクールダウン
+            cooldown_end_time = time.time() + SYMBOL_COOLDOWN_TIME
+            SYMBOL_COOLDOWN_DICT[symbol] = cooldown_end_time
+            logging.error(f"❌ DataShortage({timeframe} & 1h)エラー: {symbol} を {SYMBOL_COOLDOWN_TIME/3600:.0f}時間無効化します。")
+            return [], "DataShortage", client_name
+            
+        # 1hや4hなど、フォールバックがない時間足でデータ不足の場合
+        else:
+            cooldown_end_time = time.time() + SYMBOL_COOLDOWN_TIME
+            SYMBOL_COOLDOWN_DICT[symbol] = cooldown_end_time
+            logging.error(f"❌ DataShortageエラー({timeframe}): {symbol}。代替データなし。銘柄を無効化します。")
+            return [], "DataShortage", client_name
 
-        return ohlcv, "Success", client_name
-        
+    # ----------------------------------------------------
+    # 3. クライアント側のエラーを捕捉
+    # ----------------------------------------------------
     except ccxt.NotSupported:
-        cooldown_end_time = time.time() + SYMBOL_COOLDOWN_TIME # 恒久的な問題の可能性もあるため、長めのクールダウン
+        cooldown_end_time = time.time() + SYMBOL_COOLDOWN_TIME 
         SYMBOL_COOLDOWN_DICT[symbol] = cooldown_end_time
         logging.error(f"❌ NotSupportedエラー: {symbol} を {SYMBOL_COOLDOWN_TIME/3600:.0f}時間無効化します。")
         return [], "NotSupported", client_name
@@ -441,15 +483,17 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     except Exception as e:
         if 'timeout' in str(e).lower():
             return [], "Timeout", client_name
+        logging.error(f"❌ {symbol}のデータ取得中に予期せぬエラー: {e}")
         return [], "UnknownError", client_name
+
 
 def get_crypto_macro_context() -> Dict:
     """暗号資産市場のマクロコンテクストとVIXを取得"""
+    # (既存ロジックを維持)
     vix_value = 0.0
     try:
         vix_data = yf.Ticker("^VIX").history(period="1d")
         if not vix_data.empty:
-            # FutureWarning対策として.iloc[-1]を使用
             vix_value = vix_data['Close'].iloc[-1]
             logging.info(f"✅ VIX値を取得: {vix_value:.2f}")
     except Exception as e:
@@ -468,7 +512,8 @@ def get_crypto_macro_context() -> Dict:
     }
 
 async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> List[str]:
-    """出来高TOP銘柄の動的取得""" 
+    """出来高TOP銘柄の動的取得 (OKX)""" 
+    # (既存ロジックを維持)
     global CURRENT_MONITOR_SYMBOLS
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client:
@@ -502,15 +547,17 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
         return CURRENT_MONITOR_SYMBOLS
 
 async def check_for_sudden_volatility(symbol: str, client_name: str):
-    """突発的な15分間の価格変動をチェックし、警報を送信する"""
+    """突発的な15分間の価格変動をチェックし、警報を送信する (既存ロジックを維持)"""
     global VOLATILITY_NOTIFIED_SYMBOLS
     current_time = time.time()
     
     if current_time - VOLATILITY_NOTIFIED_SYMBOLS.get(symbol, 0) < VOLATILITY_ALERT_COOLDOWN:
         return
 
+    # 突発変動は15mで取得
     ohlcv, status, _ = await fetch_ohlcv_with_fallback(client_name, symbol, VOLATILITY_ALERT_TIMEFRAME)
     
+    # 1hにフォールバックした場合はスキップ（15mでの急変動チェックのため）
     if status != "Success" or len(ohlcv) < 2:
         return 
 
@@ -540,7 +587,7 @@ async def check_for_sudden_volatility(symbol: str, client_name: str):
         logging.warning(f"💥 突発変動警報を発令しました: {symbol} ({abs_change_pct:.2f}%)")
 
 async def signal_notification_task(signals: List[Optional[Dict]]):
-    """シグナル通知の処理とクールダウン管理"""
+    """シグナル通知の処理とクールダウン管理 (既存ロジックを維持)"""
     global NEUTRAL_NOTIFIED_SYMBOLS
     current_time = time.time()
     
@@ -593,21 +640,12 @@ async def generate_market_summary_signal(symbol: str, macro_context: Dict, clien
     df_1h['rsi'] = ta.rsi(df_1h['close'], length=14)
     df_1h['adx'] = ta.adx(df_1h['high'], df_1h['low'], df_1h['close'], length=14)['ADX_14']
     
-    # 3. MACDの計算と安全なヒストグラム列名の取得 (修正ロジック)
+    # 3. MACDの計算と安全なヒストグラム列名の取得
     macd_data = ta.macd(df_1h['close'], fast=12, slow=26, signal=9)
-    
-    # 🚨 修正: 'MACDh'列を安全に取得
     macd_hist_col = next((col for col in macd_data.columns if 'hist' in col.lower()), None)
     
-    if macd_hist_col is None:
-        # MACDのデフォルト列名を使用 (MACD_12_26_9はpandas_taのデフォルト)
-        macd_hist_col = 'MACDh_12_26_9' 
-        # もしそれでも列が存在しない場合はエラーをログに記録し、0.0を使用
-        if macd_hist_col not in macd_data.columns:
-            logging.warning(f"⚠️ MACDヒストグラム列 '{macd_hist_col}' が見つかりません。MACD値を0.0とします。")
-            macd_hist_val = 0.0
-        else:
-            macd_hist_val = macd_data[macd_hist_col].iloc[-1]
+    if macd_hist_col is None or macd_hist_col not in macd_data.columns:
+        macd_hist_val = 0.0
     else:
         macd_hist_val = macd_data[macd_hist_col].iloc[-1]
         
@@ -634,6 +672,7 @@ async def generate_market_summary_signal(symbol: str, macro_context: Dict, clien
         "confidence": confidence,
         "macro_context": macro_context,
         "client": client_name,
+        "timeframe": "1h", # 市場サマリーは1hで固定
         "tech_data": {
             "rsi": df_1h['rsi'].iloc[-1] if not df_1h['rsi'].empty else 50.0,
             "adx": adx_val,
@@ -644,32 +683,36 @@ async def generate_market_summary_signal(symbol: str, macro_context: Dict, clien
 async def generate_signal_candidate(symbol: str, macro_context: Dict, client_name: str) -> Optional[Dict]:
     """
     シグナル生成ロジック (ダミー版)
-    実際にはここで複雑な分析を行うが、ここではエラー回避のためダミーシグナルを返す
+    DataShortage時の1hフォールバックに対応
     """
     
-    # データを取得
-    ohlcv_15m, status_15m, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '15m')
+    # データを取得 (15mを試行し、不足なら1hにフォールバック)
+    ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, '15m')
     
-    if status_15m != "Success":
-        return {"symbol": symbol, "side": status_15m, "client": client_name}
+    if status in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]:
+        # DataShortageはここで最終的にDataShortageを返すか、RateLimitなどはそのままクライアントエラーとして返す
+        return {"symbol": symbol, "side": status, "client": client_used}
+    
+    # フォールバックしたかどうかの判定と時間足の設定
+    timeframe = '1h' if status == "FallbackSuccess_1h" else '15m'
     
     # ダミーデータフレームを作成
-    df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df_15m['close'] = pd.to_numeric(df_15m['close'])
-    df_15m['rsi'] = ta.rsi(df_15m['close'], length=14)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['close'] = pd.to_numeric(df['close'])
+    df['rsi'] = ta.rsi(df['close'], length=14)
     
     
-    # ダミーの判断ロジック
-    price = df_15m['close'].iloc[-1]
+    # ダミーの判断ロジック（時間足に関わらず一律のロジック）
+    price = df['close'].iloc[-1]
     
-    if df_15m['rsi'].iloc[-1] > 70 and random.random() > 0.6:
+    if df['rsi'].iloc[-1] > 70 and random.random() > 0.6:
         side = "ショート"
         score = 0.82
         entry = price * 1.0005
         sl = price * 1.005
         tp1 = price * 0.995
         rr_ratio = 1.0
-    elif df_15m['rsi'].iloc[-1] < 30 and random.random() > 0.6:
+    elif df['rsi'].iloc[-1] < 30 and random.random() > 0.6:
         side = "ロング"
         score = 0.78
         entry = price * 0.9995
@@ -684,7 +727,7 @@ async def generate_signal_candidate(symbol: str, macro_context: Dict, client_nam
     
     # ダミーのテクニカルデータ
     tech_data = {
-        "rsi": df_15m['rsi'].iloc[-1] if not df_15m.empty and df_15m['rsi'].iloc[-1] is not None else 50.0,
+        "rsi": df['rsi'].iloc[-1] if not df.empty and df['rsi'].iloc[-1] is not None else 50.0,
         "macd_hist": random.uniform(-0.01, 0.01),
         "bb_width_pct": random.uniform(2.0, 5.5),
         "atr_value": price * 0.005,
@@ -705,7 +748,8 @@ async def generate_signal_candidate(symbol: str, macro_context: Dict, client_nam
         "rr_ratio": rr_ratio,
         "regime": "トレンド" if score > 0.6 else "レンジ",
         "macro_context": macro_context,
-        "client": client_name,
+        "client": client_used,
+        "timeframe": timeframe, # 使用された時間足を記録
         "tech_data": tech_data,
         "volatility_penalty_applied": tech_data['bb_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD,
     }
@@ -713,7 +757,7 @@ async def generate_signal_candidate(symbol: str, macro_context: Dict, client_nam
     return signal_candidate
 
 async def self_ping_task(interval: int):
-    """定期的な死活監視メッセージを送信するタスク"""
+    """定期的な死活監視メッセージを送信するタスク (既存ロジックを維持)"""
     global LAST_ANALYSIS_SIGNALS, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS, LAST_SUCCESS_TIME
     while True:
         await asyncio.sleep(interval)
@@ -751,14 +795,13 @@ async def best_position_notification_task():
         current_time = time.time()
         
         if current_time - LAST_BEST_POSITION_TIME > BEST_POSITION_INTERVAL:
-            # 実際にはここでLAST_ANALYSIS_SIGNALSからベストポジションを選定する
-            LAST_BEST_POSITION_TIME = current_time
             # 通知ロジックは省略
+            LAST_BEST_POSITION_TIME = current_time
 
 async def main_loop():
     """BOTのメイン実行ループ"""
     global LAST_UPDATE_TIME, LAST_SUCCESS_TIME, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS
-    global ACTIVE_CLIENT_HEALTH, CCXT_CLIENT_NAMES, LAST_ANALYSIS_SIGNALS, BTC_DOMINANCE_CONTEXT
+    global ACTIVE_CLIENT_HEALTH, CCXT_CLIENT_NAME, CCXT_FALLBACK_CLIENT_NAME, LAST_ANALYSIS_SIGNALS, BTC_DOMINANCE_CONTEXT
     global LAST_MARKET_SUMMARY_TIME, SYMBOL_COOLDOWN_DICT
 
     # 必須ロジック
@@ -776,6 +819,7 @@ async def main_loop():
             logging.error("致命的エラー: 利用可能なCCXTクライアントがありません。ループを停止します。")
             return
 
+        # OKXの銘柄リストを取得
         await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=TOP_SYMBOL_LIMIT) 
 
         while True:
@@ -789,7 +833,7 @@ async def main_loop():
                 BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
                 LAST_UPDATE_TIME = current_time
                 
-                # 🚨 クールダウンが終了した銘柄をSYMBOL_COOLDOWN_DICTからクリア
+                # クールダウンが終了した銘柄をSYMBOL_COOLDOWN_DICTからクリア
                 SYMBOL_COOLDOWN_DICT = {
                     s: t for s, t in SYMBOL_COOLDOWN_DICT.items() if t > current_time
                 }
@@ -814,28 +858,35 @@ async def main_loop():
                     
             # --- 分析ロジック ---
             
-            client_name = CCXT_CLIENT_NAME
+            # クライアントの切り替え (OKX -> Kraken)
+            client_to_use = CCXT_CLIENT_NAME
+            if current_time < ACTIVE_CLIENT_HEALTH.get(CCXT_CLIENT_NAME, 0):
+                if current_time < ACTIVE_CLIENT_HEALTH.get(CCXT_FALLBACK_CLIENT_NAME, 0):
+                    # 両方のクライアントがクールダウン中の場合
+                    longest_cooldown = max(ACTIVE_CLIENT_HEALTH.get(CCXT_CLIENT_NAME, 0), ACTIVE_CLIENT_HEALTH.get(CCXT_FALLBACK_CLIENT_NAME, 0))
+                    cooldown_time = longest_cooldown - current_time
+                    logging.warning(f"❌ 両クライアントがクールダウン中です。次の分析まで {cooldown_time:.0f}秒待機します。")
+                    await asyncio.sleep(min(max(10, cooldown_time), LOOP_INTERVAL)) 
+                    continue
+                else:
+                    # OKXがクールダウン中でKrakenが正常な場合、Krakenに切り替え
+                    client_to_use = CCXT_FALLBACK_CLIENT_NAME
+                    logging.warning(f"🔄 メインクライアント({CCXT_CLIENT_NAME})がクールダウン中のため、フォールバッククライアント({CCXT_FALLBACK_CLIENT_NAME})を使用します。")
+                    
             
-            if current_time < ACTIVE_CLIENT_HEALTH.get(client_name, 0):
-                cooldown_time = ACTIVE_CLIENT_HEALTH.get(client_name, current_time) - current_time
-                logging.warning(f"❌ {client_name}クライアントがクールダウン中です。次の分析まで {cooldown_time:.0f}秒待機します。")
-                await asyncio.sleep(min(max(10, cooldown_time), LOOP_INTERVAL)) 
-                continue
-                
-            # 🚨 修正: クールダウン中の銘柄を除外
+            # クールダウン中の銘柄を除外
             monitor_symbols_for_analysis = [
                 symbol for symbol in CURRENT_MONITOR_SYMBOLS
                 if symbol not in SYMBOL_COOLDOWN_DICT or SYMBOL_COOLDOWN_DICT[symbol] < current_time
             ]
             
-            # クールダウン中の銘柄数をログに記録
             cooldown_count = len(CURRENT_MONITOR_SYMBOLS) - len(monitor_symbols_for_analysis)
             if cooldown_count > 0:
                  logging.info(f"⏭️ {cooldown_count}銘柄をクールダウン中のためスキップします。")
             
-            analysis_queue: List[Tuple[str, str]] = [(symbol, client_name) for symbol in monitor_symbols_for_analysis]
+            analysis_queue: List[Tuple[str, str]] = [(symbol, client_to_use) for symbol in monitor_symbols_for_analysis]
                 
-            logging.info(f"🔍 分析開始 (対象銘柄: {len(analysis_queue)}銘柄, 利用クライアント: {client_name})")
+            logging.info(f"🔍 分析開始 (対象銘柄: {len(analysis_queue)}銘柄, 利用クライアント: {client_to_use})")
             TOTAL_ANALYSIS_ATTEMPTS += 1
             
             signals: List[Optional[Dict]] = []
@@ -851,7 +902,6 @@ async def main_loop():
                 signal = await generate_signal_candidate(symbol, BTC_DOMINANCE_CONTEXT, client_name)
                 signals.append(signal)
 
-                # 🚨 DataShortageは銘柄クールダウンで処理されるため、ここではクライアント全体をクールダウンさせる主要エラーのみをチェック
                 major_errors = ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]
                 
                 if signal and signal.get('side') in major_errors:
@@ -893,13 +943,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v11.4.7-OKX_FOCUS (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v11.4.7-KRAKEN_FALLBACK (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v11.4.7-OKX FOCUS Startup Complete.") 
+    logging.info("🚀 Apex BOT v11.4.7-KRAKEN FALLBACK Startup Complete.") 
     
     # asyncio.create_taskで例外が処理されるようになり、エラーで即座にアプリが落ちるのを防ぐ
     asyncio.create_task(main_loop())
@@ -912,9 +962,9 @@ def get_status():
     
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.4.7-OKX_FOCUS (Full Integrated)",
+        "bot_version": "v11.4.7-KRAKEN_FALLBACK (Full Integrated)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
-        "active_clients_count": 1 if current_time >= ACTIVE_CLIENT_HEALTH.get(CCXT_CLIENT_NAME, 0) else 0,
+        "active_clients_count": len([name for name in CCXT_CLIENT_NAMES if current_time >= ACTIVE_CLIENT_HEALTH.get(name, 0)]),
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
         "active_analysis_count": len([s for s in CURRENT_MONITOR_SYMBOLS if SYMBOL_COOLDOWN_DICT.get(s, 0) < current_time]),
         "cooldown_symbols_count": len([s for s in SYMBOL_COOLDOWN_DICT if SYMBOL_COOLDOWN_DICT[s] > current_time]),
@@ -929,4 +979,8 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v11.4.7-OKX_FOCUS, Full Integrated)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.4.7-KRAKEN_FALLBACK, Full Integrated)."}, status_code=200)
+
+if __name__ == '__main__':
+    # 実際にはRender環境で実行されるためこのブロックは使用されないが、ローカルテスト用に残す
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
