@@ -1,6 +1,7 @@
 # ====================================================================================
-# Apex BOT v9.3.0-Kraken & KuCoin 安定構成版 (DUAL CLIENT)
-# 修正点: クライアントをKrakenとKuCoinの2つに絞り込み、安定したデュアルクライアント構成を確立。
+# Apex BOT v10.0.0-QUAD CLIENT 安定極限構成版 (Kraken, CB Pro, Gemini, Bitstamp)
+# 修正点: クライアントをKraken, Coinbase Advanced, Gemini, Bitstampの4つに絞り込み、
+#         超安定かつ分散されたQUADクライアント構成を確立しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -36,7 +37,7 @@ JST = timezone(timedelta(hours=9))
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
 TOP_SYMBOL_LIMIT = 20      # 出来高TOP20に削減
 LOOP_INTERVAL = 180        # 分析サイクルを180秒（3分）に延長 (ULTRA STABILITY)
-SYMBOL_WAIT = 1.5          # 銘柄ごとの分析間に挿入する遅延を1.5秒に延長 (ULTRA STABILITY)
+SYMBOL_WAIT = 1.0          # 銘柄ごとの分析間に挿入する遅延を1.0秒に短縮 (4クライアント分散のため)
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
@@ -47,7 +48,7 @@ DYNAMIC_UPDATE_INTERVAL = 60 * 30
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
-CLIENT_COOLDOWN = 60 * 60  # 🚨 60分 (Krakenの安定稼働を優先するため、他のクライアントは長時間休ませる)
+CLIENT_COOLDOWN = 60 * 60  # 🚨 60分 (超保守クールダウンを維持)
 REQUIRED_OHLCV_LIMITS = {'15m': 150, '1h': 150, '4h': 150} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
@@ -101,6 +102,7 @@ def format_telegram_message(signal: Dict) -> str:
     macro_trend = signal['macro_context']['trend']
     tech_data = signal.get('tech_data', {})
     mtfa_data = signal.get('mtfa_data', {}) 
+    source_client = signal.get('client', 'N/A')
     
     adx_str = f"{tech_data.get('adx', 25):.1f}"
     bb_width_pct = tech_data.get('bb_width_pct', 0)
@@ -115,10 +117,11 @@ def format_telegram_message(signal: Dict) -> str:
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
             return (
-                f"🚨 <b>Apex BOT v9.3.0-KuCoin - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v10.0.0-QUAD CLIENT - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
+                f"• **利用クライアント**: Kraken, Coinbase Advanced, Gemini, Bitstamp\n"
                 f"<b>【BOTの判断】: データ取得と分析は正常に機能しています。待機中。</b>"
             )
 
@@ -128,7 +131,7 @@ def format_telegram_message(signal: Dict) -> str:
 
         return (
             f"⚠️ <b>{signal['symbol']} - 市場分析速報 (中立)</b> ⏸️\n"
-            f"<b>信頼度: {confidence_pct:.1f}%</b>\n"
+            f"<b>信頼度: {confidence_pct:.1f}%</b> (データ元: {source_client})\n"
             f"---------------------------\n"
             f"• <b>市場環境/レジーム</b>: {signal['regime']} (ADX: {adx_str}) | {macro_trend} (BB幅: {bb_width_pct:.2f}%)\n"
             f"\n"
@@ -168,6 +171,7 @@ def format_telegram_message(signal: Dict) -> str:
     return (
         f"{score_icon} <b>{signal['symbol']} - {side_icon} シグナル発生!</b> {score_icon}\n"
         f"<b>信頼度スコア (MTFA統合): {score * 100:.2f}%</b> {penalty_info}\n"
+        f"データ元: {source_client}\n"
         f"-----------------------------------------\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
         f"• <b>ATR (ボラティリティ指標)</b>: <code>{format_price(atr_val)}</code>\n" 
@@ -193,6 +197,7 @@ def format_best_position_message(signal: Dict) -> str:
     """最良ポジション選定メッセージを整形"""
     score = signal['score']
     side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
+    source_client = signal.get('client', 'N/A')
     
     macro_trend = signal['macro_context']['trend']
     tech_data = signal.get('tech_data', {})
@@ -209,7 +214,7 @@ def format_best_position_message(signal: Dict) -> str:
     
     return (
         f"👑 <b>{signal['symbol']} - 12時間 最良ポジション候補</b> {side_icon} 🔥\n"
-        f"<i>選定時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n"
+        f"<i>選定時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i> (データ元: {source_client})\n"
         f"-----------------------------------------\n"
         f"• <b>選定スコア</b>: <code>{score * 100:.2f}%</code> (MTFA統合)\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
@@ -232,10 +237,12 @@ def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
     
-    # 🚨 クライアント構成をKrakenとKuCoinに絞る
+    # 🚨 クライアント構成をKraken, Coinbase Pro, Gemini, Bitstampの4つに絞る
     clients = {
         'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 30000}), 
-        'Kucoin': ccxt_async.kucoin({"enableRateLimit": True, "timeout": 30000}),     
+        'Coinbase Advanced': ccxt_async.coinbasepro({"enableRateLimit": True, "timeout": 30000}), # Coinbase Advancedはccxtではcoinbasepro
+        'Gemini': ccxt_async.gemini({"enableRateLimit": True, "timeout": 30000}),
+        'Bitstamp': ccxt_async.bitstamp({"enableRateLimit": True, "timeout": 30000}),     
     }
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
@@ -263,10 +270,10 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.3.0-KuCoin - 起動テスト通知 (DUAL CLIENT)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v10.0.0-QUAD CLIENT - 起動テスト通知</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>安定構成: クライアントをKrakenとKuCoinの2つに絞り込みました。</b>\n"
-        f"<b>【主要変更点】: クールダウン時間は60分を維持し、安定性を最優先します。</b>"
+        f"<b>安定構成: Kraken, Coinbase Advanced, Gemini, Bitstampの4クライアント体制に移行しました。</b>\n"
+        f"<b>【主要変更点】: 安定性を最大化するため、分散監視を強化しました。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
@@ -281,11 +288,18 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     
     limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 150)
     try:
+        # Bitstampは一部のタイムフレーム/シンボルでfetch_ohlcvをサポートしていない場合があるため、明示的に対応
+        if client_name == 'Bitstamp' and timeframe in ['15m', '1h']:
+             # Bitstampは通常、限られたタイムフレームしかサポートしないため、エラー回避のため短くする（例として）
+             limit = 100 
+
         ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if len(ohlcv) < limit:
+        if len(ohlcv) < limit * 0.8: # データが大幅に不足している場合も警告
             return ohlcv, "DataShortage", client_name
         return ohlcv, "Success", client_name
         
+    except ccxt.NotSupported:
+        return [], "NotSupported", client_name
     except ccxt.RateLimitExceeded:
         return [], "RateLimit", client_name
     except ccxt.ExchangeError as e:
@@ -337,7 +351,7 @@ def get_news_sentiment(symbol: str) -> Dict:
 # ====================================================================================
 
 def calculate_trade_levels(price: float, side: str, atr_value: float, score: float) -> Dict:
-    """ATR値に基づいてエントリー、TP、SLを計算"""
+    """ATR値に基づいてエントリー、TP、SLを計算 (変更なし)"""
     if atr_value <= 0: return {"entry": price, "sl": price, "tp1": price, "tp2": price}
     
     # スコアが高いほどリスクリワード比を上げる
@@ -357,7 +371,7 @@ def calculate_trade_levels(price: float, side: str, atr_value: float, score: flo
     return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": entry}
 
 def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
-    """OHLCVからテクニカル指標 (RSI, MACD, ADX, ATR, BBands) を計算"""
+    """OHLCVからテクニカル指標 (RSI, MACD, ADX, ATR, BBands) を計算 (変更なし)"""
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     
     # データが不足している場合、初期値を返す
@@ -410,7 +424,7 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     }
 
 def get_timeframe_trend(tech_data: Dict) -> str:
-    """特定の時間枠のトレンドを判定"""
+    """特定の時間枠のトレンドを判定 (変更なし)"""
     ma_score = tech_data.get('ma_position_score', 0)
     adx = tech_data.get('adx', 25)
     
@@ -424,7 +438,7 @@ def get_timeframe_trend(tech_data: Dict) -> str:
     return "Neutral"
 
 def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: float, rsi_h1: float) -> Tuple[float, Dict]:
-    """マルチタイムフレーム分析によるスコア調整"""
+    """マルチタイムフレーム分析によるスコア調整 (変更なし)"""
     adjustment = 0.0
     mtfa_data = {'h1_trend': h1_trend, 'h4_trend': h4_trend}
     
@@ -446,7 +460,7 @@ def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: 
     return adjustment, mtfa_data
 
 def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Dict, tech_data_h4: Dict, sentiment_data: Dict, macro_context: Dict) -> Tuple[float, str, str, Dict, bool]:
-    """市場分析と最終スコアリングロジック"""
+    """市場分析と最終スコアリングロジック (変更なし)"""
     df_15m = tech_data_15m.get('df')
     if df_15m is None or len(df_15m) < 50: return 0.5, "Neutral", "不明", {}, False
     
@@ -523,13 +537,19 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
         '1h': fetch_ohlcv_with_fallback(client_name, symbol, '1h'),
         '4h': fetch_ohlcv_with_fallback(client_name, symbol, '4h'),
     }
+    # 4クライアントのいずれかがNotSupportedを返す可能性があるため、エラー処理を強化
+    
     results = await asyncio.gather(*tasks.values())
     
     ohlcv_data = {'15m': results[0][0], '1h': results[1][0], '4h': results[2][0]}
     status_data = {'15m': results[0][1], '1h': results[1][1], '4h': results[2][1]} 
     
     # 15mデータの取得に致命的なエラーがある場合、エラーシグナルを返す
-    if status_data['15m'] in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"] or not ohlcv_data['15m']:
+    if status_data['15m'] in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported"] or not ohlcv_data['15m']:
+        # Bitstamp/Geminiは、特に4hなどでNotSupportedを返すことがあるが、15mがなければ分析は不可能
+        if status_data['15m'] == "NotSupported":
+             # 15mがサポートされていない場合、そのクライアントは取引所監視対象から外れるべきだが、一時的にエラーとして処理
+             logging.warning(f"⚠️ {client_name} は {symbol} の 15m OHLCVをサポートしていません。スキップします。")
         return {"symbol": symbol, "side": status_data['15m'], "score": 0.0, "client": client_name} 
         
     # テクニカル分析
@@ -555,7 +575,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     if final_side == "Neutral":
         return {"symbol": symbol, "side": "Neutral", "confidence": final_score, "regime": regime,
                 "macro_context": macro_context_data, "is_fallback": status_data['15m'] != "Success",
-                "tech_data": tech_data_15m}
+                "tech_data": tech_data_15m, "client": client_name}
     
     # ロング/ショートシグナルの返却
     source = client_name
@@ -578,10 +598,10 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> List[str]:
     """出来高上位銘柄リストをCCXTから取得。"""
     global CURRENT_MONITOR_SYMBOLS
-    logging.info(f"🔄 銘柄リストを更新します。出来高TOP{limit}銘柄を取得試行...")
+    logging.info(f"🔄 銘柄リストを更新します。出来高TOP{limit}銘柄を取得試行... (クライアント: {client_name}優先)")
     
-    # 🚨 クライアント構成の変更に伴い、銘柄取得の優先順位も変更
-    fetch_client_names = ['Kraken', 'Kucoin']
+    # 🚨 優先順位: Kraken -> Coinbase Advanced -> Bitstamp -> Gemini
+    fetch_client_names = ['Kraken', 'Coinbase Advanced', 'Bitstamp', 'Gemini']
     new_symbols = []
 
     for name in fetch_client_names:
@@ -595,11 +615,26 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
             usdt_pairs = {
                 symbol: ticker.get('quoteVolume', 0) 
                 for symbol, ticker in tickers.items() 
-                if symbol.endswith('/USDT') and ticker.get('quoteVolume', 0) > 0
+                if symbol.endswith('/USDT') or symbol.endswith('/USD') and ticker.get('quoteVolume', 0) > 0
             }
 
             sorted_pairs = sorted(usdt_pairs.items(), key=lambda item: item[1], reverse=True)
-            new_symbols = [symbol for symbol, volume in sorted_pairs[:limit]]
+            
+            # Coinbase Pro/Gemini/Bitstampは出来高が少ない銘柄が多いので、BTC/ETH/主要アルトに絞る
+            if name != 'Kraken':
+                 selected_symbols = []
+                 for symbol, volume in sorted_pairs:
+                     if any(s in symbol for s in ["BTC", "ETH", "SOL", "ADA", "XRP", "LTC", "DOGE"]) and not symbol.endswith('/USD'):
+                          selected_symbols.append(symbol)
+                     if len(selected_symbols) >= limit: break
+                 
+                 # 絞り込みが厳しすぎる場合、出来高トップから強制的に採用
+                 if len(selected_symbols) < 5:
+                     selected_symbols = [symbol for symbol, volume in sorted_pairs[:limit]]
+
+                 new_symbols = selected_symbols
+            else:
+                 new_symbols = [symbol for symbol, volume in sorted_pairs[:limit]]
             
             if new_symbols:
                 logging.info(f"✅ クライアント {name} を使用し、出来高TOP{len(new_symbols)}銘柄を取得しました。")
@@ -637,7 +672,7 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
     """シグナル通知の処理とクールダウン管理"""
     current_time = time.time()
     
-    error_signals = ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]
+    error_signals = ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]
     valid_signals = [s for s in signals if s is not None and s.get('side') not in error_signals]
     
     for signal in valid_signals:
@@ -696,7 +731,7 @@ async def main_loop():
         return
 
     # 初回銘柄リストの取得
-    await update_monitor_symbols_dynamically(CCXT_CLIENT_NAMES[0], limit=TOP_SYMBOL_LIMIT)
+    await update_monitor_symbols_dynamically('Kraken', limit=TOP_SYMBOL_LIMIT)
 
 
     while True:
@@ -705,7 +740,7 @@ async def main_loop():
         
         # --- 1. 動的銘柄リストの更新とマクロ環境の取得 ---
         if current_time - LAST_UPDATE_TIME > DYNAMIC_UPDATE_INTERVAL:
-            await update_monitor_symbols_dynamically(CCXT_CLIENT_NAMES[0], limit=TOP_SYMBOL_LIMIT)
+            await update_monitor_symbols_dynamically('Kraken', limit=TOP_SYMBOL_LIMIT)
             BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
             LAST_UPDATE_TIME = current_time
 
@@ -723,15 +758,11 @@ async def main_loop():
         analysis_queue: List[Tuple[str, str]] = [] # (symbol, client_name)
         client_index = 0
         
-        # 🚨 KrakenとKucoinを優先的に利用するようにクライアントリストを調整
-        priority_clients = []
-        if 'Kraken' in available_clients: priority_clients.append('Kraken')
-        if 'Kucoin' in available_clients: priority_clients.append('Kucoin')
-        
-        balanced_clients = priority_clients
+        # クライアントリストは初期化順（Kraken, Coinbase Advanced, Gemini, Bitstamp）を使用
+        balanced_clients = available_clients 
         
         for symbol in CURRENT_MONITOR_SYMBOLS:
-            # 2クライアント体制なので、インデックスを2で割る
+            # 4クライアント体制なので、インデックスをクライアント数で割る
             client_name = balanced_clients[client_index % len(balanced_clients)]
             analysis_queue.append((symbol, client_name))
             client_index += 1
@@ -752,20 +783,24 @@ async def main_loop():
             signals.append(signal)
 
             # エラー処理
-            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]:
+            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported"]:
                 client_name_errored = signal.get('client', client_name)
-                cooldown_end_time = time.time() + CLIENT_COOLDOWN
                 
-                logging.error(f"❌ {signal['side']}エラー発生: クライアント {client_name_errored} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット (超保守クールダウン)。")
+                # NotSupportedはエラーではないが、クールダウンさせて次から利用しないようにする
+                cooldown_end_time = time.time() + (CLIENT_COOLDOWN if signal.get('side') != 'NotSupported' else 60*10) # NotSupportedは10分
+                
+                error_msg = f"❌ {signal['side']}エラー発生: クライアント {client_name_errored} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット ({CLIENT_COOLDOWN/60:.0f}分クールダウン)。"
+                logging.error(error_msg)
+                
                 ACTIVE_CLIENT_HEALTH[client_name_errored] = cooldown_end_time
                 
-                error_msg = f"🚨 {signal['side']} エラーが発生しました。クライアント **{client_name_errored}** を {CLIENT_COOLDOWN/60:.0f} 分間クールダウンします。即座にクライアント切り替え。"
-                asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(error_msg, is_emergency=False)))
+                # RateLimit, Timeout, ExchangeErrorの場合は緊急通知
+                if signal.get('side') in ["RateLimit", "Timeout", "ExchangeError"]:
+                    asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(error_msg, is_emergency=False)))
+                    has_major_error = True
+                    TOTAL_ANALYSIS_ERRORS += 1
                 
-                has_major_error = True
-                TOTAL_ANALYSIS_ERRORS += 1
-                
-                # エラー発生時は即座にこのサイクルの分析を中止し、次のサイクルへ
+                # エラー発生時は即座にこのサイクルの分析を中止し、次のサイクルへ (レート制限回避を優先)
                 break 
                 
             # 🚨 APIレート制限回避のための銘柄間遅延
@@ -773,7 +808,7 @@ async def main_loop():
 
         
         # --- 4. 最終シグナルと待機処理 ---
-        LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]]
+        LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported"]]
         asyncio.create_task(signal_notification_task(signals))
         
         if not has_major_error:
@@ -788,13 +823,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.3.0-Kraken_KuCoin_DUAL_CLIENT")
+app = FastAPI(title="Apex BOT API", version="v10.0.0-QUAD_CLIENT")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v9.3.0-Kraken & KuCoin DUAL CLIENT Startup Complete.")
+    logging.info("🚀 Apex BOT v10.0.0-QUAD CLIENT Startup Complete.")
     
     # メインループをバックグラウンドタスクとして実行
     asyncio.create_task(main_loop())
@@ -805,7 +840,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.3.0-Kraken_KuCoin_DUAL_CLIENT (TOP20)",
+        "bot_version": "v10.0.0-QUAD_CLIENT (TOP20)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": len([name for name in CCXT_CLIENT_NAMES if time.time() >= ACTIVE_CLIENT_HEALTH.get(name, 0)]),
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -820,4 +855,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v9.3.0-Kraken_KuCoin_DUAL_CLIENT, TOP20)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v10.0.0-QUAD_CLIENT, TOP20)."}, status_code=200)
