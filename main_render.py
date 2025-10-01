@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v11.4.7-OKX FOCUS (市場サマリー追加版)
+# Apex BOT v11.4.7-OKX FOCUS (MACDエラー対応版)
 # 修正点: 
-# 1. 定期的な「詳細な市場状況分析通知（マーケットサマリー）」機能を追加 (6時間ごと)。
-# 2. 通知フォーマットをユーザー提供のサンプルに基づき詳細化。
-# 3. 新規グローバル変数 MARKET_SUMMARY_INTERVAL, LAST_MARKET_SUMMARY_TIME を追加。
+# 1. generate_market_summary_signal内のMACDヒストグラム列名取得時のIndexErrorを修正。
+# 2. MACD列を安全に取得するために、MACD_12_26_9_Hなどの固定フォーマットの列名を優先。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -56,7 +55,7 @@ PING_INTERVAL = 8
 DYNAMIC_UPDATE_INTERVAL = 60 * 30
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
-MARKET_SUMMARY_INTERVAL = 60 * 60 * 6 # 🚨 新規: 6時間ごと
+MARKET_SUMMARY_INTERVAL = 60 * 60 * 6 # 6時間ごと
 SIGNAL_THRESHOLD = 0.55 
 CLIENT_COOLDOWN = 45 * 60  
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
@@ -80,7 +79,7 @@ TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {}
 NEUTRAL_NOTIFIED_TIME: float = 0
 LAST_ANALYSIS_SIGNALS: List[Dict] = [] 
 LAST_BEST_POSITION_TIME: float = 0 
-LAST_MARKET_SUMMARY_TIME: float = 0.0 # 🚨 新規
+LAST_MARKET_SUMMARY_TIME: float = 0.0 
 LAST_SUCCESS_TIME: float = 0.0
 TOTAL_ANALYSIS_ATTEMPTS: int = 0
 TOTAL_ANALYSIS_ERRORS: int = 0
@@ -179,7 +178,6 @@ def generate_analysis_summary(signal: Dict) -> str:
     
     return header + "\n<b>" + footer + "</b>" + "\n" + body
 
-# 🚨 新規関数: 詳細な市場サマリー通知を整形
 def format_market_summary(signal: Dict) -> str:
     """市場サマリーデータからTelegram通知メッセージを整形"""
 
@@ -355,11 +353,13 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return [], "ClientError", client_name
     
-    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100) if timeframe != VOLATILITY_ALERT_TIMEFRAME else 2 
+    # 1hはサマリー用に多く取得
+    limit = 100 if timeframe == '1h' else REQUIRED_OHLCV_LIMITS.get(timeframe, 100) if timeframe != VOLATILITY_ALERT_TIMEFRAME else 2 
 
     try:
         ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
         
+        # 必要なデータ長チェックを緩和 (MACDに必要なデータ数より余裕を持たせる)
         if not ohlcv or len(ohlcv) < 35: 
              return ohlcv, "DataShortage", client_name 
 
@@ -493,7 +493,7 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
             if signal.get('is_health_check', False):
                 asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(signal))))
                 continue
-            
+
             # 中立シグナルの信頼度がNEUTRAL_NOTIFICATION_THRESHOLDを超える場合に通知 (簡素な中立通知)
             if (abs(confidence - 0.5) * 2) * 100 > (NEUTRAL_NOTIFICATION_THRESHOLD * 2) * 100:
                 if current_time - NEUTRAL_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
@@ -510,7 +510,6 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
                 TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                 asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(signal))))
 
-# 🚨 新規関数: 詳細な市場サマリーシグナルを生成
 async def generate_market_summary_signal(symbol: str, macro_context: Dict, client_name: str) -> Optional[Dict]:
     """BTCの詳細な市場サマリーシグナルを生成する (1hデータを使用)"""
 
@@ -528,13 +527,29 @@ async def generate_market_summary_signal(symbol: str, macro_context: Dict, clien
     df_1h['rsi'] = ta.rsi(df_1h['close'], length=14)
     df_1h['adx'] = ta.adx(df_1h['high'], df_1h['low'], df_1h['close'], length=14)['ADX_14']
     
-    # MACDの計算 (ヒストグラムの値をそのまま採用)
+    # 3. MACDの計算と安全なヒストグラム列名の取得
     macd_data = ta.macd(df_1h['close'], fast=12, slow=26, signal=9)
-    macd_hist_col = [col for col in macd_data.columns if 'hist' in col.lower()][0]
-    df_1h['macd_hist'] = macd_data[macd_hist_col]
     
-    # 3. レジーム（波形フェーズ）の決定
-    adx_val = df_1h['adx'].iloc[-1]
+    # 🚨 修正ロジック: 'MACDh'列を安全に取得
+    macd_hist_col = next((col for col in macd_data.columns if 'hist' in col.lower()), None)
+    
+    if macd_hist_col is None:
+        # MACDのデフォルト列名を使用 (MACD_12_26_9はpandas_taのデフォルト)
+        macd_hist_col = 'MACDh_12_26_9' 
+        # もしそれでも列が存在しない場合はエラーをログに記録し、0.0を使用
+        if macd_hist_col not in macd_data.columns:
+            logging.warning(f"⚠️ MACDヒストグラム列 '{macd_hist_col}' が見つかりません。MACD値を0.0とします。")
+            macd_hist_val = 0.0
+        else:
+            macd_hist_val = macd_data[macd_hist_col].iloc[-1]
+    else:
+        macd_hist_val = macd_data[macd_hist_col].iloc[-1]
+        
+    df_1h['macd_hist'] = macd_hist_val
+
+    # 4. レジーム（波形フェーズ）の決定
+    adx_val = df_1h['adx'].iloc[-1] if not df_1h['adx'].empty and not pd.isna(df_1h['adx'].iloc[-1]) else 25.0
+
     if adx_val >= 25:
         regime = "トレンド相場"
         confidence = random.uniform(0.6, 0.9)
@@ -545,7 +560,7 @@ async def generate_market_summary_signal(symbol: str, macro_context: Dict, clien
         regime = "移行期"
         confidence = random.uniform(0.2, 0.4)
 
-    # 4. シグナル辞書を構築
+    # 5. シグナル辞書を構築
     return {
         "symbol": symbol,
         "side": "Neutral",
@@ -554,9 +569,9 @@ async def generate_market_summary_signal(symbol: str, macro_context: Dict, clien
         "macro_context": macro_context,
         "client": client_name,
         "tech_data": {
-            "rsi": df_1h['rsi'].iloc[-1] if not df_1h.empty else 50.0,
-            "adx": adx_val if not df_1h.empty else 25.0,
-            "macd_hist": df_1h['macd_hist'].iloc[-1] if not df_1h.empty else 0.0,
+            "rsi": df_1h['rsi'].iloc[-1] if not df_1h['rsi'].empty else 50.0,
+            "adx": adx_val,
+            "macd_hist": macd_hist_val,
         }
     }
 
@@ -636,22 +651,25 @@ async def self_ping_task(interval: int):
     global LAST_ANALYSIS_SIGNALS, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS, LAST_SUCCESS_TIME
     while True:
         await asyncio.sleep(interval)
-        if TOTAL_ANALYSIS_ATTEMPTS > 0 and time.time() - LAST_SUCCESS_TIME < 60 * 10: 
-            stats = {
-                "attempts": TOTAL_ANALYSIS_ATTEMPTS,
-                "errors": TOTAL_ANALYSIS_ERRORS,
-                "last_success": LAST_SUCCESS_TIME,
-            }
-            health_signal = {
-                "symbol": "BOT_HEALTH",
-                "side": "Neutral",
-                "confidence": 0.5,
-                "macro_context": BTC_DOMINANCE_CONTEXT,
-                "is_health_check": True,
-                "analysis_stats": stats
-            }
-            asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(health_signal))))
-            logging.info("✅ BOTヘルスチェック通知を送信しました。")
+        try:
+            if TOTAL_ANALYSIS_ATTEMPTS > 0 and time.time() - LAST_SUCCESS_TIME < 60 * 10: 
+                stats = {
+                    "attempts": TOTAL_ANALYSIS_ATTEMPTS,
+                    "errors": TOTAL_ANALYSIS_ERRORS,
+                    "last_success": LAST_SUCCESS_TIME,
+                }
+                health_signal = {
+                    "symbol": "BOT_HEALTH",
+                    "side": "Neutral",
+                    "confidence": 0.5,
+                    "macro_context": BTC_DOMINANCE_CONTEXT,
+                    "is_health_check": True,
+                    "analysis_stats": stats
+                }
+                asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(health_signal))))
+                logging.info("✅ BOTヘルスチェック通知を送信しました。")
+        except Exception as e:
+            logging.error(f"❌ 死活監視タスク実行中にエラー: {e}")
 
 
 async def instant_price_check_task():
@@ -678,104 +696,111 @@ async def main_loop():
     global LAST_MARKET_SUMMARY_TIME
 
     # 必須ロジック
-    BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
-    LAST_UPDATE_TIME = time.time()
-    await send_test_message()
-    
-    asyncio.create_task(self_ping_task(interval=PING_INTERVAL)) 
-    asyncio.create_task(instant_price_check_task())
-    asyncio.create_task(best_position_notification_task()) 
-
-    if not CCXT_CLIENT_NAMES:
-        logging.error("致命的エラー: 利用可能なCCXTクライアントがありません。ループを停止します。")
-        return
-
-    await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=TOP_SYMBOL_LIMIT) 
-
-    while True:
-        await asyncio.sleep(0.005)
-        current_time = time.time()
+    try:
+        BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
+        LAST_UPDATE_TIME = time.time()
+        await send_test_message()
         
-        # --- 定期更新ロジック ---
-        if current_time - LAST_UPDATE_TIME > DYNAMIC_UPDATE_INTERVAL:
-            await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=TOP_SYMBOL_LIMIT)
-            logging.info("🔄 銘柄更新サイクル実行")
-            BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
-            LAST_UPDATE_TIME = current_time
+        # バックグラウンドタスクの起動
+        asyncio.create_task(self_ping_task(interval=PING_INTERVAL)) 
+        asyncio.create_task(instant_price_check_task())
+        asyncio.create_task(best_position_notification_task()) 
 
-        # 🚨 新規ロジック: 市場サマリー通知のチェック (6時間ごと)
-        if current_time - LAST_MARKET_SUMMARY_TIME > MARKET_SUMMARY_INTERVAL:
+        if not CCXT_CLIENT_NAMES:
+            logging.error("致命的エラー: 利用可能なCCXTクライアントがありません。ループを停止します。")
+            return
+
+        await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=TOP_SYMBOL_LIMIT) 
+
+        while True:
+            await asyncio.sleep(0.005)
+            current_time = time.time()
+            
+            # --- 定期更新ロジック ---
+            if current_time - LAST_UPDATE_TIME > DYNAMIC_UPDATE_INTERVAL:
+                await update_monitor_symbols_dynamically(CCXT_CLIENT_NAME, limit=TOP_SYMBOL_LIMIT)
+                logging.info("🔄 銘柄更新サイクル実行")
+                BTC_DOMINANCE_CONTEXT = await asyncio.to_thread(get_crypto_macro_context)
+                LAST_UPDATE_TIME = current_time
+
+            # 🚨 市場サマリー通知のチェック (6時間ごと)
+            if current_time - LAST_MARKET_SUMMARY_TIME > MARKET_SUMMARY_INTERVAL:
+                client_name = CCXT_CLIENT_NAME
+                summary_signal = await generate_market_summary_signal("BTC/USDT", BTC_DOMINANCE_CONTEXT, client_name)
+                
+                if summary_signal:
+                    asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_market_summary(summary_signal))))
+                    LAST_MARKET_SUMMARY_TIME = current_time
+                    logging.info("📢 詳細な市場サマリー通知を送信しました。")
+
+            # --- 分析ロジック ---
+            
             client_name = CCXT_CLIENT_NAME
-            summary_signal = await generate_market_summary_signal("BTC/USDT", BTC_DOMINANCE_CONTEXT, client_name)
             
-            if summary_signal:
-                asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_market_summary(summary_signal))))
-                LAST_MARKET_SUMMARY_TIME = current_time
-                logging.info("📢 詳細な市場サマリー通知を送信しました。")
+            if current_time < ACTIVE_CLIENT_HEALTH.get(client_name, 0):
+                cooldown_time = ACTIVE_CLIENT_HEALTH.get(client_name, current_time) - current_time
+                logging.warning(f"❌ {client_name}クライアントがクールダウン中です。次の分析まで {cooldown_time:.0f}秒待機します。")
+                await asyncio.sleep(min(max(10, cooldown_time), LOOP_INTERVAL)) 
+                continue
+                
+            analysis_queue: List[Tuple[str, str]] = [(symbol, client_name) for symbol in CURRENT_MONITOR_SYMBOLS]
+                
+            logging.info(f"🔍 分析開始 (対象銘柄: {len(analysis_queue)}銘柄, 利用クライアント: {client_name})")
+            TOTAL_ANALYSIS_ATTEMPTS += 1
+            
+            signals: List[Optional[Dict]] = []
+            has_major_error = False
+            
+            for symbol, client_name in analysis_queue:
+                
+                asyncio.create_task(check_for_sudden_volatility(symbol, client_name))
+                
+                if time.time() < ACTIVE_CLIENT_HEALTH.get(client_name, 0):
+                     break
+                     
+                signal = await generate_signal_candidate(symbol, BTC_DOMINANCE_CONTEXT, client_name)
+                signals.append(signal)
 
-        # --- 分析ロジック ---
-        
-        client_name = CCXT_CLIENT_NAME
-        
-        if current_time < ACTIVE_CLIENT_HEALTH.get(client_name, 0):
-            cooldown_time = ACTIVE_CLIENT_HEALTH.get(client_name, current_time) - current_time
-            logging.warning(f"❌ {client_name}クライアントがクールダウン中です。次の分析まで {cooldown_time:.0f}秒待機します。")
-            await asyncio.sleep(min(max(10, cooldown_time), LOOP_INTERVAL)) 
-            continue
+                if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]:
+                    cooldown_end_time = time.time() + CLIENT_COOLDOWN
+                    
+                    error_msg = f"❌ {signal['side']}エラー発生: クライアント {client_name} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット ({CLIENT_COOLDOWN/60:.0f}分クールダウン)。"
+                    logging.error(error_msg)
+                    
+                    ACTIVE_CLIENT_HEALTH[client_name] = cooldown_end_time
+                    
+                    if signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "DataShortage"]:
+                        asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(error_msg, is_emergency=False)))
+                        has_major_error = True
+                    
+                    TOTAL_ANALYSIS_ERRORS += 1
+                    break 
+                
+                await asyncio.sleep(SYMBOL_WAIT) 
             
-        analysis_queue: List[Tuple[str, str]] = [(symbol, client_name) for symbol in CURRENT_MONITOR_SYMBOLS]
             
-        logging.info(f"🔍 分析開始 (対象銘柄: {len(analysis_queue)}銘柄, 利用クライアント: {client_name})")
-        TOTAL_ANALYSIS_ATTEMPTS += 1
-        
-        signals: List[Optional[Dict]] = []
-        has_major_error = False
-        
-        for symbol, client_name in analysis_queue:
+            LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]]
+            asyncio.create_task(signal_notification_task(signals))
             
-            asyncio.create_task(check_for_sudden_volatility(symbol, client_name))
-            
-            if time.time() < ACTIVE_CLIENT_HEALTH.get(client_name, 0):
-                 break
-                 
-            signal = await generate_signal_candidate(symbol, BTC_DOMINANCE_CONTEXT, client_name)
-            signals.append(signal)
+            if not has_major_error:
+                LAST_SUCCESS_TIME = current_time
+                logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
+                await asyncio.sleep(LOOP_INTERVAL) 
+            else:
+                logging.info("➡️ クライアントがクールダウン中のため、待機時間に移行します。")
+                sleep_to_cooldown = ACTIVE_CLIENT_HEALTH[client_name] - current_time
+                await asyncio.sleep(min(max(60, sleep_to_cooldown), LOOP_INTERVAL)) 
+    
+    except Exception as e:
+        # メインループのタスク例外を捕捉し、ログに記録
+        logging.critical(f"🛑 致命的なメインループエラーが発生しました: {e}", exc_info=True)
 
-            if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]:
-                cooldown_end_time = time.time() + CLIENT_COOLDOWN
-                
-                error_msg = f"❌ {signal['side']}エラー発生: クライアント {client_name} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット ({CLIENT_COOLDOWN/60:.0f}分クールダウン)。"
-                logging.error(error_msg)
-                
-                ACTIVE_CLIENT_HEALTH[client_name] = cooldown_end_time
-                
-                if signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "DataShortage"]:
-                    asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(error_msg, is_emergency=False)))
-                    has_major_error = True
-                
-                TOTAL_ANALYSIS_ERRORS += 1
-                break 
-            
-            await asyncio.sleep(SYMBOL_WAIT) 
-        
-        
-        LAST_ANALYSIS_SIGNALS = [s for s in signals if s is not None and s.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "DataShortage"]]
-        asyncio.create_task(signal_notification_task(signals))
-        
-        if not has_major_error:
-            LAST_SUCCESS_TIME = current_time
-            logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
-            await asyncio.sleep(LOOP_INTERVAL) 
-        else:
-            logging.info("➡️ クライアントがクールダウン中のため、待機時間に移行します。")
-            sleep_to_cooldown = ACTIVE_CLIENT_HEALTH[client_name] - current_time
-            await asyncio.sleep(min(max(60, sleep_to_cooldown), LOOP_INTERVAL)) 
 
 # -----------------------------------------------------------------------------------
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v11.4.7-OKX_FOCUS")
+app = FastAPI(title="Apex BOT API", version="v11.4.7-OKX_FOCUS (MACD Fix)")
 
 @app.on_event("startup")
 async def startup_event():
@@ -783,6 +808,7 @@ async def startup_event():
     initialize_ccxt_client()
     logging.info("🚀 Apex BOT v11.4.7-OKX FOCUS Startup Complete.") 
     
+    # asyncio.create_taskで例外が処理されるようになり、エラーで即座にアプリが落ちるのを防ぐ
     asyncio.create_task(main_loop())
 
 
@@ -791,7 +817,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.4.7-OKX_FOCUS (Market Summary Added)",
+        "bot_version": "v11.4.7-OKX_FOCUS (MACD Fix)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": 1 if time.time() >= ACTIVE_CLIENT_HEALTH.get(CCXT_CLIENT_NAME, 0) else 0,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -806,4 +832,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v11.4.7-OKX_FOCUS, Market Summary Added)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.4.7-OKX_FOCUS, MACD Fix)."}, status_code=200)
