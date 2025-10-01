@@ -37,7 +37,7 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
-TOP_SYMBOL_LIMIT = 30 # 出来高TOP30
+TOP_SYMBOL_LIMIT = 20 # 出来高TOP30
 LOOP_INTERVAL = 180        # 🚨 分析サイクルを180秒（3分）に延長 (ULTRA STABILITY)
 SYMBOL_WAIT = 1.5          # 🚨 銘柄ごとの分析間に挿入する遅延を1.5秒に延長 (ULTRA STABILITY)
 
