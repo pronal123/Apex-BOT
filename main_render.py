@@ -948,7 +948,7 @@ app = FastAPI(title="Apex BOT API", version="v11.4.7-KRAKEN_FALLBACK (Full Integ
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
-    initialize_ccxt_client()
+    await initialize_ccxt_client() # 👈 ここに 'await' を追加
     logging.info("🚀 Apex BOT v11.4.7-KRAKEN FALLBACK Startup Complete.") 
     
     # asyncio.create_taskで例外が処理されるようになり、エラーで即座にアプリが落ちるのを防ぐ
