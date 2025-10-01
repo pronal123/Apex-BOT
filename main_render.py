@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v11.3.3-KRAKEN TRADING FOCUS (最終安定化修正 - USDTペア強制)
+# Apex BOT v11.3.4-KRAKEN TRADING FOCUS (レート制限回避のための最終調整)
 # 修正点: 
-# 1. 銘柄収集ロジックを大幅に変更: Krakenでのデータ取得が不安定な '/USD' ペアを事実上すべて排除し、'/USDT' のTOP10のみを対象としました。
-# 2. デフォルト銘柄を安定性の高い '/USDT' ペアに統一。
-# 3. ログに登場した未登録の不安定銘柄（USDG/USD, BNB/USD, TAO/USDなど）を強制排除リストに追加。
+# 1. SYMBOL_WAIT を 10.0 秒に大幅に延長しました (レート制限回避最優先)。
+# 2. CCXTクライアントの timeout と rateLimit を調整し、KrakenのAPI制限と戦います。
+# 3. バージョン情報を v11.3.4 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -37,10 +37,9 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
-TOP_SYMBOL_LIMIT = 10      # 安定のため10銘柄に固定
+TOP_SYMBOL_LIMIT = 10      
 LOOP_INTERVAL = 360        
-SYMBOL_WAIT = 5.0          # 銘柄間の遅延をさらに伸ばす (レート制限回避強化)
-
+SYMBOL_WAIT = 10.0         # 🚨 修正1: 銘柄間の遅延を 10.0 秒に大幅に延長
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
@@ -142,7 +141,7 @@ def format_telegram_message(signal: Dict) -> str:
             
             # 🚨 修正: バージョン情報
             return (
-                f"🚨 <b>Apex BOT v11.3.3-KRAKEN FOCUS - 死活監視 (システム正常)</b> 🟢\n" 
+                f"🚨 <b>Apex BOT v11.3.4-KRAKEN FOCUS - 死活監視 (システム正常)</b> 🟢\n" 
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -278,8 +277,8 @@ def initialize_ccxt_client():
     clients = {
         'Kraken': ccxt_async.kraken({
             "enableRateLimit": True, 
-            "timeout": 35000, # タイムアウトを長く
-            "rateLimit": 3000 # レート制限を緩める
+            "timeout": 40000, # 🚨 修正3: タイムアウトを 40 秒に延長
+            "rateLimit": 4000 # 🚨 修正3: レート制限を 4 秒あたり 1 リクエスト程度に調整
         }), 
     }
     CCXT_CLIENTS_DICT = clients
@@ -290,9 +289,9 @@ def initialize_ccxt_client():
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v11.3.3-KRAKEN FOCUS - 起動テスト通知 (最終安定化)</b> 🚀\n\n" 
+        f"🤖 <b>Apex BOT v11.3.4-KRAKEN FOCUS - 起動テスト通知 (最終レート制限調整)</b> 🚀\n\n" 
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>安定構成: 不安定な/USDペアを強制的に排除し、/USDTペアのみを収集対象としました。</b>"
+        f"<b>安定構成: 銘柄間の待機時間を 10 秒に延長し、Krakenのレート制限を最大限回避します。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
@@ -615,7 +614,7 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
 # -----------------------------------------------------------------------------------
 
 async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> List[str]:
-    """出来高上位銘柄リストをCCXTから取得し、不適切な銘柄を除外する。"""
+    """出来高上位銘柄リストをCCXTから取得し、/USDTペアに限定する。"""
     global CURRENT_MONITOR_SYMBOLS
     logging.info(f"🔄 銘柄リストを更新します。出来高TOP{limit}銘柄を取得試行... (クライアント: {client_name})")
     
@@ -624,10 +623,10 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
         logging.error("致命的エラー: Krakenクライアントが見つかりません。")
         return DEFAULT_SYMBOLS
 
-    # 🚨 修正1: ログに現れたすべての不安定なシンボルを網羅。USDペアを事実上全て排除する。
+    # USDペアとステーブルコインペアを排除
     EXCLUDE_SYMBOLS_PARTIAL = [
-        '/USD', # すべてのUSDペアを強制的にフィルタリング（Krakenのデータ取得不安定なため）
-        'USDC/', 'USDT/', 'DAI/', 'TUSD/', 'EUR/', 'GBP/', 'CAD/', # すべてのステーブルコイン、法定通貨を排除
+        '/USD', 
+        'USDC/', 'USDT/', 'DAI/', 'TUSD/', 'EUR/', 'GBP/', 'CAD/', 
     ]
 
     try:
@@ -637,20 +636,23 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
         usdt_pairs = {
             symbol: ticker.get('quoteVolume', 0) 
             for symbol, ticker in tickers.items() 
-            if symbol.endswith('/USDT') # USDTペアに限定
+            if symbol.endswith('/USDT') 
             and ticker.get('quoteVolume', 0) > 0
             and not any(excl in symbol for excl in EXCLUDE_SYMBOLS_PARTIAL)
             and not symbol.endswith('.d') 
-            and symbol not in ['ETH/USDT.d', 'BTC/USDT.d'] # 念のためインデックスペアも除外
+            and symbol not in ['ETH/USDT.d', 'BTC/USDT.d'] 
         }
 
         sorted_pairs = sorted(usdt_pairs.items(), key=lambda item: item[1], reverse=True)
         new_symbols = [symbol for symbol, volume in sorted_pairs[:limit]]
 
         if new_symbols:
+            # BTC/USDT, ETH/USDT, SOL/USDT が必ず含まれるようにする
+            stable_symbols = list(set(DEFAULT_SYMBOLS + new_symbols))[:limit]
+            
             logging.info(f"✅ クライアント Kraken を使用し、出来高TOP{len(new_symbols)}の /USDT 銘柄を取得しました。")
-            CURRENT_MONITOR_SYMBOLS = new_symbols
-            return new_symbols
+            CURRENT_MONITOR_SYMBOLS = stable_symbols
+            return stable_symbols
 
     except Exception as e:
         logging.warning(f"⚠️ クライアント Kraken で銘柄リスト取得エラーが発生しました: {type(e).__name__}。フォールバック銘柄を使用します。")
@@ -811,13 +813,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v11.3.3-KRAKEN_FOCUS")
+app = FastAPI(title="Apex BOT API", version="v11.3.4-KRAKEN_FOCUS")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v11.3.3-KRAKEN TRADING FOCUS Startup Complete.") 
+    logging.info("🚀 Apex BOT v11.3.4-KRAKEN TRADING FOCUS Startup Complete.") 
     
     asyncio.create_task(main_loop())
 
@@ -827,7 +829,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.3.3-KRAKEN_FOCUS (USDT ONLY)",
+        "bot_version": "v11.3.4-KRAKEN_FOCUS (USDT ONLY, 10s WAIT)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": len(CCXT_CLIENT_NAMES) if time.time() >= ACTIVE_CLIENT_HEALTH.get('Kraken', 0) else 0,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -842,4 +844,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v11.3.3-KRAKEN_FOCUS, USDT ONLY)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.3.4-KRAKEN_FOCUS, USDT ONLY, 10s WAIT)."}, status_code=200)
