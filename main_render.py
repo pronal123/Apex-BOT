@@ -34,9 +34,9 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 DEFAULT_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
-TOP_SYMBOL_LIMIT = 10      # 🚨 修正: Krakenの負荷集中を避け、監視銘柄をTOP10に削減
-LOOP_INTERVAL = 300        # 🚨 修正: 分析サイクルを300秒（5分）に延長 (Kraken単独のため)
-SYMBOL_WAIT = 3.0          # 🚨 修正: 銘柄間の遅延を3.0秒に延長 (レート制限回避の決定打)
+TOP_SYMBOL_LIMIT = 10      
+LOOP_INTERVAL = 360        # 🚨 修正: 360秒 (6分) に延長
+SYMBOL_WAIT = 4.0          # 🚨 修正: 4.0秒に延長 (レート制限回避の決定打)
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
@@ -47,9 +47,9 @@ DYNAMIC_UPDATE_INTERVAL = 60 * 30
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
-CLIENT_COOLDOWN = 45 * 60  # 🚨 修正: 45分 (単独クライアントがエラーした場合の長時間クールダウン)
-REQUIRED_OHLCV_LIMITS = {'15m': 150, '1h': 150, '4h': 150} 
-VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
+CLIENT_COOLDOWN = 45 * 60  
+REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} # 🚨 修正: 必要OHLCVを100に削減
+VOLATILITY_BB_PENALTY_THRESHOLD = 5.0  
 
 # グローバル状態変数
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
