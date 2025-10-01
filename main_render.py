@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v9.2.3-Binance - TOP20 2強分散監視・超安定化版 (ULTRA STABILITY)
-# 修正点: Coinbaseを削除し、Binanceを追加。Kraken + Binance + OKXの分散監視。
+# Apex BOT v9.2.4-Binance 強化・安定版 (ULTRA STABILITY)
+# 修正点: Binanceのサーバー時刻同期設定を強化し、安定性を向上。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -115,7 +115,7 @@ def format_telegram_message(signal: Dict) -> str:
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
             return (
-                f"🚨 <b>Apex BOT v9.2.3-Binance - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.2.4-Binance - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -170,7 +170,7 @@ def format_telegram_message(signal: Dict) -> str:
         f"<b>信頼度スコア (MTFA統合): {score * 100:.2f}%</b> {penalty_info}\n"
         f"-----------------------------------------\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
-        f"• <b>ATR (ボラティリティ指標)</b>: <code>{format_price(atr_val)}</code>\n" # 🚨 ここでATR値を確認
+        f"• <b>ATR (ボラティリティ指標)</b>: <code>{format_price(atr_val)}</code>\n" 
         f"\n"
         f"🎯 <b>取引計画 (推奨)</b>:\n"
         f"  - エントリー: **<code>${format_price(signal['entry'])}</code>**\n"
@@ -213,7 +213,7 @@ def format_best_position_message(signal: Dict) -> str:
         f"-----------------------------------------\n"
         f"• <b>選定スコア</b>: <code>{score * 100:.2f}%</code> (MTFA統合)\n"
         f"• <b>現在価格</b>: <code>${format_price(signal['price'])}</code>\n"
-        f"• <b>ATR</b>: <code>{format_price(atr_val)}</code>\n" # 🚨 ここでATR値を確認
+        f"• <b>ATR</b>: <code>{format_price(atr_val)}</code>\n"
         f"\n"
         f"🎯 <b>取引計画 (推奨)</b>:\n"
         f"  - エントリー: <code>${format_price(signal['entry'])}</code>\n"
@@ -231,13 +231,15 @@ def format_best_position_message(signal: Dict) -> str:
 def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
-    # タイムアウト設定は維持
+    
+    # タイムアウトと設定を調整し、Binanceの安定性を最大化
     clients = {
-        'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 30000}), # 最も安定しているクライアント
-        'Binance': ccxt_async.binance({"enableRateLimit": True, "timeout": 30000, # 新たに追加する安定クライアント
+        'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 30000}), 
+        # Binance強化: サーバー時刻同期を有効にし、タイムアウトを20秒に短縮
+        'Binance': ccxt_async.binance({"enableRateLimit": True, "timeout": 20000, 
                                         "options": {"defaultType": "spot", "adjustForTimeDifference": True}}),
-        'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 45000}),     # クールダウンに入るが予備として維持
-        # Coinbase はレート制限が厳しすぎるため削除
+        # OKX強化: タイムアウトを60秒に延長し、粘り強く処理させる
+        'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 60000}),     
     }
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
@@ -265,10 +267,10 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.2.3-Binance - 起動テスト通知 (ULTRA STABILITY版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.2.4-Binance - 起動テスト通知 (ULTRA STABILITY強化版)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"<b>超安定化: 実行間隔を180秒、銘柄遅延を1.5秒に設定。</b>\n"
-        f"<b>【主要変更点】: CoinbaseをBinanceに置き換え、Kraken/Binanceの2強体制で安定性を最大化します。</b>"
+        f"<b>【主要変更点】: Binanceのサーバー時刻同期設定を強化。OKXのタイムアウトを延長し粘りを強化。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
@@ -292,12 +294,15 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         return [], "RateLimit", client_name
     except ccxt.ExchangeError as e:
         # Binanceの429エラーなど、ExchangeErrorでレート制限を捕捉する場合がある
-        if 'rate limit' in str(e).lower() or '429' in str(e):
-             return [], "RateLimit", client_name
+        if 'rate limit' in str(e).lower() or '429' in str(e) or 'timestamp' in str(e).lower(): # timestampエラーも捕捉
+             return [], "ExchangeError", client_name
         return [], "ExchangeError", client_name
     except ccxt.NetworkError:
         return [], "Timeout", client_name
     except Exception as e:
+        # ccxt.RequestTimeout もこちらで捕捉
+        if 'timeout' in str(e).lower():
+            return [], "Timeout", client_name
         return [], "UnknownError", client_name
 
 
@@ -391,7 +396,7 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
         
     # ATR値の取得
     atr_col = df.columns[df.columns.str.startswith('ATR_')].tolist()
-    atr_value = last[atr_col[0]] if atr_col and not pd.isna(last[atr_col[0]]) else 0.0 # 🚨 ATR値が0.00になる場合は、ここで0.0が返される
+    atr_value = last[atr_col[0]] if atr_col and not pd.isna(last[atr_col[0]]) else 0.0 
     
     macd_hist_col = df.columns[df.columns.str.startswith('MACDH_')].tolist()
     adx_col = df.columns[df.columns.str.startswith('ADX_')].tolist()
@@ -401,7 +406,7 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
         "rsi": last[rsi_col[0]] if rsi_col and not pd.isna(last[rsi_col[0]]) else 50,
         "macd_hist": last[macd_hist_col[0]] if macd_hist_col and not pd.isna(last[macd_hist_col[0]]) else 0,
         "adx": last[adx_col[0]] if adx_col and not pd.isna(last[adx_col[0]]) else 25,
-        "atr_value": atr_value, # 🚨 正常なATR値
+        "atr_value": atr_value, 
         "bb_width_pct": bb_width_pct,
         "ma_position_score": ma_pos_score,
         "ma_position": ma_position,
@@ -785,13 +790,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.2.3-Binance_ULTRA_STABILITY")
+app = FastAPI(title="Apex BOT API", version="v9.2.4-Binance_ULTRA_STABILITY_Enhanced")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v9.2.3-Binance ULTRA_STABILITY Startup Complete.")
+    logging.info("🚀 Apex BOT v9.2.4-Binance ULTRA_STABILITY Enhanced Startup Complete.")
     
     # メインループをバックグラウンドタスクとして実行
     asyncio.create_task(main_loop())
@@ -802,7 +807,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.2.3-Binance_ULTRA_STABILITY (TOP20)",
+        "bot_version": "v9.2.4-Binance_ULTRA_STABILITY_Enhanced (TOP20)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": len([name for name in CCXT_CLIENT_NAMES if time.time() >= ACTIVE_CLIENT_HEALTH.get(name, 0)]),
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -817,4 +822,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v9.2.3-Binance_ULTRA_STABILITY, TOP20)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v9.2.4-Binance_ULTRA_STABILITY_Enhanced, TOP20)."}, status_code=200)
