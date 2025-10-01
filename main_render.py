@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v9.1.13-Robust - 堅牢性強化フルコード (KeyError & ExchangeError対応)
+# Apex BOT v9.1.14-Adaptive - 適応型フルコード (タイムフレーム/シンボル修正)
 # 強化点:
-# 1. 📌 KeyError: 'macro_context' バグを修正し、エラーシグナル通知時のクラッシュを防止。
-# 2. 📌 CCXTの例外処理を強化 (BadSymbolなどを区別) し、不要なクライアントクールダウンを回避。
-# 3. MTFA、複合モメンタム、ボラティリティペナルティロジックを維持。
+# 1. v9.1.13のKeyError修正を維持。
+# 2. 📌 Coinbaseの4hエラー、Krakenのシンボルエラーに対応するためのマッピング関数を導入。
+# 3. CCXTのエラーハンドリングとクライアントクールダウンロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ====================================================================================
-# CONFIG & CONSTANTS
+# CONFIG & CONSTANTS (適応ロジックの追加)
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
@@ -47,12 +47,43 @@ DYNAMIC_UPDATE_INTERVAL = 600
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
-CLIENT_COOLDOWN = 60 * 30 # 通常のエラー/レート制限時のクールダウン
-CLIENT_COOLDOWN_SHORT = 60 * 5 # BadSymbolなど、軽微なエラー時のクールダウン
+CLIENT_COOLDOWN = 60 * 30 
+CLIENT_COOLDOWN_SHORT = 60 * 5 
 REQUIRED_OHLCV_LIMITS = {'15m': 200, '1h': 200, '4h': 200}
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
-# グローバル状態変数
+# 📌 CCXTクライアントごとのタイムフレームとシンボルマッピング
+TIMEFRAME_MAPPING = {
+    # Coinbaseはタイムフレームを秒数で指定する必要がある（900s, 3600s, 14400s）
+    '15m': {'Coinbase': '900', 'Kraken': '15m', 'default': '15m'},
+    '1h':  {'Coinbase': '3600', 'Kraken': '1h', 'default': '1h'},
+    '4h':  {'Coinbase': '14400', 'Kraken': '4h', 'default': '4h'}, 
+}
+
+# KrakenはBTCをXBTと表記し、ペアがUSDである場合がある（USDTも可だが念のためマッピング）
+SYMBOL_MAPPING = {
+    'Kraken': {
+        "BTC/USDT": "XBT/USDT", 
+        "ETH/USDT": "ETH/USDT", 
+        # その他はデフォルト（大文字/小文字の正確なチェックは取引所に委ねる）
+    },
+    # CoinbaseはUSDTペアが少ない場合があるが、ここではコードの複雑化を防ぐため、デフォルトを使用
+}
+
+def get_mapped_symbol(client_name: str, symbol: str) -> str:
+    """クライアント名に応じてシンボル表記を変換"""
+    if client_name in SYMBOL_MAPPING and symbol in SYMBOL_MAPPING[client_name]:
+        return SYMBOL_MAPPING[client_name][symbol]
+    # 'ALTn/USDT'のような動的シンボルはそのまま返す
+    return symbol
+
+def get_mapped_timeframe(client_name: str, timeframe: str) -> str:
+    """クライアント名に応じてタイムフレーム表記を変換"""
+    if timeframe in TIMEFRAME_MAPPING:
+        return TIMEFRAME_MAPPING[timeframe].get(client_name, TIMEFRAME_MAPPING[timeframe].get('default', timeframe))
+    return timeframe
+
+# グローバル状態変数 (変更なし)
 CCXT_CLIENTS_DICT: Dict[str, ccxt_async.Exchange] = {}
 CCXT_CLIENT_NAMES: List[str] = []
 CCXT_CLIENT_NAME: str = 'Initializing' 
@@ -68,7 +99,7 @@ TOTAL_ANALYSIS_ERRORS: int = 0
 ACTIVE_CLIENT_HEALTH: Dict[str, float] = {} 
 BTC_DOMINANCE_CONTEXT: Dict = {} 
 
-# ロギング設定
+# ロギング設定 (変更なし)
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     force=True)
@@ -92,12 +123,10 @@ def format_price_utility(price: float, symbol: str) -> str:
 def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
-    # Render環境でAPIキー無しでの動作をテストするため、publicのみ利用可能な設定とする
     clients = {
         'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 30000}),     
         'Coinbase': ccxt_async.coinbase({"enableRateLimit": True, "timeout": 20000,
                                          "options": {"defaultType": "spot", "fetchTicker": "public"}}),
-        # Krakenはペア名の仕様が異なることが多いため、エラーに注意
         'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 20000}), 
     }
     CCXT_CLIENTS_DICT = clients
@@ -126,9 +155,9 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.1.13-Robust - 起動テスト通知 (堅牢性強化版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.1.14-Adaptive - 起動テスト通知 (適応型フルコード)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>機能強化: エラー時のクラッシュ/連続クールダウンを防止。</b>"
+        f"<b>機能強化: 取引所固有のタイムフレーム/シンボルに対応し、データ取得エラーを大幅に低減。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True))
@@ -142,21 +171,24 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return [], "ClientError"
     
+    # 📌 修正点: タイムフレームとシンボルをマッピング
+    mapped_timeframe = get_mapped_timeframe(client_name, timeframe)
+    mapped_symbol = get_mapped_symbol(client_name, symbol)
+
     limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
     try:
-        ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=limit)
+        ohlcv = await client.fetch_ohlcv(mapped_symbol, mapped_timeframe, limit=limit)
         if len(ohlcv) < limit:
             return ohlcv, "DataShortage"
         return ohlcv, "Success"
         
     except ccxt.RateLimitExceeded:
         return [], "RateLimit"
-    # 📌 強化点: Symbolや非対応のエラーをExchangeErrorから分離
+    # 強化点: Symbolや非対応のエラーをExchangeErrorから分離
     except (ccxt.BadSymbol, ccxt.NotSupported): 
         return [], "NotSupported"
     except ccxt.ExchangeError as e:
-        # 詳細なエラーロギングを維持
-        logging.error(f"❌ {client_name} Exchangeエラー ({symbol}): {e}")
+        logging.error(f"❌ {client_name} Exchangeエラー ({mapped_symbol}): {e}")
         return [], "ExchangeError"
     except ccxt.NetworkError:
         return [], "Timeout"
@@ -169,8 +201,11 @@ async def fetch_order_book_depth_async(client_name: str, symbol: str) -> Dict:
     client = CCXT_CLIENTS_DICT.get(client_name)
     if not client: return {"depth_ratio": 0.5, "total_depth": 0.0, "side": "ClientError"}
 
+    # 📌 修正点: シンボルをマッピング
+    mapped_symbol = get_mapped_symbol(client_name, symbol)
+
     try:
-        orderbook = await client.fetch_order_book(symbol, limit=20) 
+        orderbook = await client.fetch_order_book(mapped_symbol, limit=20) 
         
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
@@ -212,7 +247,7 @@ def get_crypto_macro_context() -> Dict:
     return context
 
 # ====================================================================================
-# TELEGRAM FORMATTING (KeyError修正)
+# TELEGRAM FORMATTING (KeyError修正版)
 # ====================================================================================
 
 def format_price_lambda(symbol: str) -> Callable[[float], str]:
@@ -221,20 +256,19 @@ def format_price_lambda(symbol: str) -> Callable[[float], str]:
 def format_telegram_message(signal: Dict) -> str:
     """シグナルデータからTelegram通知メッセージを整形 (MTFA情報を統合)"""
     
-    # 📌 【KeyError修正箇所】: エラーシグナル処理
+    # 📌 KeyError修正: エラーシグナル処理
     if signal.get('is_error_signal', False):
         error_type = signal.get('side', 'N/A')
         client_name = signal.get('client', 'N/A')
         cooldown_time_str = signal.get('cooldown_end_time', 'N/A')
 
-        # エラーシグナルは通知しない設計だが、Task例外回避のために安全な文字列を返す
         return (
             f"❌ <b>BOT内部エラー: {signal['symbol']} データ取得失敗</b>\n"
             f"<i>クライアント: {client_name} - エラー種別: {error_type}</i>\n"
             f"システムがクライアントをクールダウンしました ({cooldown_time_str})。"
         )
 
-    # 📌 【KeyError回避】: 存在しないキーを参照しないようにgetを使用
+    # 📌 KeyError回避: 存在しないキーを参照しないようにgetを使用
     macro_context = signal.get('macro_context', {})
     macro_trend = macro_context.get('trend', 'N/A')
     
@@ -262,7 +296,7 @@ def format_telegram_message(signal: Dict) -> str:
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
             return (
-                f"🚨 <b>Apex BOT v9.1.13-Robust - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.1.14-Adaptive - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -380,15 +414,10 @@ def format_best_position_message(signal: Dict) -> str:
     )
 
 # ====================================================================================
-# CORE ANALYSIS FUNCTIONS
+# CORE ANALYSIS FUNCTIONS (変更なし)
 # ====================================================================================
-# ... (calculate_trade_levels, calculate_technical_indicators, get_news_sentiment, 
-# get_timeframe_trend, get_mtfa_score_adjustment, market_analysis_and_score は変更なし) ...
-
-# [NOTE: これらの関数は、前回のコードから完全にそのまま含まれているものと見なします。]
-
+# [NOTE: MTFA/複合ロジック関連関数は、v9.1.13-Robustから変更なし]
 def calculate_trade_levels(price: float, side: str, atr_value: float, score: float) -> Dict:
-    """ATRに基づいてTP/SLを計算"""
     if atr_value <= 0: return {"entry": price, "sl": price, "tp1": price, "tp2": price}
     rr_multiplier = 2.0 + (score - 0.55) * 5.0
     rr_multiplier = np.clip(rr_multiplier, 2.0, 4.0)
@@ -404,7 +433,6 @@ def calculate_trade_levels(price: float, side: str, atr_value: float, score: flo
     return {"entry": entry, "sl": sl, "tp1": tp1, "tp2": entry}
 
 def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
-    """pandas_taを使用して正確なテクニカル指標を計算"""
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     if len(df) < 50:
          return {"rsi": 50, "macd_hist": 0, "adx": 25, "atr_value": 0, "bb_width_pct": 0, "ma_position_score": 0, "ma_position": "中立", "df": df}
@@ -433,12 +461,10 @@ def calculate_technical_indicators(ohlcv: List[List[float]]) -> Dict:
     }
 
 def get_news_sentiment(symbol: str) -> Dict:
-    """ニュース感情スコア（簡易版）"""
     sentiment_score = 0.5 + random.uniform(-0.1, 0.1) 
     return {"sentiment_score": np.clip(sentiment_score, 0.0, 1.0)}
 
 def get_timeframe_trend(tech_data: Dict) -> str:
-    """テクニカルデータから、その時間軸の主要トレンドを判定"""
     ma_score = tech_data.get('ma_position_score', 0); adx = tech_data.get('adx', 25)
     if adx < 20: return "Neutral"
     if ma_score > 0.1 and adx > 25: return "ロング"
@@ -446,7 +472,6 @@ def get_timeframe_trend(tech_data: Dict) -> str:
     return "Neutral"
 
 def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: float, rsi_h1: float) -> Tuple[float, Dict]:
-    """MTFAに基づき、スコア調整値と詳細データを出力"""
     adjustment = 0.0; mtfa_data = {'h1_trend': h1_trend, 'h4_trend': h4_trend}
     if side != "Neutral":
         if h4_trend == side: adjustment += 0.10
@@ -460,7 +485,6 @@ def get_mtfa_score_adjustment(side: str, h1_trend: str, h4_trend: str, rsi_15m: 
     return adjustment, mtfa_data
 
 def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Dict, tech_data_h4: Dict, depth_data: Dict, sentiment_data: Dict, macro_context: Dict) -> Tuple[float, str, str, Dict, bool]:
-    """MTFA、複合モメンタム、ボラティリティペナルティを統合したスコアリングロジック"""
     df_15m = tech_data_15m.get('df')
     if df_15m is None or len(df_15m) < 50: return 0.5, "Neutral", "不明", {}, False
     adx_15m = tech_data_15m.get('adx', 25); bb_width_pct_15m = tech_data_15m.get('bb_width_pct', 0)
@@ -497,7 +521,6 @@ def market_analysis_and_score(symbol: str, tech_data_15m: Dict, tech_data_h1: Di
     display_score = abs(final_score - 0.5) * 2 if final_side != "Neutral" else abs(final_score - 0.5)
     return display_score, final_side, regime, mtfa_data, volatility_penalty_applied
 
-
 async def generate_signal_candidate(symbol: str, macro_context_data: Dict, client_name: str) -> Optional[Dict]:
     """全時間軸のデータを取得し、MTFAを実行"""
     
@@ -518,8 +541,11 @@ async def generate_signal_candidate(symbol: str, macro_context_data: Dict, clien
     depth_data = results[3]
     
     # データ取得がエラーの場合、エラーシグナルを返す
-    if status_data['15m'] in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "ClientError"]:
-        return {"symbol": symbol, "side": status_data['15m'], "score": 0.0, "client": client_name, "is_error_signal": True} 
+    error_statuses = ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "NotSupported", "ClientError", "DataShortage"]
+    if status_data['15m'] in error_statuses or status_data['1h'] in error_statuses or status_data['4h'] in error_statuses:
+        # 15mのエラーを優先して報告
+        error_type = status_data['15m'] if status_data['15m'] != "Success" else (status_data['1h'] if status_data['1h'] != "Success" else status_data['4h'])
+        return {"symbol": symbol, "side": error_type, "score": 0.0, "client": client_name, "is_error_signal": True} 
 
     # 2. 全時間軸のテクニカル指標の計算
     tech_data_15m_full = calculate_technical_indicators(ohlcv_data['15m'])
@@ -598,15 +624,13 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
         side = signal['side']
         score = signal.get('score', 0.0)
         
-        # 📌 【KeyError修正点】: エラーシグナルを通知ロジックから除外
+        # KeyError修正: エラーシグナルを通知ロジックから除外
         if signal.get('is_error_signal', False):
-            # エラーシグナルはメインループ内でロギングとクールダウン処理を行うため、ここでは通知しない
             continue 
         
         if side in ["ロング", "ショート"] and score >= SIGNAL_THRESHOLD:
             if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                 TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
-                # to_thread内でformat_telegram_messageが呼ばれ、エラーシグナルではないため安全
                 asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(signal))))
 
 async def best_position_notification_task():
@@ -621,7 +645,6 @@ async def best_position_notification_task():
             max_score = 0
             
             for signal in LAST_ANALYSIS_SIGNALS:
-                # エラーシグナルや中立シグナルを除外
                 if signal.get('side') in ["ロング", "ショート"] and signal['score'] > max_score:
                     max_score = signal['score']
                     strongest_signal = signal
@@ -663,7 +686,6 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL)
             continue
         
-        # OKXが利用可能であれば優先し、そうでなければクールダウン終了が最も早いクライアントを選ぶ
         CCXT_CLIENT_NAME = 'OKX' if current_time >= ACTIVE_CLIENT_HEALTH.get('OKX', 0) else max(available_clients, key=available_clients.get)
 
 
@@ -702,12 +724,12 @@ async def main_loop():
                 error_type = signal['side']
                 client_name = signal['client']
 
-                if error_type == "NotSupported":
+                if error_type in ["NotSupported", "DataShortage"]:
                     cooldown_time = CLIENT_COOLDOWN_SHORT
                 elif error_type in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "ClientError"]:
                     cooldown_time = CLIENT_COOLDOWN
                 else:
-                    continue # その他のエラーは無視
+                    continue 
                 
                 cooldown_end_time = current_time + cooldown_time
                 ACTIVE_CLIENT_HEALTH[client_name] = cooldown_end_time 
@@ -715,15 +737,15 @@ async def main_loop():
                 cooldown_time_str = datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')
                 logging.error(f"❌ {error_type}エラー発生: クライアント {client_name} のヘルスを {cooldown_time_str} JST にリセット (クールダウン: {cooldown_time}s)。")
                 
-                # エラーシグナルにクールダウン終了時刻を付与 (format_telegram_messageで利用可能に)
+                # エラーシグナルにクールダウン終了時刻を付与
                 signal['cooldown_end_time'] = cooldown_time_str
                 
-                # 重大なエラー（NotSupported以外）は即座のクライアント切り替えを促す
-                if error_type != "NotSupported":
+                # 重大なエラー（Timeout, ExchangeErrorなど）は即座のクライアント切り替えを促す
+                if error_type not in ["NotSupported", "DataShortage"]:
                     has_major_error = True
                 
                 TOTAL_ANALYSIS_ERRORS += 1
-                if has_major_error: # 処理を中断し、次のクライアントに即座に切り替える
+                if has_major_error: 
                     break 
 
         
@@ -735,16 +757,16 @@ async def main_loop():
             await asyncio.sleep(1) 
 
 # -----------------------------------------------------------------------------------
-# FASTAPI SETUP
+# FASTAPI SETUP (変更なし)
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.1.13-Robust_FULL")
+app = FastAPI(title="Apex BOT API", version="v9.1.14-Adaptive_FULL")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v9.1.13-Robust FULL Startup Complete.")
+    logging.info("🚀 Apex BOT v9.1.14-Adaptive FULL Startup Complete.")
     asyncio.create_task(main_loop())
 
 
@@ -753,7 +775,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.1.13-Robust_FULL",
+        "bot_version": "v9.1.14-Adaptive_FULL",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "current_client": CCXT_CLIENT_NAME,
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -765,4 +787,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v9.1.13-Robust_FULL)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v9.1.14-Adaptive_FULL)."}, status_code=200)
