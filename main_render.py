@@ -240,7 +240,7 @@ def initialize_ccxt_client():
     # 🚨 クライアント構成をKraken, Coinbase Pro, Gemini, Bitstampの4つに絞る
     clients = {
         'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 30000}), 
-        'Coinbase Advanced': ccxt_async.coinbasepro({"enableRateLimit": True, "timeout": 30000}), # Coinbase Advancedはccxtではcoinbasepro
+        'Coinbase Advanced': ccxt_async.coinbase({"enableRateLimit": True, "timeout": 30000}), # Coinbase Advancedはccxtではcoinbasepro
         'Gemini': ccxt_async.gemini({"enableRateLimit": True, "timeout": 30000}),
         'Bitstamp': ccxt_async.bitstamp({"enableRateLimit": True, "timeout": 30000}),     
     }
