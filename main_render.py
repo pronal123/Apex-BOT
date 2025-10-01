@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v9.2.4-Binance 強化・安定版 (ULTRA STABILITY)
-# 修正点: Binanceのサーバー時刻同期設定を強化し、安定性を向上。
+# Apex BOT v9.3.0-Kraken & KuCoin 安定構成版 (DUAL CLIENT)
+# 修正点: クライアントをKrakenとKuCoinの2つに絞り込み、安定したデュアルクライアント構成を確立。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -47,7 +47,7 @@ DYNAMIC_UPDATE_INTERVAL = 60 * 30
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
 SIGNAL_THRESHOLD = 0.55 
-CLIENT_COOLDOWN = 60 * 15  
+CLIENT_COOLDOWN = 60 * 60  # 🚨 60分 (Krakenの安定稼働を優先するため、他のクライアントは長時間休ませる)
 REQUIRED_OHLCV_LIMITS = {'15m': 150, '1h': 150, '4h': 150} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
@@ -115,7 +115,7 @@ def format_telegram_message(signal: Dict) -> str:
             last_success_time = datetime.fromtimestamp(stats['last_success'], JST).strftime('%H:%M:%S') if stats['last_success'] > 0 else "N/A"
             
             return (
-                f"🚨 <b>Apex BOT v9.2.4-Binance - 死活監視 (システム正常)</b> 🟢\n"
+                f"🚨 <b>Apex BOT v9.3.0-KuCoin - 死活監視 (システム正常)</b> 🟢\n"
                 f"<i>強制通知時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST</i>\n\n"
                 f"• **市場コンテクスト**: {macro_trend} (BBands幅: {bb_width_pct:.2f}%) \n"
                 f"• **🤖 BOTヘルス**: 最終成功: {last_success_time} JST (エラー率: {error_rate:.1f}%) \n"
@@ -232,14 +232,10 @@ def initialize_ccxt_client():
     """CCXTクライアントを初期化（非同期）"""
     global CCXT_CLIENTS_DICT, CCXT_CLIENT_NAMES, ACTIVE_CLIENT_HEALTH
     
-    # タイムアウトと設定を調整し、Binanceの安定性を最大化
+    # 🚨 クライアント構成をKrakenとKuCoinに絞る
     clients = {
         'Kraken': ccxt_async.kraken({"enableRateLimit": True, "timeout": 30000}), 
-        # Binance強化: サーバー時刻同期を有効にし、タイムアウトを20秒に短縮
-        'Binance': ccxt_async.binance({"enableRateLimit": True, "timeout": 20000, 
-                                        "options": {"defaultType": "spot", "adjustForTimeDifference": True}}),
-        # OKX強化: タイムアウトを60秒に延長し、粘り強く処理させる
-        'OKX': ccxt_async.okx({"enableRateLimit": True, "timeout": 60000}),     
+        'Kucoin': ccxt_async.kucoin({"enableRateLimit": True, "timeout": 30000}),     
     }
     CCXT_CLIENTS_DICT = clients
     CCXT_CLIENT_NAMES = list(CCXT_CLIENTS_DICT.keys())
@@ -267,10 +263,10 @@ def send_telegram_html(text: str, is_emergency: bool = False):
 async def send_test_message():
     """起動テスト通知"""
     test_text = (
-        f"🤖 <b>Apex BOT v9.2.4-Binance - 起動テスト通知 (ULTRA STABILITY強化版)</b> 🚀\n\n"
+        f"🤖 <b>Apex BOT v9.3.0-KuCoin - 起動テスト通知 (DUAL CLIENT)</b> 🚀\n\n"
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
-        f"<b>超安定化: 実行間隔を180秒、銘柄遅延を1.5秒に設定。</b>\n"
-        f"<b>【主要変更点】: Binanceのサーバー時刻同期設定を強化。OKXのタイムアウトを延長し粘りを強化。</b>"
+        f"<b>安定構成: クライアントをKrakenとKuCoinの2つに絞り込みました。</b>\n"
+        f"<b>【主要変更点】: クールダウン時間は60分を維持し、安定性を最優先します。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
@@ -293,8 +289,8 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     except ccxt.RateLimitExceeded:
         return [], "RateLimit", client_name
     except ccxt.ExchangeError as e:
-        # Binanceの429エラーなど、ExchangeErrorでレート制限を捕捉する場合がある
-        if 'rate limit' in str(e).lower() or '429' in str(e) or 'timestamp' in str(e).lower(): # timestampエラーも捕捉
+        # 一般的な取引所エラーとレート制限を捕捉
+        if 'rate limit' in str(e).lower() or '429' in str(e) or 'timestamp' in str(e).lower(): 
              return [], "ExchangeError", client_name
         return [], "ExchangeError", client_name
     except ccxt.NetworkError:
@@ -584,8 +580,8 @@ async def update_monitor_symbols_dynamically(client_name: str, limit: int) -> Li
     global CURRENT_MONITOR_SYMBOLS
     logging.info(f"🔄 銘柄リストを更新します。出来高TOP{limit}銘柄を取得試行...")
     
-    # BinanceとKrakenを優先的に使用
-    fetch_client_names = ['Binance', 'Kraken', 'OKX']
+    # 🚨 クライアント構成の変更に伴い、銘柄取得の優先順位も変更
+    fetch_client_names = ['Kraken', 'Kucoin']
     new_symbols = []
 
     for name in fetch_client_names:
@@ -727,14 +723,15 @@ async def main_loop():
         analysis_queue: List[Tuple[str, str]] = [] # (symbol, client_name)
         client_index = 0
         
-        # BinanceとKrakenを優先的に利用するようにクライアントリストを調整
-        priority_clients = [c for c in available_clients if c in ['Binance', 'Kraken']]
-        other_clients = [c for c in available_clients if c not in ['Binance', 'Kraken']]
+        # 🚨 KrakenとKucoinを優先的に利用するようにクライアントリストを調整
+        priority_clients = []
+        if 'Kraken' in available_clients: priority_clients.append('Kraken')
+        if 'Kucoin' in available_clients: priority_clients.append('Kucoin')
         
-        # 安定クライアントが常に利用されるように優先順位を付ける
-        balanced_clients = priority_clients + other_clients 
+        balanced_clients = priority_clients
         
         for symbol in CURRENT_MONITOR_SYMBOLS:
+            # 2クライアント体制なので、インデックスを2で割る
             client_name = balanced_clients[client_index % len(balanced_clients)]
             analysis_queue.append((symbol, client_name))
             client_index += 1
@@ -758,7 +755,8 @@ async def main_loop():
             if signal and signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]:
                 client_name_errored = signal.get('client', client_name)
                 cooldown_end_time = time.time() + CLIENT_COOLDOWN
-                logging.error(f"❌ {signal['side']}エラー発生: クライアント {client_name_errored} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット (クールダウン)。")
+                
+                logging.error(f"❌ {signal['side']}エラー発生: クライアント {client_name_errored} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット (超保守クールダウン)。")
                 ACTIVE_CLIENT_HEALTH[client_name_errored] = cooldown_end_time
                 
                 error_msg = f"🚨 {signal['side']} エラーが発生しました。クライアント **{client_name_errored}** を {CLIENT_COOLDOWN/60:.0f} 分間クールダウンします。即座にクライアント切り替え。"
@@ -790,13 +788,13 @@ async def main_loop():
 # FASTAPI SETUP
 # -----------------------------------------------------------------------------------
 
-app = FastAPI(title="Apex BOT API", version="v9.2.4-Binance_ULTRA_STABILITY_Enhanced")
+app = FastAPI(title="Apex BOT API", version="v9.3.0-Kraken_KuCoin_DUAL_CLIENT")
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
     initialize_ccxt_client()
-    logging.info("🚀 Apex BOT v9.2.4-Binance ULTRA_STABILITY Enhanced Startup Complete.")
+    logging.info("🚀 Apex BOT v9.3.0-Kraken & KuCoin DUAL CLIENT Startup Complete.")
     
     # メインループをバックグラウンドタスクとして実行
     asyncio.create_task(main_loop())
@@ -807,7 +805,7 @@ def get_status():
     """ヘルスチェック用のエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v9.2.4-Binance_ULTRA_STABILITY_Enhanced (TOP20)",
+        "bot_version": "v9.3.0-Kraken_KuCoin_DUAL_CLIENT (TOP20)",
         "last_success_timestamp": LAST_SUCCESS_TIME,
         "active_clients_count": len([name for name in CCXT_CLIENT_NAMES if time.time() >= ACTIVE_CLIENT_HEALTH.get(name, 0)]),
         "monitor_symbols_count": len(CURRENT_MONITOR_SYMBOLS),
@@ -822,4 +820,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """ルートエンドポイント (GET/HEAD) - 稼働確認用"""
-    return JSONResponse(content={"message": "Apex BOT is running (v9.2.4-Binance_ULTRA_STABILITY_Enhanced, TOP20)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v9.3.0-Kraken_KuCoin_DUAL_CLIENT, TOP20)."}, status_code=200)
