@@ -1,9 +1,11 @@
 # ====================================================================================
-# Apex BOT v11.4.7-KRAKEN FALLBACK (フル統合版)
+# Apex BOT v11.4.7-KRAKEN FALLBACK (市場状況報告 1時間ごと / 最高スコア銘柄抽出 統合版)
 # 修正点: 
-# 1. CCXTクライアントにKrakenを追加し、フォールバック先に設定。
-# 2. fetch_ohlcv_with_fallbackで15分足データ不足時、1時間足で代替するフォールバックロジックを実装。
-# 3. generate_signal_candidate内のロジックを、使用された時間足に対応させるよう調整。
+# 1. PING_INTERVALを60分に変更。
+# 2. startup_eventでinitialize_ccxt_client()にawaitを追加。
+# 3. format_telegram_message内で中立シグナルのsymbolが未定義になる致命的なバグを修正。
+# 4. MARKET_SUMMARY_INTERVALを6時間から1時間に変更。
+# 5. 市場サマリーの通知対象を「BTC/USDT」から「LAST_ANALYSIS_SIGNALSで最もスコアが優れている銘柄」に変更。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -52,16 +54,16 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 # 設定値
-PING_INTERVAL = 60 * 60          
+PING_INTERVAL = 60 * 60    # 🌟 ヘルスチェックを1時間ごと (3600秒)
 DYNAMIC_UPDATE_INTERVAL = 60 * 30
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2
 BEST_POSITION_INTERVAL = 60 * 60 * 12
-MARKET_SUMMARY_INTERVAL = 60 * 60 * 6 # 6時間ごと
+MARKET_SUMMARY_INTERVAL = 60 * 60 # 🌟 修正: 市場サマリーを1時間ごと (3600秒)に変更
 SIGNAL_THRESHOLD = 0.55 
 CLIENT_COOLDOWN = 45 * 60  
 # DataShortage銘柄の一時無効化時間 (4時間)
 SYMBOL_COOLDOWN_TIME = 60 * 60 * 4 
-# 1hはサマリー用に100本確保。15mは分析に最低限必要な本数を確保 (35→100に増強)
+# 1hはサマリー用に100本確保。15mは分析に最低限必要な本数を確保
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
 MIN_OHLCV_FOR_ANALYSIS = 35 # 少なくともこれだけのデータがないと指標計算不可
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
@@ -127,15 +129,12 @@ def generate_analysis_summary(signal: Dict) -> str:
     side = signal.get('side', 'Neutral')
     timeframe = signal.get('timeframe', '15m')
     
-    rsi = tech_data.get('rsi', 50.0)
-    macd_hist = tech_data.get('macd_hist', 0.0)
-    bb_width_pct = tech_data.get('bb_width_pct', 0.0)
-    
     summary_lines = []
     
     # 1. RSIの判断
     rsi_judgment = ""
-    rsi_status = f"RSI({rsi:.1f}): "
+    rsi_status = f"RSI({tech_data.get('rsi', 50.0):.1f}): "
+    rsi = tech_data.get('rsi', 50.0)
     if rsi >= 75:
         rsi_judgment = "[極度な買われすぎ] → ⚡️反転圧力"
     elif rsi >= 70:
@@ -150,6 +149,7 @@ def generate_analysis_summary(signal: Dict) -> str:
 
     # 2. MACD Histの判断
     macd_judgment = ""
+    macd_hist = tech_data.get('macd_hist', 0.0)
     macd_status = f"MACD Hist({macd_hist:+.4f}): "
     if abs(macd_hist) > 0.005: # モメンタムが明確
         if macd_hist > 0:
@@ -163,6 +163,7 @@ def generate_analysis_summary(signal: Dict) -> str:
     summary_lines.append(macd_status + macd_judgment)
     
     # 3. BB幅の判断
+    bb_width_pct = tech_data.get('bb_width_pct', 0.0)
     bb_judgment = ""
     bb_status = f"BB幅({bb_width_pct:.2f}%): "
     if bb_width_pct >= VOLATILITY_BB_PENALTY_THRESHOLD: # 5.0%
@@ -287,7 +288,7 @@ def send_telegram_html(message: str, is_emergency: bool = False):
         logging.error(f"❌ Telegram リクエストエラー: {e}")
 
 def format_telegram_message(signal: Dict) -> str:
-    """シグナルデータからTelegram通知メッセージを整形 (既存のロジックを維持)"""
+    """シグナルデータからTelegram通知メッセージを整形"""
     
     macro_trend = signal['macro_context']['trend']
     vix_val = signal['macro_context'].get('vix_value', 'N/A')
@@ -296,6 +297,10 @@ def format_telegram_message(signal: Dict) -> str:
     
     # --- 1. 中立/ヘルス通知 ---
     if signal['side'] == "Neutral":
+        
+        # 🌟 修正済み: NameErrorを解消するため、中立シグナルのブロックで symbol 変数を定義
+        symbol = signal.get('symbol', 'BOT_STATUS') 
+        
         if signal.get('is_health_check', False):
             stats = signal.get('analysis_stats', {"attempts": 0, "errors": 0, "last_success": 0})
             error_rate = (stats['errors'] / stats['attempts']) * 100 if stats['attempts'] > 0 else 0
@@ -336,6 +341,7 @@ def format_telegram_message(signal: Dict) -> str:
         return return_message + analysis_summary
     
     # --- 2. トレードシグナル通知 ---
+    symbol = signal['symbol'] 
     score = signal['score']
     side_icon = "⬆️ LONG" if signal['side'] == "ロング" else "⬇️ SHORT"
     
@@ -393,8 +399,6 @@ async def initialize_ccxt_client():
             "enableRateLimit": True,
             "timeout": 60000,
             "rateLimit": 200,
-            # KrakenはBTC/USDTではなくXBT/USDなどのシンボル命名規則を持つため、
-            # CCXTが自動で変換できるか確認が必要。できない場合は調整が必要だが、一旦デフォルト設定で試す。
         }),
     }
     CCXT_CLIENTS_DICT = clients
@@ -408,7 +412,7 @@ async def send_test_message():
         f"🤖 <b>Apex BOT v11.4.7 - 起動テスト通知 (KRAKEN FALLBACK)</b> 🚀\n\n" 
         f"現在の時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST\n"
         f"<b>機能統合: Krakenクライアントの追加、15分足データ不足時の1時間足へのフォールバックを適用しました。</b>\n"
-        f"<b>v11.4.7更新: 詳細な市場状況分析通知（6時間ごと）を追加しました。</b>"
+        f"<b>v11.4.7更新: 詳細な市場状況分析通知は1時間ごと、最高スコア銘柄抽出に変更。ヘルスチェックも1時間に。</b>"
     )
     try:
         await asyncio.to_thread(lambda: send_telegram_html(test_text, is_emergency=True)) 
@@ -444,11 +448,12 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
             logging.warning(f"⚠️ DataShortageエラー({timeframe}): {symbol}。1hデータで分析を試みます。")
             
             # 1hデータを取得
-            ohlcv_1h, status_1h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '1h')
+            # 再帰的に自分自身を呼び出すが、timeframe='1h'なので無限ループにはならない
+            ohlcv_1h, status_1h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '1h') 
             
             if status_1h == "Success":
                  logging.info(f"✅ 1hデータ({len(ohlcv_1h)}本)でフォールバックに成功しました。")
-                 # 成功した場合、timeframeを'1h'に変更して返す
+                 # 成功した場合、statusを'FallbackSuccess_1h'に変更して返す
                  return ohlcv_1h, "FallbackSuccess_1h", client_name 
             
             # 1hでも失敗した場合、この銘柄をクールダウン
@@ -621,12 +626,12 @@ async def signal_notification_task(signals: List[Optional[Dict]]):
                 asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(signal))))
 
 async def generate_market_summary_signal(symbol: str, macro_context: Dict, client_name: str) -> Optional[Dict]:
-    """BTCの詳細な市場サマリーシグナルを生成する (1hデータを使用)"""
+    """選択された銘柄の詳細な市場サマリーシグナルを生成する (1hデータを使用)"""
 
     # 1. 1hのOHLCVデータを取得
     ohlcv_1h, status_1h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '1h')
     
-    # DataShortageは銘柄クールダウンで処理されるため、クライアント全体をクールダウンさせるエラーのみをチェック
+    # クライアント全体をクールダウンさせるエラーのみをチェック
     if status_1h in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]:
         return {"symbol": symbol, "side": status_1h, "client": client_name}
     if status_1h != "Success":
@@ -721,7 +726,8 @@ async def generate_signal_candidate(symbol: str, macro_context: Dict, client_nam
         rr_ratio = 1.0
     else:
         side = "Neutral"
-        score = 0.5
+        # 中立シグナルのスコアは一律0.5として、スコア比較から除外する
+        score = 0.5 
         entry, sl, tp1, rr_ratio = 0, 0, 0, 0
 
     
@@ -756,11 +762,46 @@ async def generate_signal_candidate(symbol: str, macro_context: Dict, client_nam
     
     return signal_candidate
 
+def get_best_signal_for_summary(signals: List[Dict]) -> Tuple[Optional[str], float]:
+    """
+    LAST_ANALYSIS_SIGNALSから最も高いスコアの銘柄を検索し、そのシンボルを返す。
+    強シグナル(score > 0.55)がない場合は、BTC/USDTにフォールバックする。
+    """
+    best_symbol = "BTC/USDT"
+    max_score = -1.0
+    
+    # 強いシグナルがなかった場合の保険として、BTC/USDTのシグナルを探す
+    btc_signal_exists = any(s for s in signals if s['symbol'] == "BTC/USDT")
+    
+    # スコアが最も高いシグナルを検索
+    for signal in signals:
+        # エラーやヘルスチェックシグナルは除外
+        if signal.get('side') in ["ロング", "ショート"]:
+            score = signal.get('score', 0.0)
+            
+            if score > max_score:
+                max_score = score
+                best_symbol = signal['symbol']
+    
+    # 強いシグナル(スコア>SIGNAL_THRESHOLD)が存在しない場合、
+    # または分析結果リストが空でBTC/USDTがデフォルトとして必要な場合、BTC/USDTを強制的に使用
+    if max_score <= SIGNAL_THRESHOLD and btc_signal_exists:
+         return "BTC/USDT", max_score
+         
+    # 強いシグナルが特定された場合
+    if max_score > SIGNAL_THRESHOLD:
+        return best_symbol, max_score
+        
+    # 分析結果リストが空の場合や、BTC/USDTが存在しないが強いシグナルもない場合
+    return "BTC/USDT", 0.0
+
+
 async def self_ping_task(interval: int):
     """定期的な死活監視メッセージを送信するタスク (既存ロジックを維持)"""
     global LAST_ANALYSIS_SIGNALS, TOTAL_ANALYSIS_ATTEMPTS, TOTAL_ANALYSIS_ERRORS, LAST_SUCCESS_TIME
     while True:
-        await asyncio.sleep(interval)
+        # PING_INTERVAL (3600秒) 待機
+        await asyncio.sleep(interval) 
         try:
             if TOTAL_ANALYSIS_ATTEMPTS > 0 and time.time() - LAST_SUCCESS_TIME < 60 * 10: 
                 stats = {
@@ -776,6 +817,7 @@ async def self_ping_task(interval: int):
                     "is_health_check": True,
                     "analysis_stats": stats
                 }
+                # 通知は to_thread で非同期実行
                 asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_telegram_message(health_signal))))
                 logging.info("✅ BOTヘルスチェック通知を送信しました。")
         except Exception as e:
@@ -839,17 +881,25 @@ async def main_loop():
                 }
 
 
-            # 🚨 市場サマリー通知のチェック (6時間ごと)
+            # 🚨 市場サマリー通知のチェック (1時間ごと)
             if current_time - LAST_MARKET_SUMMARY_TIME > MARKET_SUMMARY_INTERVAL:
-                client_name = CCXT_CLIENT_NAME
-                summary_signal = await generate_market_summary_signal("BTC/USDT", BTC_DOMINANCE_CONTEXT, client_name)
+                
+                # 1. 最新の分析結果から最も優れている銘柄をピックアップ
+                best_symbol_to_report, score = get_best_signal_for_summary(LAST_ANALYSIS_SIGNALS)
+                client_name = CCXT_CLIENT_NAME # サマリーはメインクライアントで試行
+                
+                logging.info(f"🔄 市場サマリーの対象銘柄を決定: {best_symbol_to_report} (スコア: {score:.2f})")
+                
+                # 2. ピックアップした銘柄の詳細なサマリーシグナルを生成 (1hデータを使用)
+                summary_signal = await generate_market_summary_signal(best_symbol_to_report, BTC_DOMINANCE_CONTEXT, client_name)
                 
                 if summary_signal and summary_signal.get('side') not in ["RateLimit", "Timeout", "ExchangeError", "UnknownError", "DataShortage"]:
+                    # 3. 通知を送信
                     asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(format_market_summary(summary_signal))))
                     LAST_MARKET_SUMMARY_TIME = current_time
-                    logging.info("📢 詳細な市場サマリー通知を送信しました。")
+                    logging.info(f"📢 詳細な市場サマリー通知を送信しました。対象銘柄: {best_symbol_to_report}")
                 elif summary_signal and summary_signal.get('side') in ["RateLimit", "Timeout", "ExchangeError", "UnknownError"]:
-                    # BTCのサマリー取得に失敗した場合も、クライアント全体をクールダウンさせる
+                    # クライアント全体のエラー処理 (クライアントクールダウン)
                     cooldown_end_time = time.time() + CLIENT_COOLDOWN
                     error_msg = f"❌ 市場サマリー取得失敗({summary_signal['side']}): クライアント {client_name} のヘルスを {datetime.fromtimestamp(cooldown_end_time, JST).strftime('%H:%M:%S')} JST にリセット ({CLIENT_COOLDOWN/60:.0f}分クールダウン)。"
                     logging.error(error_msg)
@@ -948,7 +998,8 @@ app = FastAPI(title="Apex BOT API", version="v11.4.7-KRAKEN_FALLBACK (Full Integ
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にCCXTクライアントを初期化し、メインループを開始する"""
-    await initialize_ccxt_client() # 👈 ここに 'await' を追加
+    # 🌟 修正済み: 非同期関数なので await が必須
+    await initialize_ccxt_client() 
     logging.info("🚀 Apex BOT v11.4.7-KRAKEN FALLBACK Startup Complete.") 
     
     # asyncio.create_taskで例外が処理されるようになり、エラーで即座にアプリが落ちるのを防ぐ
