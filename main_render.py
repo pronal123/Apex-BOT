@@ -1,15 +1,11 @@
 # ====================================================================================
-# Apex BOT v12.1.1 - Granular Scoring/Tie-Breaking版 (フルコード)
+# Apex BOT v12.1.2 - Error Handling強化版 (フルコード)
 # 
-# 主な機能:
-# 1. 動的出来高TOP30銘柄監視 (OKX Swap)
-# 2. 3つの時間軸 (15m, 1h, 4h) を統合したテクニカル分析
-# 3. v12.1.1 Granular Scoring: MACDH強度、RSI中立距離、RRRによるスコアの動的細分化
-# 4. v12.1.0 Hard Neutralization: モメンタム反転時の強制Neutral化によるダマシ回避
-# 5. 4時間足トレンドによる逆張りシグナルへの減点フィルタリング
-# 6. ATRに基づいたエントリー/TP/SLの最適化とRRRの算出
-# 7. CCXTレート制限対策
-# 8. FastAPIによるWeb API提供とバックグラウンドタスク管理
+# 修正点:
+# - generate_integrated_signal関数に包括的な try/except を追加。
+# - 4h足トレンド計算失敗時でも、安全に Neutral トレンドと代替シグナルを返し、
+#   name 'long_term_trend' is not defined エラーの伝播を防止し、メインループの安定性を確保。
+# - v12.1.1のGranular Scoring/Tie-Breakingロジックは全て継承。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -249,7 +245,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
         if tf == '4h':
             long_trend = tech_data.get('long_term_trend', 'Neutral')
             analysis_detail += (
-                f"🌏 **{tf} 足** (長期トレンド): **{long_term_trend}** ({s_score_100}点)\n"
+                f"🌏 **{tf} 足** (長期トレンド): **{long_trend}** ({s_score_100}点)\n"
             )
             
         else:
@@ -278,7 +274,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.1 - Granular Scoring/Tie-Breaking |\n"
+        f"| ⚙️ **BOT Ver** | v12.1.2 - Error Handling強化版 |\n"
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -637,48 +633,59 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
     """3つの時間軸のシグナルを統合して生成する"""
     
-    # 0. 4hトレンドの事前計算
-    long_term_trend = 'Neutral'
-    
-    # 4h足のOHLCVを取得
-    ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
-    
-    df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df_4h['close'] = pd.to_numeric(df_4h['close'])
-    
-    if status_4h == "Success" and len(df_4h) >= LONG_TERM_SMA_LENGTH:
+    # 総合エラーハンドリングを追加
+    try:
+        # 0. 4hトレンドの事前計算
+        long_term_trend = 'Neutral' # <- エラーを防ぐため、常にここで初期化
         
-        try:
-            df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
+        # 4h足のOHLCVを取得
+        ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
         
-            if not df_4h.empty and 'sma' in df_4h.columns and df_4h['sma'].iloc[-1] is not None:
-                last_price = df_4h['close'].iloc[-1]
-                last_sma = df_4h['sma'].iloc[-1]
-                
-                # 終値とSMAの相対位置でトレンドを決定
-                if last_price > last_sma:
-                    long_term_trend = 'Long'
-                elif last_price < last_sma:
-                    long_term_trend = 'Short'
-        except Exception:
-            pass # SMA計算エラーは無視し、Neutralトレンドとして続行
+        df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_4h['close'] = pd.to_numeric(df_4h['close'])
+        
+        if status_4h == "Success" and len(df_4h) >= LONG_TERM_SMA_LENGTH:
             
-    # 1. 各時間軸の分析を並行して実行
-    tasks = [
-        analyze_single_timeframe(symbol, '15m', macro_context, client_name, long_term_trend, False),
-        analyze_single_timeframe(symbol, '1h', macro_context, client_name, long_term_trend, False),
-        analyze_single_timeframe(symbol, '4h', macro_context, client_name, long_term_trend, False) 
-    ]
-    
-    results = await asyncio.gather(*tasks)
-    
-    # 4h分析結果の統合
-    for result in results:
-        if result and result.get('timeframe') == '4h':
-            # 4hの分析結果には、計算された長期トレンドを格納
-            result.setdefault('tech_data', {})['long_term_trend'] = long_term_trend
-    
-    return [r for r in results if r is not None]
+            try:
+                df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
+            
+                if not df_4h.empty and 'sma' in df_4h.columns and df_4h['sma'].iloc[-1] is not None:
+                    last_price = df_4h['close'].iloc[-1]
+                    last_sma = df_4h['sma'].iloc[-1]
+                    
+                    # 終値とSMAの相対位置でトレンドを決定
+                    if last_price > last_sma:
+                        long_term_trend = 'Long'
+                    elif last_price < last_sma:
+                        long_term_trend = 'Short'
+            except Exception as e:
+                logging.warning(f"⚠️ {symbol} 4hトレンド計算エラー: {e}。Neutralトレンドとして続行します。")
+                
+        # 1. 各時間軸の分析を並行して実行
+        tasks = [
+            analyze_single_timeframe(symbol, '15m', macro_context, client_name, long_term_trend, False),
+            analyze_single_timeframe(symbol, '1h', macro_context, client_name, long_term_trend, False),
+            analyze_single_timeframe(symbol, '4h', macro_context, client_name, long_term_trend, False) 
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        
+        # 4h分析結果の統合
+        for result in results:
+            if result and result.get('timeframe') == '4h':
+                # 4hの分析結果には、計算された長期トレンドを格納
+                result.setdefault('tech_data', {})['long_term_trend'] = long_term_trend
+        
+        return [r for r in results if r is not None]
+
+    except Exception as e:
+        # 致命的なエラーが発生した場合、エラーをログに記録し、安全な代替リストを返す
+        logging.error(f"Generate Integrated Signalで予期せぬエラー: {symbol}: {e}")
+        # 全時間軸でエラーシグナルを返し、メインループの続行を可能にする
+        return [
+            {"symbol": symbol, "side": "ExchangeError", "timeframe": tf, "score": BASE_SCORE, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "tech_data": {'long_term_trend': 'Neutral'}}
+            for tf in ['15m', '1h', '4h']
+        ]
 
 
 # ====================================================================================
@@ -735,6 +742,9 @@ async def main_loop():
             # -----------------------------------------------------------------
             results_list_of_lists = []
             
+            # notify_tasksを初期化（通知がない可能性もあるため）
+            notify_tasks = [] 
+            
             for symbol in monitor_symbols:
                 # 銘柄ごとの分析タスク (generate_integrated_signal) を実行
                 result = await generate_integrated_signal(symbol, macro_context, CCXT_CLIENT_NAME)
@@ -786,7 +796,7 @@ async def main_loop():
             ][:TOP_SIGNAL_COUNT]
             
             # 通知実行
-            notify_tasks = []
+            # notify_tasksはtryブロックの冒頭で初期化済み
             for item in top_signals_to_notify:
                 # notify_integrated_analysisでクールダウンチェックとメッセージ生成を行い、タスクを返す
                 task = await notify_integrated_analysis(item['all_signals'][0]['symbol'], item['all_signals'])
@@ -814,11 +824,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.1-GRANULAR_SCORING (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.2-ERROR_HANDLING_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.1 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.2 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -832,7 +842,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.1-GRANULAR_SCORING (Full Integrated)",
+        "bot_version": "v12.1.2-ERROR_HANDLING_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -843,7 +853,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.1, Full Integrated, Granular Scoring Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.2, Full Integrated, Error Handling Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     # 環境変数PORTが設定されていない場合は8080を使用
