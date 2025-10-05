@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v11.7.1 - 三層時間軸分析統合版 (MACDS_12_26_9 KeyError修正済)
+# Apex BOT v11.7.2 - 三層時間軸分析統合版 (MACD KeyErrors 完全に修正済)
 # 最終更新: 2025年10月
 # ====================================================================================
 
@@ -330,7 +330,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['close'] = pd.to_numeric(df['close'])
+    
+    # テクニカル指標の計算
     df['rsi'] = ta.rsi(df['close'], length=14)
+    # MACDを計算
     df.ta.macd(close='close', fast=12, slow=26, signal=9, append=True)
     df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
     df.ta.bbands(close='close', length=20, append=True)
@@ -365,8 +368,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     # 4. MACDクロス確認と減点 (15mのみ) <- ★ 修正箇所
     macd_valid = False
     
-    # MACDラインとシグナルラインの存在チェックを最初に行う
-    if 'MACD_12_26_9' in df.columns and 'MACDS_12_26_9' in df.columns and len(df) >= 2:
+    # 必要なMACDカラム
+    required_macd_cols = ['MACD_12_26_9', 'MACDS_12_26_9', 'MACDH_12_26_9']
+    
+    # 必要なMACDカラム全てが存在し、かつデータフレームの長さが計算に必要な最低限（2本以上）あるかチェック
+    if all(col in df.columns for col in required_macd_cols) and len(df) >= 2:
         
         macd_line = df['MACD_12_26_9']
         signal_line = df['MACDS_12_26_9']
@@ -380,7 +386,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                 macd_valid = True
             
     # MACDクロスが確認できない場合、スコアを減点 (高勝率化)
-    # MACDのチェックは15mのみに適用される
     if not macd_valid and score >= SIGNAL_THRESHOLD and timeframe == '15m':
         score = max(0.5, score - MACD_CROSS_PENALTY)
             
@@ -416,10 +421,16 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     elif score < (1.0 - SIGNAL_THRESHOLD): 
          final_side = "Neutral"
 
-    # 7. シグナル辞書を構築
+    # 7. シグナル辞書を構築 <- ★ MACDヒストグラムのアクセスも修正
+    
+    # MACDヒストグラムの値を安全に取得。カラムが存在しない場合は 0.0 とする。
+    macd_hist_val = 0.0
+    if 'MACDH_12_26_9' in df.columns and not df.empty and df['MACDH_12_26_9'].iloc[-1] is not None:
+         macd_hist_val = df['MACDH_12_26_9'].iloc[-1]
+
     tech_data = {
         "rsi": df['rsi'].iloc[-1] if not df.empty and df['rsi'].iloc[-1] is not None else 50.0,
-        "macd_hist": df['MACDH_12_26_9'].iloc[-1] if not df.empty and df['MACDH_12_26_9'].iloc[-1] is not None else 0.0,
+        "macd_hist": macd_hist_val, # 修正された安全な値を使用
         "adx": df['adx'].iloc[-1] if not df.empty and df['adx'].iloc[-1] is not None else 25.0,
         "bb_width_pct": (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0,
         "atr_value": atr_val,
@@ -548,11 +559,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v11.7.1-TRIPLE_ANALYSIS_FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v11.7.2-TRIPLE_ANALYSIS_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v11.7.1 Startup initializing...") 
+    logging.info("🚀 Apex BOT v11.7.2 Startup initializing...") 
     # バックグラウンドでメインループを実行
     asyncio.create_task(main_loop())
 
@@ -560,7 +571,7 @@ async def startup_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.7.1-TRIPLE_ANALYSIS_FIX (Full Integrated)",
+        "bot_version": "v11.7.2-TRIPLE_ANALYSIS_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -571,7 +582,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v11.7.1, Full Integrated)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.7.2, Full Integrated)."}, status_code=200)
 
 if __name__ == '__main__':
     # 実行環境に応じてポートとホストを調整してください
