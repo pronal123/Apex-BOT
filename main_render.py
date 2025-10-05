@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.0.6 - スコア100点満点＆通知可視化強化版
-# - スコアを0.5-1.0から50-100に変換し、100点満点表示に統一。
-# - Telegram通知のメッセージデザインを大幅に改善し、可視性と理解度を向上。
-# - MACD完全安定化ロジック (v12.0.5) を継承し、安定稼働を維持。
+# Apex BOT v12.0.9 - シグナル強度カテゴリ版
+# - 通知メッセージ (format_integrated_analysis_message) にシグナル強度の分類を追加。
+# - スコアに基づき「弱」「中」「強」のラベルを付与し、ヘッダーで強調表示する。
+# - v12.0.8のUI/強調表示強化と、v12.0.7の最適化エントリーロジックを継承。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -54,8 +54,7 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
-# スコアの閾値を0.65から75点に変換
-SIGNAL_THRESHOLD = 0.65             
+SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 (0.5-1.0, 65点に相当)
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
@@ -67,6 +66,9 @@ MACD_CROSS_PENALTY = 0.08           # MACD反転時のスコア減点幅
 SHORT_TERM_BASE_RRR = 1.5           
 SHORT_TERM_MAX_RRR = 2.5            
 SHORT_TERM_SL_MULTIPLIER = 1.5      # SLをATRの1.5倍に設定
+
+# エントリーポジション最適化のための定数
+ATR_PULLBACK_MULTIPLIER = 0.5       # 理想的なエントリーのためのATRの倍率 (0.5 ATRのプルバックを想定)
 
 # スコアリングロジック用の定数 
 RSI_OVERSOLD = 30
@@ -102,9 +104,21 @@ def convert_score_to_100(score: float) -> int:
     """0.5から1.0のスコアを50から100の点数に変換する"""
     return max(50, min(100, int(50 + (score - 0.5) * 100)))
 
+def get_signal_strength(score_100: int) -> Tuple[str, str]:
+    """100点満点のスコアに基づきシグナル強度を分類し、ラベルとアイコンを返す"""
+    if score_100 >= 85:
+        return "強シグナル", "🔥🔥 強 (STRONG)"
+    elif score_100 >= 75:
+        return "中シグナル", "📈 中 (MEDIUM)"
+    elif score_100 >= 65:
+        return "弱シグナル", "🟡 弱 (WEAK)"
+    else:
+        return "N/A", "N/A"
+
 def format_price_utility(price: float, symbol: str) -> str:
     """価格の小数点以下の桁数を整形"""
     if price is None or price <= 0: return "0.00"
+    # 価格帯に応じて小数点以下の桁数を動的に調整
     if price >= 1000: return f"{price:,.2f}"
     if price >= 10: return f"{price:,.4f}"
     if price >= 0.1: return f"{price:,.6f}"
@@ -132,14 +146,15 @@ def send_telegram_html(message: str) -> bool:
 
 def get_estimated_win_rate(score: float, timeframe: str) -> float:
     """スコアと時間軸に基づき推定勝率を算出する"""
-    adjusted_rate = 0.50 + (score - 0.50) * 1.5 
+    # スコアが0.5(50点)で50%、1.0(100点)で80%程度になるように調整
+    adjusted_rate = 0.50 + (score - 0.50) * 0.6 # 0.5から0.5の範囲を0.3に圧縮
     return max(0.40, min(0.80, adjusted_rate))
 
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     """
     3つの時間軸の分析結果を統合し、可視性を強化したメッセージを整形する。
-    (v12.0.6: スコア100点満点化と可視化強化)
+    (v12.0.9: シグナル強度の分類を追加)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -170,33 +185,48 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     # OKX形式のシンボル (BTC-USDT) を標準形式 (BTC/USDT) に戻して表示
     display_symbol = symbol.replace('-', '/')
 
+    # 🚨 v12.0.9: シグナル強度分類
+    strength_label, strength_icon_text = get_signal_strength(score_100)
+    
     # ----------------------------------------------------
-    # 1. ヘッダーとエントリー情報の可視化 (スコアを強調)
+    # 1. ヘッダーとスコアの可視化 (シグナル強度を強調)
     # ----------------------------------------------------
-    direction_emoji = "🚀 **LONG**" if side == "ロング" else "💥 **SHORT**"
+    direction_emoji = "🚀 **ロング (LONG)**" if side == "ロング" else "💥 **ショート (SHORT)**"
     color_tag = "🟢" if side == "ロング" else "🔴"
     
     header = (
-        f"{color_tag} {direction_emoji} **強シグナル発生！** - {display_symbol}\n"
-        f"-----------------------------------------\n"
-        f"| 🥇 **分析スコア** | <b>{score_100} / 100 点</b> (ベース: {timeframe}足) |\n"
+        f"--- {color_tag} --- **{display_symbol}** --- {color_tag} ---\n"
+        f"**{strength_icon_text} 発生！** - {direction_emoji}\n" # 強度を強調表示
+        f"==================================\n"
+        f"| 🥇 **分析スコア** | <b><u>{score_100} / 100 点</u></b> (ベース: {timeframe}足) |\n"
         f"| 📈 **RRR (報酬比)** | <b>1:{rr_ratio:.2f}</b> | (予測勝率: {get_estimated_win_rate(score_raw, timeframe) * 100:.1f}%) |\n"
-        f"-----------------------------------------\n"
+        f"==================================\n"
     )
 
+    # ----------------------------------------------------
+    # 2. 推奨取引計画 (最適化エントリーとリスク距離を強調)
+    # ----------------------------------------------------
+    # リスク距離を計算 (エントリーとSLの絶対差)
+    if entry_price > 0 and sl_price > 0:
+        risk_dist = abs(entry_price - sl_price)
+    else:
+        risk_dist = 0.0
+
     trade_plan = (
-        f"**📝 推奨取引計画 (ATRベース)**\n"
+        f"**🎯 推奨取引計画 (最適化エントリー)**\n"
+        f"----------------------------------\n"
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
-        f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | |\n"
-        f"| ➡️ Entry | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション |\n"
-        f"| {color_tag} TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 |\n"
+        f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
+        f"| ➡️ **Entry (Limit)** | <code>${format_price_utility(entry_price, symbol)}</code> | **理想的なプルバック** |\n"
+        f"| 📉 **Risk (SL幅)** | <code>${format_price_utility(risk_dist, symbol)}</code> | 最小リスク距離 |\n" 
+        f"| {color_tag} TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 (RRR: 1:{rr_ratio:.2f}) |\n"
         f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({SHORT_TERM_SL_MULTIPLIER:.1f}xATR) |\n"
-        f"-----------------------------------------\n"
+        f"----------------------------------\n"
     )
     
     # ----------------------------------------------------
-    # 2. 統合分析サマリーとスコアリングの詳細
+    # 3. 統合分析サマリーとスコアリングの詳細
     # ----------------------------------------------------
     analysis_detail = "**💡 統合シグナル生成の根拠 (3時間軸)**\n"
     
@@ -213,37 +243,36 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
             
             # 4h分析の詳細セクション
             analysis_detail += (
-                f"🌍 **4h 足 (長期トレンド)**: {long_trend} ({s_score_100}点)\n"
+                f"🌏 **{tf} 足** (長期トレンド): **{long_trend}** ({s_score_100}点)\n"
             )
             
         else:
             # 短期/中期分析の詳細
             # スコアの強弱に応じてアイコンを付与
-            score_icon = "🔥強力" if s_score_100 >= 80 else ("📈肯定的" if s_score_100 >= 70 else "⚖️中立的" )
+            score_icon = "🔥🔥" if s_score_100 >= 80 else ("📈" if s_score_100 >= 70 else "🟡" )
             
             # 長期トレンドとの逆張りペナルティ適用状況
-            penalty_status = " (逆張りペナルティ適用)" if tech_data.get('long_term_reversal_penalty') else ""
+            penalty_status = " <i>(逆張りペナルティ適用)</i>" if tech_data.get('long_term_reversal_penalty') else ""
             
             analysis_detail += (
-                f"**[{tf} 足] {score_icon}** ({s_score_100}点) -> {s_side}{penalty_status}\n"
+                f"**[{tf} 足] {score_icon}** ({s_score_100}点) -> **{s_side}**{penalty_status}\n"
             )
             
             # 採用された時間軸の技術指標を詳細に表示
             if tf == timeframe:
-                analysis_detail += f"   - **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({s.get('regime', 'N/A')})\n"
-                analysis_detail += f"   - **RSI/MACDH**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f}\n"
-                analysis_detail += f"   - **ATR Volatility**: {tech_data.get('atr_value', 0.0):.4f}\n"
+                analysis_detail += f"   └ **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({s.get('regime', 'N/A')})\n"
+                analysis_detail += f"   └ **RSI/MACDH**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f}\n"
 
     # ----------------------------------------------------
-    # 3. リスク管理とフッター
+    # 4. リスク管理とフッター
     # ----------------------------------------------------
     regime = best_signal.get('regime', 'N/A')
     
     footer = (
-        f"-----------------------------------------\n"
-        f"| 🔍 **市場環境** | **{regime}** 相場 ({best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.0.6 - 100pt & UI Fix |\n"
-        f"-----------------------------------------\n"
+        f"==================================\n"
+        f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
+        f"| ⚙️ **BOT Ver** | v12.0.9 - Signal Strength Categorization |\n"
+        f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
 
@@ -395,8 +424,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     current_long_term_penalty_applied = False
     
     # ----------------------------------------------------
-    # 🚨 MACD Key Error 完全安定化ロジック (v12.0.5 導入)
-    # pandas_taの動的列名に依存せず、すべての計算をステップごとに固定化。
+    # MACD Key Error 完全安定化ロジック (v12.0.5 導入)
     # ----------------------------------------------------
     MACD_HIST_COL = 'MACD_Hist' # 固定の列名
 
@@ -493,26 +521,51 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
              else:
                  macd_valid = True
 
-        # 5. TP/SLとRRRの決定 (ATRに基づく動的計算)
-        rr_base = SHORT_TERM_BASE_RRR 
-        if (timeframe != '4h') and (side == long_term_trend and long_term_trend != "Neutral"):
-            rr_base = SHORT_TERM_MAX_RRR
+        # 5. TP/SLとRRRの決定 (ATRに基づく動的計算と**エントリー価格の最適化**)
         
+        # 報酬比の基礎値を設定
+        rr_base_ratio = SHORT_TERM_BASE_RRR 
+        if (timeframe != '4h') and (side == long_term_trend and long_term_trend != "Neutral"):
+            rr_base_ratio = SHORT_TERM_MAX_RRR
+        
+        # SL/TPの距離計算 (距離自体はCurrent Priceから計算)
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
-        tp_dist = sl_dist * rr_base 
+        tp_dist = sl_dist * rr_base_ratio 
+        
+        # 🚨 エントリー価格の最適化: プルバックエントリーを狙う
+        pullback_dist = atr_val * ATR_PULLBACK_MULTIPLIER 
 
-        # 価格を修正
         if side == "ロング":
-            entry = price 
+            # ロングの場合、現在の価格より少し下の価格 (価格がプルバックするのを待つ) をエントリーとする
+            entry = price - pullback_dist 
+            # SL/TPは、最適化されたエントリー価格から再計算
             sl = entry - sl_dist
             tp1 = entry + tp_dist
         elif side == "ショート":
-            entry = price 
+            # ショートの場合、現在の価格より少し上の価格 (価格が戻るのを待つ) をエントリーとする
+            entry = price + pullback_dist
+            # SL/TPは、最適化されたエントリー価格から再計算
             sl = entry + sl_dist
             tp1 = entry - tp_dist
         else:
-            entry, tp1, sl, rr_base = price, 0, 0, 0
+            entry, tp1, sl, rr_base_ratio = price, 0, 0, 0
         
+        # RRRの再計算 (エントリー価格が最適化されたため、実際のRRRが向上する)
+        rr_base = 0.0
+        if final_side != "Neutral" and sl > 0 and tp1 > 0:
+            if final_side == "ロング":
+                risk = entry - sl
+                reward = tp1 - entry
+            else: # ショート
+                risk = sl - entry
+                reward = entry - tp1
+            
+            # リスクがゼロでないことを確認し、真のRRRを計算
+            if risk > 0 and reward > 0:
+                 rr_base = round(reward / risk, 2)
+                 # 異常な高RRRを防ぐため上限を設定 (保険)
+                 rr_base = min(SHORT_TERM_MAX_RRR * 3, rr_base) 
+
         # 6. 最終的なサイドの決定
         final_side = side
         if score < SIGNAL_THRESHOLD or score < (1.0 - SIGNAL_THRESHOLD):
@@ -542,7 +595,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
     except Exception as e:
         # その他の予期せぬ例外処理
-        # v12.0.4でログに表示されていたKeyErrorなどもここで処理される
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -637,7 +689,10 @@ async def notify_integrated_analysis(symbol: str, signals: List[Dict]):
             if msg:
                 log_symbol = symbol.replace('-', '/')
                 max_score_100 = convert_score_to_100(max(s['score'] for s in signals))
-                logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {max_score_100} / 100 点)")
+                
+                # ログにもシグナル強度を追記
+                strength_label, _ = get_signal_strength(max_score_100)
+                logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {max_score_100} 点, 強度: {strength_label})")
                 TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                 
                 # asyncio.to_threadでI/O処理（requests.post）を直ちに別スレッドで実行
@@ -747,11 +802,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.0.6-100PT_UI_FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.0.9-SIG_CAT_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.0.6 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.0.9 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -765,7 +820,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.0.6-100PT_UI_FIX (Full Integrated)",
+        "bot_version": "v12.0.9-SIG_CAT_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -776,7 +831,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.0.6, Full Integrated, 100pt & UI Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.0.9, Full Integrated, Signal Strength Categorization Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     # Renderなどで実行する場合、ファイル名とインスタンス名を指定
