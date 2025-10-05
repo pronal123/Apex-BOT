@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v11.7.0 - 三層時間軸分析統合版 (Short, Mid, Long Separate Analysis)
+# Apex BOT v11.7.1 - 三層時間軸分析統合版 (MACDS_12_26_9 KeyError修正済)
 # 最終更新: 2025年10月
 # ====================================================================================
 
@@ -142,7 +142,6 @@ def generate_individual_analysis_text(signal: Dict) -> str:
     elif score >= 0.65:
         action = f"推奨 ({side})"
     elif score < 0.40:
-        # スコアが0.40未満でサイドが確定している場合、逆方向の警告と見なす
         action = f"要注意 ({'ロング' if side == 'ショート' else 'ショート'})"
         
     # 主要根拠の抽出
@@ -297,11 +296,9 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         # ダミーデータ生成
         data = []
         base_price = 3000.0 if symbol == "ETH/USDT" else 60000.0
-        # ダミーのMACD計算のため、価格変動をややリアルに
         for i in range(data_length):
             trend = np.sin(i / 10) * 5 + np.cos(i / 5) * 2
             close = base_price + trend + random.uniform(-0.5, 0.5)
-            # タイムスタンプは時間軸に合わせて調整 (15m=900000ms, 1h=3600000ms, 4h=14400000ms)
             ts_interval = {'15m': 900000, '1h': 3600000, '4h': 14400000}.get(timeframe, 900000)
             data.append([time.time() * 1000 - (data_length - i) * ts_interval, close, close + 1, close - 1, close, 1000.0])
             
@@ -342,7 +339,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     # 2. 基本シグナル判断ロジック（ダミー）
     base_score = 0.5 
-    # RSIに基づいてランダムにスコアとサイドを割り当てる (ダミー)
     if df['rsi'].iloc[-1] > 70:
         side = "ショート"
         base_score = 0.70 + random.uniform(0.01, 0.15) 
@@ -359,37 +355,37 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     score = base_score
     
     # 3. 4hトレンドフィルターの適用 (15m, 1hのみ)
-    # long_term_penalty_appliedフラグは、4hトレンドとサイドが逆行する場合にTrueにする
     current_long_term_penalty_applied = False
     if timeframe in ['15m', '1h']:
         if (side == "ロング" and long_term_trend == "Short") or \
            (side == "ショート" and long_term_trend == "Long"):
             score = max(0.5, score - LONG_TERM_REVERSAL_PENALTY) 
             current_long_term_penalty_applied = True
-    else:
-        # 4h足の場合、自身のトレンドを追跡
-        current_long_term_penalty_applied = False
-
-
-    # 4. MACDクロス確認と減点 (15mのみ)
+    
+    # 4. MACDクロス確認と減点 (15mのみ) <- ★ 修正箇所
     macd_valid = False
-    if timeframe == '15m':
+    
+    # MACDラインとシグナルラインの存在チェックを最初に行う
+    if 'MACD_12_26_9' in df.columns and 'MACDS_12_26_9' in df.columns and len(df) >= 2:
+        
         macd_line = df['MACD_12_26_9']
         signal_line = df['MACDS_12_26_9']
         
-        if len(macd_line) >= 2:
+        if timeframe == '15m':
             # MACDがシグナルラインをクロスした瞬間をチェック
             is_long_cross = (macd_line.iloc[-2] < signal_line.iloc[-2]) and (macd_line.iloc[-1] >= signal_line.iloc[-1])
             is_short_cross = (macd_line.iloc[-2] > signal_line.iloc[-2]) and (macd_line.iloc[-1] <= signal_line.iloc[-1])
+            
             if (side == "ロング" and is_long_cross) or (side == "ショート" and is_short_cross):
                 macd_valid = True
             
-        # クロスが確認できない場合、スコアを減点 (高勝率化)
-        if not macd_valid and score >= SIGNAL_THRESHOLD:
-            score = max(0.5, score - MACD_CROSS_PENALTY)
+    # MACDクロスが確認できない場合、スコアを減点 (高勝率化)
+    # MACDのチェックは15mのみに適用される
+    if not macd_valid and score >= SIGNAL_THRESHOLD and timeframe == '15m':
+        score = max(0.5, score - MACD_CROSS_PENALTY)
             
     # 5. TP/SLとRRRの決定 (短期高勝率ルールを適用)
-    atr_val = price * 0.005 # ダミーATR値 (実際のATR計算に置き換えるべき)
+    atr_val = price * 0.005 # ダミーATR値
     
     rr_base = SHORT_TERM_BASE_RRR 
     
@@ -402,11 +398,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     tp_dist = sl_dist * rr_base 
 
     if side == "ロング":
-        entry = price * 0.9995 # 現在価格より少し下の指値
+        entry = price * 0.9995 
         sl = entry - sl_dist
         tp1 = entry + tp_dist
     elif side == "ショート":
-        entry = price * 1.0005 # 現在価格より少し上の指値
+        entry = price * 1.0005 
         sl = entry + sl_dist
         tp1 = entry - tp_dist
     else:
@@ -487,7 +483,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     # 4h分析結果の統合: 4hシグナルは他の短期・中期の分析結果を上書きしない
     for result in results:
         if result and result.get('timeframe') == '4h':
-            result['tech_data']['long_term_trend'] = long_term_trend # 4h自身の長期トレンドを設定
+            result['tech_data']['long_term_trend'] = long_term_trend
     
     return [r for r in results if r is not None]
 
@@ -543,6 +539,7 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL) 
 
         except Exception as e:
+            # エラー発生時もクラッシュせず、ログを残して次のループへ
             logging.error(f"メインループで致命的なエラー: {e}")
             await asyncio.sleep(60)
 
@@ -551,11 +548,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v11.7.0-TRIPLE_ANALYSIS (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v11.7.1-TRIPLE_ANALYSIS_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v11.7.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v11.7.1 Startup initializing...") 
     # バックグラウンドでメインループを実行
     asyncio.create_task(main_loop())
 
@@ -563,7 +560,7 @@ async def startup_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.7.0-TRIPLE_ANALYSIS (Full Integrated)",
+        "bot_version": "v11.7.1-TRIPLE_ANALYSIS_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -574,7 +571,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v11.7.0, Full Integrated)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.7.1, Full Integrated)."}, status_code=200)
 
 if __name__ == '__main__':
     # 実行環境に応じてポートとホストを調整してください
