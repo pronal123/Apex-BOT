@@ -1,8 +1,15 @@
 # ====================================================================================
-# Apex BOT v12.0.9 - シグナル強度カテゴリ版
-# - 通知メッセージ (format_integrated_analysis_message) にシグナル強度の分類を追加。
-# - スコアに基づき「弱」「中」「強」のラベルを付与し、ヘッダーで強調表示する。
-# - v12.0.8のUI/強調表示強化と、v12.0.7の最適化エントリーロジックを継承。
+# Apex BOT v12.1.1 - Granular Scoring/Tie-Breaking版 (フルコード)
+# 
+# 主な機能:
+# 1. 動的出来高TOP30銘柄監視 (OKX Swap)
+# 2. 3つの時間軸 (15m, 1h, 4h) を統合したテクニカル分析
+# 3. v12.1.1 Granular Scoring: MACDH強度、RSI中立距離、RRRによるスコアの動的細分化
+# 4. v12.1.0 Hard Neutralization: モメンタム反転時の強制Neutral化によるダマシ回避
+# 5. 4時間足トレンドによる逆張りシグナルへの減点フィルタリング
+# 6. ATRに基づいたエントリー/TP/SLの最適化とRRRの算出
+# 7. CCXTレート制限対策
+# 8. FastAPIによるWeb API提供とバックグラウンドタスク管理
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -17,7 +24,7 @@ import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
-import yfinance as yf
+import yfinance as yf # 使用されていないが、将来の拡張性を考慮し残存
 import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse 
@@ -57,7 +64,7 @@ TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
 SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 (0.5-1.0, 65点に相当)
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
-VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
+VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # ボラティリティによるペナルティ (v12.1.1では未使用)
 
 LONG_TERM_SMA_LENGTH = 50           # 4H足のSMA期間
 LONG_TERM_REVERSAL_PENALTY = 0.15   # 逆張り時のスコア減点幅
@@ -76,7 +83,7 @@ RSI_OVERBOUGHT = 70
 RSI_MOMENTUM_LOW = 45 
 RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
-BASE_SCORE = 0.55  # 基本シグナルが成立した場合のベーススコア
+BASE_SCORE = 0.50  # 基本スコアを0.50に固定
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -102,7 +109,9 @@ logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 def convert_score_to_100(score: float) -> int:
     """0.5から1.0のスコアを50から100の点数に変換する"""
-    return max(50, min(100, int(50 + (score - 0.5) * 100)))
+    # スコアを50点スタートとして扱い、丸め誤差を減らすために小数点以下2桁まで計算
+    score_pct = (score - 0.50) * 100.0
+    return max(50, min(100, int(50 + score_pct)))
 
 def get_signal_strength(score_100: int) -> Tuple[str, str]:
     """100点満点のスコアに基づきシグナル強度を分類し、ラベルとアイコンを返す"""
@@ -147,14 +156,14 @@ def send_telegram_html(message: str) -> bool:
 def get_estimated_win_rate(score: float, timeframe: str) -> float:
     """スコアと時間軸に基づき推定勝率を算出する"""
     # スコアが0.5(50点)で50%、1.0(100点)で80%程度になるように調整
-    adjusted_rate = 0.50 + (score - 0.50) * 0.6 # 0.5から0.5の範囲を0.3に圧縮
+    adjusted_rate = 0.50 + (score - 0.50) * 0.6 
     return max(0.40, min(0.80, adjusted_rate))
 
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     """
     3つの時間軸の分析結果を統合し、可視性を強化したメッセージを整形する。
-    (v12.0.9: シグナル強度の分類を追加)
+    (v12.1.1 Granular Scoring対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -168,7 +177,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     if not high_score_signals:
         return "" 
         
-    best_signal = max(high_score_signals, key=lambda s: s.get('score', 0.5))
+    # スコアの小数点以下まで考慮してソート
+    best_signal = sorted(high_score_signals, key=lambda s: s.get('score', 0.5), reverse=True)[0]
     
     # 主要な取引情報を抽出
     price = best_signal.get('price', 0.0)
@@ -185,7 +195,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     # OKX形式のシンボル (BTC-USDT) を標準形式 (BTC/USDT) に戻して表示
     display_symbol = symbol.replace('-', '/')
 
-    # 🚨 v12.0.9: シグナル強度分類
+    # シグナル強度分類
     strength_label, strength_icon_text = get_signal_strength(score_100)
     
     # ----------------------------------------------------
@@ -206,7 +216,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     # ----------------------------------------------------
     # 2. 推奨取引計画 (最適化エントリーとリスク距離を強調)
     # ----------------------------------------------------
-    # リスク距離を計算 (エントリーとSLの絶対差)
     if entry_price > 0 and sl_price > 0:
         risk_dist = abs(entry_price - sl_price)
     else:
@@ -237,22 +246,20 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
         s_score_100 = convert_score_to_100(s_score_raw)
         tech_data = s.get('tech_data', {})
         
-        # 4hトレンドの強調表示
         if tf == '4h':
             long_trend = tech_data.get('long_term_trend', 'Neutral')
-            
-            # 4h分析の詳細セクション
             analysis_detail += (
-                f"🌏 **{tf} 足** (長期トレンド): **{long_trend}** ({s_score_100}点)\n"
+                f"🌏 **{tf} 足** (長期トレンド): **{long_term_trend}** ({s_score_100}点)\n"
             )
             
         else:
-            # 短期/中期分析の詳細
-            # スコアの強弱に応じてアイコンを付与
             score_icon = "🔥🔥" if s_score_100 >= 80 else ("📈" if s_score_100 >= 70 else "🟡" )
-            
-            # 長期トレンドとの逆張りペナルティ適用状況
             penalty_status = " <i>(逆張りペナルティ適用)</i>" if tech_data.get('long_term_reversal_penalty') else ""
+            
+            # 強制Neutral化された場合の注釈
+            # (減点前のベーススコアが高かった場合、意図的なNeutral化と判断)
+            if s_side == "Neutral" and convert_score_to_100(s_score_raw + LONG_TERM_REVERSAL_PENALTY) >= SIGNAL_THRESHOLD * 100: 
+                 penalty_status += " <b>[⚠️ モメンタム反転により取消]</b>"
             
             analysis_detail += (
                 f"**[{tf} 足] {score_icon}** ({s_score_100}点) -> **{s_side}**{penalty_status}\n"
@@ -271,7 +278,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.0.9 - Signal Strength Categorization |\n"
+        f"| ⚙️ **BOT Ver** | v12.1.1 - Granular Scoring/Tie-Breaking |\n"
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -383,6 +390,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
 async def get_crypto_macro_context() -> Dict:
     """マクロ市場コンテキストを取得 (ダミー)"""
+    # 実際にはVIXやBTCドミナンスなど外部APIから取得する
     return {
         "vix_value": 2.5,
         "trend": "Risk-On (BTC Dominance stable)"
@@ -395,183 +403,189 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (恒久MACD安定化ロジック v12.0.5)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.1: Granular Scoring)
     """
     
     # 1. データ取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
     
-    # エラー時のための安全なデフォルトtech_data
     tech_data_defaults = {
         "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": 0.005,
         "long_term_trend": long_term_trend, "long_term_reversal_penalty": False, "macd_cross_valid": False,
     }
     
     if status != "Success":
-        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0}
+        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": BASE_SCORE, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0}
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['close'] = pd.to_numeric(df['close'])
     
     price = df['close'].iloc[-1] if not df.empty else 0.0
-    # ATRが計算できない場合のフォールバック値
     atr_val = price * 0.005 if price > 0 else 0.005 
 
-    # 初期設定
     final_side = "Neutral"
-    base_score = 0.5
+    base_score_candidate = BASE_SCORE
     macd_valid = False
     current_long_term_penalty_applied = False
-    
-    # ----------------------------------------------------
-    # MACD Key Error 完全安定化ロジック (v12.0.5 導入)
-    # ----------------------------------------------------
-    MACD_HIST_COL = 'MACD_Hist' # 固定の列名
+    MACD_HIST_COL = 'MACD_Hist' 
+    final_side_override = None 
 
     try:
         # テクニカル指標の計算
         df['rsi'] = ta.rsi(df['close'], length=14)
         
-        # MACDを個別に計算し、固定の列名を使用
-        # 1. MACD Line (12-26)
+        # MACDを個別に計算し、固定の列名を使用 (MACD安定化ロジック)
         df['EMA_12'] = ta.ema(df['close'], length=12)
         df['EMA_26'] = ta.ema(df['close'], length=26)
         df['MACD_Line'] = df['EMA_12'] - df['EMA_26']
-        
-        # 2. MACD Signal Line (9-period EMA of MACD_Line)
         df['MACD_Signal'] = ta.ema(df['MACD_Line'], length=9)
-        
-        # 3. MACD Histogram (固定の列名を使用)
         df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
         df.ta.bbands(close='close', length=20, append=True)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
-        # データの安全な取得
         rsi_val = df['rsi'].iloc[-1]
         
-        # NaNチェックを強化 (MACDの計算結果が不完全な場合はここでエラーを捕捉する)
         if df[MACD_HIST_COL].empty or pd.isna(df[MACD_HIST_COL].iloc[-1]) or pd.isna(df[MACD_HIST_COL].iloc[-2]):
-            # データ不足によるMACDのNaN発生を処理
             raise ValueError(f"{timeframe}のMACD計算結果がNaNまたはデータ不足です。")
             
         macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
-        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] # 前足の値も必要
+        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] 
         
         adx_val = df['adx'].iloc[-1]
         atr_val = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else atr_val
         
-        # 2. **動的シグナル判断ロジック (スコアリング)**
-        long_score = 0.5
-        short_score = 0.5
+        # ----------------------------------------------------
+        # 2. 動的シグナル判断ロジック (v12.1.1: Granular Scoring)
+        # ----------------------------------------------------
+        long_score = BASE_SCORE # 0.50
+        short_score = BASE_SCORE # 0.50
         
-        # A. MACDに基づく方向性
+        # A. MACDに基づく方向性 (ベース + ダイナミックボーナス)
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
-            long_score += 0.20 # MACDヒストグラム増加 (勢い増)
+            long_score += 0.10 # ベース加点
+            # MACDヒストグラムの絶対値に応じたダイナミック加点 (最大 +0.05)
+            # 10倍はスケール調整の係数
+            long_score += min(0.05, abs(macd_hist_val) * 10) 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
-            short_score += 0.20 # MACDヒストグラム減少 (勢い増)
+            short_score += 0.10 # ベース加点
+            # MACDヒストグラムの絶対値に応じたダイナミック加点 (最大 +0.05)
+            short_score += min(0.05, abs(macd_hist_val) * 10)
 
-        # B. RSIに基づく買われすぎ/売られすぎ
+        # B. RSIに基づく買われすぎ/売られすぎ (固定加点)
         if rsi_val < RSI_OVERSOLD:
-            long_score += 0.10
+            long_score += 0.05
         elif rsi_val > RSI_OVERBOUGHT:
-            short_score += 0.10
+            short_score += 0.05
             
-        # C. RSIに基づくモメンタムブレイクアウト (中立域抜け)
+        # C. RSIに基づくモメンタムブレイクアウト (固定加点)
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
-            long_score += 0.10
+            long_score += 0.05
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
-            short_score += 0.10
+            short_score += 0.05
 
-        # D. ADXに基づくトレンドフォロー強化
+        # D. ADXに基づくトレンドフォロー強化 (ベース + ダイナミックボーナス)
         if adx_val > ADX_TREND_THRESHOLD:
+            # ADXが閾値(25)を超えた分の0.1%をボーナスとして加点 (最大 約 +0.02)
+            adx_dynamic_bonus = max(0.0, adx_val - ADX_TREND_THRESHOLD) * 0.001 
+            adx_total_bonus = 0.02 + adx_dynamic_bonus
             if long_score > short_score:
-                long_score += 0.05
+                long_score += adx_total_bonus
             elif short_score > long_score:
-                short_score += 0.05
+                short_score += adx_total_bonus
+
+        # E. RSIの中立からの距離 (Granularity確保のための微細な加点)
+        # 50から離れるほど、わずかに加点 (最大 約 +0.02)
+        rsi_dist_bonus = abs(rsi_val - 50) * 0.0005 
+        if rsi_val < 50:
+            long_score += rsi_dist_bonus
+        elif rsi_val > 50:
+            short_score += rsi_dist_bonus
         
-        # 最終スコア決定
+        # 最終スコア方向の決定
         if long_score > short_score:
             side = "ロング"
-            base_score = long_score
+            base_score_candidate = long_score
         elif short_score > long_score:
             side = "ショート"
-            base_score = short_score
+            base_score_candidate = short_score
         else:
             side = "Neutral"
-            base_score = 0.5
+            base_score_candidate = BASE_SCORE
 
-        score = base_score
+        score = base_score_candidate
         
         # 3. 4hトレンドフィルターの適用 (15m, 1hのみ)
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
-                score = max(0.5, score - LONG_TERM_REVERSAL_PENALTY) 
+                score = max(BASE_SCORE, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
         
-        # 4. MACDクロス確認と減点 (15mのみ)
+        # 4. MACDクロス確認と減点 + v12.1.0: 強制Neutral化ロジック (15mのみ)
         if timeframe == '15m':
-             # MACDヒストグラムがクロス直後に方向転換していないかチェック
-             is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
-                                 (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
-             if is_macd_reversing and score >= SIGNAL_THRESHOLD:
-                 score = max(0.5, score - MACD_CROSS_PENALTY)
+             is_long_momentum_loss = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev)
+             is_short_momentum_loss = (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
+
+             is_reversing_against_side = (side == "ロング" and is_long_momentum_loss) or \
+                                         (side == "ショート" and is_short_momentum_loss)
+             
+             if is_reversing_against_side and score >= SIGNAL_THRESHOLD:
+                 score = max(BASE_SCORE, score - MACD_CROSS_PENALTY)
+                 final_side_override = "Neutral" # 強制ニュートラル化
              else:
                  macd_valid = True
 
-        # 5. TP/SLとRRRの決定 (ATRに基づく動的計算と**エントリー価格の最適化**)
-        
-        # 報酬比の基礎値を設定
+        # 5. TP/SLとRRRの決定 (エントリー価格の最適化)
         rr_base_ratio = SHORT_TERM_BASE_RRR 
         if (timeframe != '4h') and (side == long_term_trend and long_term_trend != "Neutral"):
             rr_base_ratio = SHORT_TERM_MAX_RRR
         
-        # SL/TPの距離計算 (距離自体はCurrent Priceから計算)
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
         tp_dist = sl_dist * rr_base_ratio 
-        
-        # 🚨 エントリー価格の最適化: プルバックエントリーを狙う
         pullback_dist = atr_val * ATR_PULLBACK_MULTIPLIER 
 
         if side == "ロング":
-            # ロングの場合、現在の価格より少し下の価格 (価格がプルバックするのを待つ) をエントリーとする
             entry = price - pullback_dist 
-            # SL/TPは、最適化されたエントリー価格から再計算
             sl = entry - sl_dist
             tp1 = entry + tp_dist
         elif side == "ショート":
-            # ショートの場合、現在の価格より少し上の価格 (価格が戻るのを待つ) をエントリーとする
             entry = price + pullback_dist
-            # SL/TPは、最適化されたエントリー価格から再計算
             sl = entry + sl_dist
             tp1 = entry - tp_dist
         else:
             entry, tp1, sl, rr_base_ratio = price, 0, 0, 0
         
-        # RRRの再計算 (エントリー価格が最適化されたため、実際のRRRが向上する)
+        # 6. 最終的なサイドの決定
+        final_side = side
+        
+        if final_side_override is not None:
+             final_side = final_side_override
+        elif score < SIGNAL_THRESHOLD:
+             final_side = "Neutral"
+
+        # 7. RRRの計算
         rr_base = 0.0
         if final_side != "Neutral" and sl > 0 and tp1 > 0:
             if final_side == "ロング":
                 risk = entry - sl
                 reward = tp1 - entry
-            else: # ショート
+            else: 
                 risk = sl - entry
                 reward = entry - tp1
             
-            # リスクがゼロでないことを確認し、真のRRRを計算
             if risk > 0 and reward > 0:
-                 rr_base = round(reward / risk, 2)
-                 # 異常な高RRRを防ぐため上限を設定 (保険)
+                 rr_base = round(reward / risk, 4) # RRR計算の精度を向上
                  rr_base = min(SHORT_TERM_MAX_RRR * 3, rr_base) 
+        
+        # 8. RRRに基づく最終的な微調整スコア (v12.1.1: Granularity確保のため)
+        if final_side != "Neutral" and rr_base > 0:
+            # RRRが高いほど、わずかに最終スコアを上げる (最大 2.5 * 0.005 = 0.0125)
+            # これにより、シグナル強度が同等の場合、RRRの高い銘柄が上位にくる
+            score += rr_base * 0.005
 
-        # 6. 最終的なサイドの決定
-        final_side = side
-        if score < SIGNAL_THRESHOLD or score < (1.0 - SIGNAL_THRESHOLD):
-             final_side = "Neutral"
-
-        # 7. tech_dataの構築
+        # 9. tech_dataの構築
         bb_width_pct_val = (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0
 
         tech_data = {
@@ -586,26 +600,24 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         }
         
     except ValueError as e:
-        # MACDのNaN発生など、データ不完全エラー
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中にデータエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
-        score = 0.5
+        score = BASE_SCORE
         entry, tp1, sl, rr_base = price, 0, 0, 0 
         tech_data = tech_data_defaults 
 
     except Exception as e:
-        # その他の予期せぬ例外処理
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
-        score = 0.5
+        score = BASE_SCORE
         entry, tp1, sl, rr_base = price, 0, 0, 0 
         tech_data = tech_data_defaults 
         
-    # 8. シグナル辞書を構築
+    # 10. シグナル辞書を構築
     signal_candidate = {
         "symbol": symbol,
         "side": final_side,
-        "score": score,
+        "score": score, # 小数点以下が細分化されたスコア
         "confidence": score,
         "price": price,
         "entry": entry,
@@ -649,14 +661,12 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
                 elif last_price < last_sma:
                     long_term_trend = 'Short'
         except Exception:
-            # SMA計算時のエラーは無視し、Neutralとして処理を続行
-            pass 
+            pass # SMA計算エラーは無視し、Neutralトレンドとして続行
             
     # 1. 各時間軸の分析を並行して実行
     tasks = [
         analyze_single_timeframe(symbol, '15m', macro_context, client_name, long_term_trend, False),
         analyze_single_timeframe(symbol, '1h', macro_context, client_name, long_term_trend, False),
-        # 4h足の分析は、long_term_trendを既に計算済みの情報として渡す
         analyze_single_timeframe(symbol, '4h', macro_context, client_name, long_term_trend, False) 
     ]
     
@@ -665,6 +675,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     # 4h分析結果の統合
     for result in results:
         if result and result.get('timeframe') == '4h':
+            # 4hの分析結果には、計算された長期トレンドを格納
             result.setdefault('tech_data', {})['long_term_trend'] = long_term_trend
     
     return [r for r in results if r is not None]
@@ -680,7 +691,7 @@ async def notify_integrated_analysis(symbol: str, signals: List[Dict]):
     current_time = time.time()
     
     # いずれかの時間軸でスコアがSIGNAL_THRESHOLD以上のシグナルがあれば通知
-    if any(s.get('score', 0.5) >= SIGNAL_THRESHOLD and s.get('side') != "Neutral" for s in signals):
+    if any(s.get('score', BASE_SCORE) >= SIGNAL_THRESHOLD and s.get('side') != "Neutral" for s in signals):
         # 統合分析レポートのクールダウンは、銘柄ごとに2時間に設定
         if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
             
@@ -688,9 +699,9 @@ async def notify_integrated_analysis(symbol: str, signals: List[Dict]):
             
             if msg:
                 log_symbol = symbol.replace('-', '/')
+                # 最も高いスコアを取得
                 max_score_100 = convert_score_to_100(max(s['score'] for s in signals))
                 
-                # ログにもシグナル強度を追記
                 strength_label, _ = get_signal_strength(max_score_100)
                 logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {max_score_100} 点, 強度: {strength_label})")
                 TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
@@ -750,6 +761,7 @@ async def main_loop():
                 symbol = signal['symbol']
                 score = signal['score']
                 
+                # Neutralシグナルは通知の対象外
                 if signal.get('side') == 'Neutral':
                     continue
 
@@ -761,7 +773,7 @@ async def main_loop():
                         'all_signals': all_symbol_signals
                     }
             
-            # スコアの高い順にソートし、閾値以上の上位N個を抽出
+            # スコアの高い順にソートし、閾値以上の上位N個を抽出 (Granular Scoringにより同点になりにくい)
             sorted_best_signals = sorted(
                 best_signals_per_symbol.values(), 
                 key=lambda x: x['score'], 
@@ -802,11 +814,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.0.9-SIG_CAT_FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.1-GRANULAR_SCORING (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.0.9 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.1 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -820,7 +832,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.0.9-SIG_CAT_FIX (Full Integrated)",
+        "bot_version": "v12.1.1-GRANULAR_SCORING (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -831,8 +843,8 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.0.9, Full Integrated, Signal Strength Categorization Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.1, Full Integrated, Granular Scoring Fix)."}, status_code=200)
 
 if __name__ == '__main__':
-    # Renderなどで実行する場合、ファイル名とインスタンス名を指定
+    # 環境変数PORTが設定されていない場合は8080を使用
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
