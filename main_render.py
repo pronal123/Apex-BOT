@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v12.0.4 - 恒久的MACD安定化版
-# - MACD Key Errorを完全に解消するため、MACD計算ロジックを修正・固定化。
-# - CCXT レート制限対策 (v12.0.3) を継承し、安定稼働を目指す。
+# Apex BOT v12.0.5 - MACD完全安定化版
+# - v12.0.4で発生したMACD Key Errorを完全に解消するため、MACD計算をta.ema関数ベースで固定化。
+# - CCXT レート制限対策 (v12.0.3) と出来高動的監視 (v12.0.4) を継承し、安定性と精度を両立。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -133,7 +133,6 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     """
     3つの時間軸の分析結果を統合し、より可視性が高く、根拠を詳細に記載したメッセージを整形する。 
-    (v12.0.2: 詳細化と可視化の強化)
     """
     
     # 有効なシグナル（エラーやNeutralではない）のみを抽出
@@ -222,7 +221,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
             
             # 採用された時間軸の技術指標を詳細に表示
             if tf == timeframe:
-                analysis_detail += f"   - **ADX**: {tech_data.get('adx', 0.0):.2f} ({tech_data.get('regime', 'N/A')})\n"
+                analysis_detail += f"   - **ADX**: {tech_data.get('adx', 0.0):.2f} ({s.get('regime', 'N/A')})\n"
                 analysis_detail += f"   - **RSI**: {tech_data.get('rsi', 0.0):.2f}\n"
                 # MACDH値の表示は小数点以下4桁に統一
                 analysis_detail += f"   - **MACDH**: {tech_data.get('macd_hist', 0.0):.4f} (モメンタム)\n"
@@ -236,7 +235,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"-----------------------------------------\n"
         f"| 🔍 **現在の市場** | **{regime}** 相場 ({best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.0.4 - MACD Stable Fix |\n"
+        f"| ⚙️ **BOT Ver** | v12.0.5 - MACD Complete Stable Fix |\n"
         f"-----------------------------------------\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -360,7 +359,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (恒久MACD安定化ロジック v12.0.4)
+    単一の時間軸で分析とシグナル生成を行う関数 (恒久MACD安定化ロジック v12.0.5)
     """
     
     # 1. データ取得
@@ -389,8 +388,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     current_long_term_penalty_applied = False
     
     # ----------------------------------------------------
-    # 🚨 MACD Key Error 恒久修正ロジック (v12.0.4 導入)
-    # MACDを個別に関数呼び出しし、列名を固定する
+    # 🚨 MACD Key Error 完全安定化ロジック (v12.0.5 導入)
+    # pandas_taの動的列名に依存せず、すべての計算をステップごとに固定化。
     # ----------------------------------------------------
     MACD_HIST_COL = 'MACD_Hist' # 固定の列名
 
@@ -399,14 +398,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['rsi'] = ta.rsi(df['close'], length=14)
         
         # MACDを個別に計算し、固定の列名を使用
-        # 1. MACD Fast/Slow EMA
+        # 1. MACD Line (12-26)
         df['EMA_12'] = ta.ema(df['close'], length=12)
         df['EMA_26'] = ta.ema(df['close'], length=26)
-        # 2. MACD Line
         df['MACD_Line'] = df['EMA_12'] - df['EMA_26']
-        # 3. MACD Signal Line
+        
+        # 2. MACD Signal Line (9-period EMA of MACD_Line)
         df['MACD_Signal'] = ta.ema(df['MACD_Line'], length=9)
-        # 4. MACD Histogram (固定の列名を使用)
+        
+        # 3. MACD Histogram (固定の列名を使用)
         df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
@@ -415,8 +415,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # データの安全な取得
         rsi_val = df['rsi'].iloc[-1]
+        
+        # NaNチェックを強化 (MACDの計算結果が不完全な場合はここでエラーを捕捉する)
+        if df[MACD_HIST_COL].empty or pd.isna(df[MACD_HIST_COL].iloc[-1]) or pd.isna(df[MACD_HIST_COL].iloc[-2]):
+            # データ不足によるMACDのNaN発生を処理
+            raise ValueError(f"{timeframe}のMACD計算結果がNaNまたはデータ不足です。")
+            
         macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
         macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] # 前足の値も必要
+        
         adx_val = df['adx'].iloc[-1]
         atr_val = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else atr_val
         
@@ -497,7 +504,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             sl = entry + sl_dist
             tp1 = entry - tp_dist
         else:
-            entry, sl, tp1, rr_base = price, 0, 0, 0
+            entry, tp1, sl, rr_base = price, 0, 0, 0
         
         # 6. 最終的なサイドの決定
         final_side = side
@@ -518,16 +525,16 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "macd_cross_valid": macd_valid,
         }
         
-    except KeyError as e:
-        # MACD列名などのKeyErrorを個別に処理 (固定列名を使用しているため、これは非常に稀なエラーになるはず)
-        logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に致命的な Key Error が発生しました: {e}. Neutralとして処理を継続します。")
+    except ValueError as e:
+        # MACDのNaN発生など、データ不完全エラー
+        logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中にデータエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
         entry, tp1, sl, rr_base = price, 0, 0, 0 
         tech_data = tech_data_defaults 
 
     except Exception as e:
-        # その他の例外処理
+        # その他の予期せぬ例外処理
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -582,6 +589,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
                 elif last_price < last_sma:
                     long_term_trend = 'Short'
         except Exception:
+            # SMA計算時のエラーは無視し、Neutralとして処理を続行
             pass 
             
     # 1. 各時間軸の分析を並行して実行
@@ -605,6 +613,28 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 # ====================================================================================
 # TASK SCHEDULER & MAIN LOOP
 # ====================================================================================
+
+async def notify_integrated_analysis(symbol: str, signals: List[Dict]):
+    """統合分析レポートをTelegramに送信"""
+    global TRADE_NOTIFIED_SYMBOLS
+    current_time = time.time()
+    
+    # いずれかの時間軸でスコアが0.65以上のシグナルがあれば通知
+    if any(s.get('score', 0.5) >= SIGNAL_THRESHOLD and s.get('side') != "Neutral" for s in signals):
+        # 統合分析レポートのクールダウンは、銘柄ごとに2時間に設定
+        if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
+            
+            msg = format_integrated_analysis_message(symbol, signals)
+            
+            if msg:
+                log_symbol = symbol.replace('-', '/')
+                logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {max(s['score'] for s in signals):.4f})")
+                TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
+                
+                # asyncio.to_threadでI/O処理（requests.post）を直ちに別スレッドで実行
+                task = asyncio.create_task(asyncio.to_thread(lambda m=msg: send_telegram_html(m)))
+                return task
+    return None
 
 async def main_loop():
     """BOTのメイン実行ループ"""
@@ -680,40 +710,19 @@ async def main_loop():
             ][:TOP_SIGNAL_COUNT]
             
             # 通知実行
-            if top_signals_to_notify:
-                logging.info(f"🔔 高スコアシグナル {len(top_signals_to_notify)} 銘柄をチェックします。")
-                
-                notify_tasks = []
-                for item in top_signals_to_notify:
-                    symbol = item['all_signals'][0]['symbol']
-                    current_time = time.time()
-                    
-                    # 1. クールダウンチェックを優先的に行う
-                    if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
-                        
-                        # 2. メッセージを生成
-                        msg = format_integrated_analysis_message(symbol, item['all_signals'])
-                        
-                        if msg:
-                            # 3. 通知タスクをキューに追加
-                            log_symbol = symbol.replace('-', '/')
-                            logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {item['score']:.4f})")
-                            TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
-                            
-                            # asyncio.to_threadでI/O処理（requests.post）を直ちに別スレッドで実行
-                            task = asyncio.create_task(asyncio.to_thread(lambda m=msg: send_telegram_html(m)))
-                            notify_tasks.append(task)
-                            
-                    else:
-                        log_symbol = symbol.replace('-', '/')
-                        logging.info(f"🕒 {log_symbol} はクールダウン期間中です。通知をスキップします。")
+            notify_tasks = []
+            for item in top_signals_to_notify:
+                # notify_integrated_analysisでクールダウンチェックとメッセージ生成を行い、タスクを返す
+                task = await notify_integrated_analysis(item['all_signals'][0]['symbol'], item['all_signals'])
+                if task:
+                    notify_tasks.append(task)
                 
             # -----------------------------------------------------------------
 
             LAST_SUCCESS_TIME = current_time
             logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
             
-            # 通知タスクが完了するのを待ってから次のループに進む (これは任意だが、通知の確実性を高める)
+            # 通知タスクが完了するのを待ってから次のループに進む
             if notify_tasks:
                  await asyncio.gather(*notify_tasks, return_exceptions=True)
 
@@ -729,11 +738,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.0.4-MACD_STABLE_FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.0.5-MACD_COMPLETE_STABLE_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.0.4 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.0.5 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -747,7 +756,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.0.4-MACD_STABLE_FIX (Full Integrated)",
+        "bot_version": "v12.0.5-MACD_COMPLETE_STABLE_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -758,8 +767,8 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.0.4, Full Integrated, MACD Stable Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.0.5, Full Integrated, MACD Complete Stable Fix)."}, status_code=200)
 
 if __name__ == '__main__':
-    # Renderで実行する場合、main_render:appのようにファイル名とインスタンス名を指定
+    # Renderなどで実行する場合、ファイル名とインスタンス名を指定
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
