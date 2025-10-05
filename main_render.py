@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v12.0.3 - 安定化 & 可視化強化版
-# - MACD Key Errorの根本的な再修正
-# - CCXT レート制限対策 (データ取得間隔の調整)
-# - Telegram通知の可視化と根拠詳細表示はv12.0.2を継承
+# Apex BOT v12.0.4 - 恒久的MACD安定化版
+# - MACD Key Errorを完全に解消するため、MACD計算ロジックを修正・固定化。
+# - CCXT レート制限対策 (v12.0.3) を継承し、安定稼働を目指す。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -46,7 +45,7 @@ DEFAULT_SYMBOLS = [
 TOP_SYMBOL_LIMIT = 30      # 出来高で選出する銘柄数
 LOOP_INTERVAL = 360        # 6分間隔で分析を実行
 
-# CCXT レート制限対策 (v12.0.3 導入)
+# CCXT レート制限対策 
 REQUEST_DELAY_PER_SYMBOL = 0.5 # 銘柄ごとのOHLCVリクエスト間の遅延 (秒)
 
 # 環境変数から取得。未設定の場合はダミー値。
@@ -237,7 +236,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"-----------------------------------------\n"
         f"| 🔍 **現在の市場** | **{regime}** 相場 ({best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.0.3 - Dynamic Logic Stable |\n"
+        f"| ⚙️ **BOT Ver** | v12.0.4 - MACD Stable Fix |\n"
         f"-----------------------------------------\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -361,7 +360,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (動的ロジック v12.0.3)
+    単一の時間軸で分析とシグナル生成を行う関数 (恒久MACD安定化ロジック v12.0.4)
     """
     
     # 1. データ取得
@@ -390,25 +389,25 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     current_long_term_penalty_applied = False
     
     # ----------------------------------------------------
-    # 🚨 MACD Key Error 根本修正ロジック (v12.0.3 強化)
+    # 🚨 MACD Key Error 恒久修正ロジック (v12.0.4 導入)
+    # MACDを個別に関数呼び出しし、列名を固定する
     # ----------------------------------------------------
+    MACD_HIST_COL = 'MACD_Hist' # 固定の列名
+
     try:
         # テクニカル指標の計算
         df['rsi'] = ta.rsi(df['close'], length=14)
         
-        # MACDを計算
-        df.ta.macd(close='close', fast=12, slow=26, signal=9, append=True)
-        
-        # MACDの列名を動的に取得 (MACDH_X_Y_Z の形式)
-        # 確実にMACDHを取得するため、MACD計算後にDFに追加されたMACDH列を正確に探し出す
-        macd_cols = [col for col in df.columns if col.startswith('MACDH_')]
-        
-        if not macd_cols:
-            # フォールバック: MACD列名が見つからない場合は致命的なエラーとしてスロー
-            # このエラーメッセージをログに出力させる
-            raise KeyError("MACDヒストグラムの列名が見つかりません (MACDH_XX_YY_ZZ形式の列がDFに見つかりませんでした)。")
-            
-        macd_hist_col = macd_cols[0]
+        # MACDを個別に計算し、固定の列名を使用
+        # 1. MACD Fast/Slow EMA
+        df['EMA_12'] = ta.ema(df['close'], length=12)
+        df['EMA_26'] = ta.ema(df['close'], length=26)
+        # 2. MACD Line
+        df['MACD_Line'] = df['EMA_12'] - df['EMA_26']
+        # 3. MACD Signal Line
+        df['MACD_Signal'] = ta.ema(df['MACD_Line'], length=9)
+        # 4. MACD Histogram (固定の列名を使用)
+        df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
         df.ta.bbands(close='close', length=20, append=True)
@@ -416,8 +415,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # データの安全な取得
         rsi_val = df['rsi'].iloc[-1]
-        macd_hist_val = df[macd_hist_col].iloc[-1] 
-        macd_hist_val_prev = df[macd_hist_col].iloc[-2] # 前足の値も必要
+        macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
+        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] # 前足の値も必要
         adx_val = df['adx'].iloc[-1]
         atr_val = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else atr_val
         
@@ -520,7 +519,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         }
         
     except KeyError as e:
-        # MACD列名などのKeyErrorを個別に処理
+        # MACD列名などのKeyErrorを個別に処理 (固定列名を使用しているため、これは非常に稀なエラーになるはず)
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に致命的な Key Error が発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -589,7 +588,8 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     tasks = [
         analyze_single_timeframe(symbol, '15m', macro_context, client_name, long_term_trend, False),
         analyze_single_timeframe(symbol, '1h', macro_context, client_name, long_term_trend, False),
-        analyze_single_timeframe(symbol, '4h', macro_context, client_name, long_term_trend, False)
+        # 4h足の分析は、long_term_trendを既に計算済みの情報として渡す
+        analyze_single_timeframe(symbol, '4h', macro_context, client_name, long_term_trend, False) 
     ]
     
     results = await asyncio.gather(*tasks)
@@ -597,8 +597,6 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     # 4h分析結果の統合
     for result in results:
         if result and result.get('timeframe') == '4h':
-            # 4hのシグナルスコアは通常ロジックで計算されたもの
-            # MACDエラーが発生した場合、このロングタームトレンドの情報は無効になる可能性もあるが、ログを詳細化
             result.setdefault('tech_data', {})['long_term_trend'] = long_term_trend
     
     return [r for r in results if r is not None]
@@ -628,8 +626,7 @@ async def main_loop():
             logging.info(f"🔍 分析開始 (対象銘柄: {len(monitor_symbols)} - 出来高TOP, クライアント: {CCXT_CLIENT_NAME})。監視リスト例: {', '.join(log_symbols)}...")
             
             # -----------------------------------------------------------------
-            # ★ CCXT レート制限対策 (v12.0.3 導入)
-            # 各銘柄の分析タスクの実行間に遅延を設ける
+            # CCXT レート制限対策 (v12.0.3) を適用しながら分析を実行
             # -----------------------------------------------------------------
             results_list_of_lists = []
             
@@ -732,11 +729,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.0.3-DYNAMIC_LOGIC_STABLE (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.0.4-MACD_STABLE_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.0.3 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.0.4 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -750,7 +747,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.0.3-DYNAMIC_LOGIC_STABLE (Full Integrated)",
+        "bot_version": "v12.0.4-MACD_STABLE_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -761,7 +758,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.0.3, Full Integrated, Dynamic Logic Stable)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.0.4, Full Integrated, MACD Stable Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     # Renderで実行する場合、main_render:appのようにファイル名とインスタンス名を指定
