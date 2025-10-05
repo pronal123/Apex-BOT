@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.0.5 - MACD完全安定化版
-# - v12.0.4で発生したMACD Key Errorを完全に解消するため、MACD計算をta.ema関数ベースで固定化。
-# - CCXT レート制限対策 (v12.0.3) と出来高動的監視 (v12.0.4) を継承し、安定性と精度を両立。
+# Apex BOT v12.0.6 - スコア100点満点＆通知可視化強化版
+# - スコアを0.5-1.0から50-100に変換し、100点満点表示に統一。
+# - Telegram通知のメッセージデザインを大幅に改善し、可視性と理解度を向上。
+# - MACD完全安定化ロジック (v12.0.5) を継承し、安定稼働を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -53,7 +54,8 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
-SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 
+# スコアの閾値を0.65から75点に変換
+SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
@@ -96,6 +98,10 @@ logging.getLogger('ccxt').setLevel(logging.WARNING)
 # UTILITIES & FORMATTING
 # ====================================================================================
 
+def convert_score_to_100(score: float) -> int:
+    """0.5から1.0のスコアを50から100の点数に変換する"""
+    return max(50, min(100, int(50 + (score - 0.5) * 100)))
+
 def format_price_utility(price: float, symbol: str) -> str:
     """価格の小数点以下の桁数を整形"""
     if price is None or price <= 0: return "0.00"
@@ -132,10 +138,10 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     """
-    3つの時間軸の分析結果を統合し、より可視性が高く、根拠を詳細に記載したメッセージを整形する。 
+    3つの時間軸の分析結果を統合し、可視性を強化したメッセージを整形する。
+    (v12.0.6: スコア100点満点化と可視化強化)
     """
     
-    # 有効なシグナル（エラーやNeutralではない）のみを抽出
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
     
     if not valid_signals:
@@ -153,7 +159,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     price = best_signal.get('price', 0.0)
     timeframe = best_signal.get('timeframe', 'N/A')
     side = best_signal.get('side', 'N/A').upper()
-    score = best_signal.get('score', 0.5)
+    score_raw = best_signal.get('score', 0.5)
+    score_100 = convert_score_to_100(score_raw) # 100点満点に変換
     rr_ratio = best_signal.get('rr_ratio', 0.0)
     
     entry_price = best_signal.get('entry', 0.0)
@@ -164,38 +171,40 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     display_symbol = symbol.replace('-', '/')
 
     # ----------------------------------------------------
-    # 1. ヘッダーとエントリー情報の可視化
+    # 1. ヘッダーとエントリー情報の可視化 (スコアを強調)
     # ----------------------------------------------------
     direction_emoji = "🚀 **LONG**" if side == "ロング" else "💥 **SHORT**"
+    color_tag = "🟢" if side == "ロング" else "🔴"
     
     header = (
-        f"🚨 **{direction_emoji} シグナル発生！** - {display_symbol}\n"
+        f"{color_tag} {direction_emoji} **強シグナル発生！** - {display_symbol}\n"
         f"-----------------------------------------\n"
-        f"| 📊 **最高スコア** | <b>{score:.4f}</b> (ベース: {timeframe}足) |\n"
-        f"| 📈 **RRR (報酬比)** | <b>1:{rr_ratio:.2f}</b> | (予測勝率: {get_estimated_win_rate(score, timeframe) * 100:.1f}%) |\n"
+        f"| 🥇 **分析スコア** | <b>{score_100} / 100 点</b> (ベース: {timeframe}足) |\n"
+        f"| 📈 **RRR (報酬比)** | <b>1:{rr_ratio:.2f}</b> | (予測勝率: {get_estimated_win_rate(score_raw, timeframe) * 100:.1f}%) |\n"
         f"-----------------------------------------\n"
     )
 
     trade_plan = (
-        f"**✅ 推奨取引計画 (ATRベース)**\n"
+        f"**📝 推奨取引計画 (ATRベース)**\n"
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | |\n"
         f"| ➡️ Entry | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション |\n"
-        f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 |\n"
-        f"| 🔴 SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({SHORT_TERM_SL_MULTIPLIER:.1f}xATR) |\n"
+        f"| {color_tag} TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 |\n"
+        f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({SHORT_TERM_SL_MULTIPLIER:.1f}xATR) |\n"
         f"-----------------------------------------\n"
     )
     
     # ----------------------------------------------------
     # 2. 統合分析サマリーとスコアリングの詳細
     # ----------------------------------------------------
-    analysis_detail = "**📈 統合シグナル生成の根拠 (3時間軸)**\n"
+    analysis_detail = "**💡 統合シグナル生成の根拠 (3時間軸)**\n"
     
     for s in signals:
         tf = s.get('timeframe')
         s_side = s.get('side', 'N/A')
-        s_score = s.get('score', 0.5)
+        s_score_raw = s.get('score', 0.5)
+        s_score_100 = convert_score_to_100(s_score_raw)
         tech_data = s.get('tech_data', {})
         
         # 4hトレンドの強調表示
@@ -204,28 +213,26 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
             
             # 4h分析の詳細セクション
             analysis_detail += (
-                f"🌍 **4h 足 (長期トレンド)**: {long_trend} ({s_score:.2f})\n"
+                f"🌍 **4h 足 (長期トレンド)**: {long_trend} ({s_score_100}点)\n"
             )
             
         else:
             # 短期/中期分析の詳細
             # スコアの強弱に応じてアイコンを付与
-            score_icon = "🔥 強力" if s_score >= 0.70 else ("📈 肯定的" if s_score >= 0.60 else "⚖️ 中立的" )
+            score_icon = "🔥強力" if s_score_100 >= 80 else ("📈肯定的" if s_score_100 >= 70 else "⚖️中立的" )
             
             # 長期トレンドとの逆張りペナルティ適用状況
             penalty_status = " (逆張りペナルティ適用)" if tech_data.get('long_term_reversal_penalty') else ""
             
             analysis_detail += (
-                f"**[{tf} 足] {score_icon}** ({s_score:.2f}) -> {s_side}{penalty_status}\n"
+                f"**[{tf} 足] {score_icon}** ({s_score_100}点) -> {s_side}{penalty_status}\n"
             )
             
             # 採用された時間軸の技術指標を詳細に表示
             if tf == timeframe:
-                analysis_detail += f"   - **ADX**: {tech_data.get('adx', 0.0):.2f} ({s.get('regime', 'N/A')})\n"
-                analysis_detail += f"   - **RSI**: {tech_data.get('rsi', 0.0):.2f}\n"
-                # MACDH値の表示は小数点以下4桁に統一
-                analysis_detail += f"   - **MACDH**: {tech_data.get('macd_hist', 0.0):.4f} (モメンタム)\n"
-                analysis_detail += f"   - **ATR**: {tech_data.get('atr_value', 0.0):.4f} (ボラティリティ)\n"
+                analysis_detail += f"   - **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({s.get('regime', 'N/A')})\n"
+                analysis_detail += f"   - **RSI/MACDH**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f}\n"
+                analysis_detail += f"   - **ATR Volatility**: {tech_data.get('atr_value', 0.0):.4f}\n"
 
     # ----------------------------------------------------
     # 3. リスク管理とフッター
@@ -234,8 +241,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     
     footer = (
         f"-----------------------------------------\n"
-        f"| 🔍 **現在の市場** | **{regime}** 相場 ({best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.0.5 - MACD Complete Stable Fix |\n"
+        f"| 🔍 **市場環境** | **{regime}** 相場 ({best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
+        f"| ⚙️ **BOT Ver** | v12.0.6 - 100pt & UI Fix |\n"
         f"-----------------------------------------\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -535,6 +542,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
     except Exception as e:
         # その他の予期せぬ例外処理
+        # v12.0.4でログに表示されていたKeyErrorなどもここで処理される
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -619,7 +627,7 @@ async def notify_integrated_analysis(symbol: str, signals: List[Dict]):
     global TRADE_NOTIFIED_SYMBOLS
     current_time = time.time()
     
-    # いずれかの時間軸でスコアが0.65以上のシグナルがあれば通知
+    # いずれかの時間軸でスコアがSIGNAL_THRESHOLD以上のシグナルがあれば通知
     if any(s.get('score', 0.5) >= SIGNAL_THRESHOLD and s.get('side') != "Neutral" for s in signals):
         # 統合分析レポートのクールダウンは、銘柄ごとに2時間に設定
         if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
@@ -628,7 +636,8 @@ async def notify_integrated_analysis(symbol: str, signals: List[Dict]):
             
             if msg:
                 log_symbol = symbol.replace('-', '/')
-                logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {max(s['score'] for s in signals):.4f})")
+                max_score_100 = convert_score_to_100(max(s['score'] for s in signals))
+                logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (スコア: {max_score_100} / 100 点)")
                 TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                 
                 # asyncio.to_threadでI/O処理（requests.post）を直ちに別スレッドで実行
@@ -738,11 +747,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.0.5-MACD_COMPLETE_STABLE_FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.0.6-100PT_UI_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.0.5 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.0.6 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -756,7 +765,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.0.5-MACD_COMPLETE_STABLE_FIX (Full Integrated)",
+        "bot_version": "v12.0.6-100PT_UI_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -767,7 +776,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.0.5, Full Integrated, MACD Complete Stable Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.0.6, Full Integrated, 100pt & UI Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     # Renderなどで実行する場合、ファイル名とインスタンス名を指定
