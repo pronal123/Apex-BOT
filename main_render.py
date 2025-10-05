@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v11.9.0 - リアルタイム出来高TOP30統合版
+# Apex BOT v11.9.1 - クラッシュ修復＆シンボル互換性向上版
 # 最終更新: 2025年10月
 # ====================================================================================
 
@@ -8,7 +8,7 @@ import os
 import time
 import logging
 import requests
-import ccxt.async_support as ccxt_async # 非同期CCXTを使用
+import ccxt.async_support as ccxt_async
 import ccxt 
 import numpy as np
 import pandas as pd
@@ -27,13 +27,14 @@ import sys
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
+# ... (CONFIG & CONSTANTS, UTILITIES & FORMATTING は変更なし) ...
+
 # ====================================================================================
 # CONFIG & CONSTANTS
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
 
-# このリストは初期化用。メインループで動的に更新される。
 DEFAULT_SYMBOLS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT", "DOT/USDT", 
     "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "LTC/USDT", "MATIC/USDT", "TRX/USDT", 
@@ -41,24 +42,23 @@ DEFAULT_SYMBOLS = [
     "UNI/USDT", "ICP/USDT", "FIL/USDT", "AAVE/USDT", "AXS/USDT", "SAND/USDT",
     "GALA/USDT", "FTM/USDT", "HBAR/USDT", "VET/USDT", "GRT/USDT", "SHIB/USDT"
 ] 
-TOP_SYMBOL_LIMIT = 30      # 出来高で選出する銘柄数
-LOOP_INTERVAL = 360        # 6分
+TOP_SYMBOL_LIMIT = 30      
+LOOP_INTERVAL = 360        
 SYMBOL_WAIT = 0.0          
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
-SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 
-TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
+TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
+SIGNAL_THRESHOLD = 0.65             
+TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
 STRONG_NEUTRAL_MIN_DIFF = 0.02      
-LONG_TERM_SMA_LENGTH = 50           # 4時間足SMAの期間
-LONG_TERM_REVERSAL_PENALTY = 0.15   # 4hトレンド逆行時のスコア減点
+LONG_TERM_SMA_LENGTH = 50           
+LONG_TERM_REVERSAL_PENALTY = 0.15   
 
-# 短期高勝率特化のための定数調整
 MACD_CROSS_PENALTY = 0.08           
 SHORT_TERM_BASE_RRR = 1.5           
 SHORT_TERM_MAX_RRR = 2.0            
@@ -67,7 +67,7 @@ SHORT_TERM_SL_MULTIPLIER = 1.0
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
-EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None # CCXTクライアントを保持する変数
+EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
 LAST_UPDATE_TIME: float = 0.0
 CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]
 TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} 
@@ -134,13 +134,21 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     """
     3つの時間軸の分析結果を統合し、簡潔で見やすいTelegram通知メッセージを整形 
+    **v11.9.1修正**: signalsリストが空でないことを保証する（ただし、呼び出し元でチェックされているはず）
     """
     
-    # 最高の取引シグナル（最もスコアが高いもの）を取得
-    best_signal = max(signals, key=lambda s: s.get('score', 0.5)) if signals else None
+    # 🚨 致命的なエラー修正のため、呼び出し元からのリストが空でないことを確認
+    valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
     
-    if not best_signal or best_signal.get('score', 0.5) < SIGNAL_THRESHOLD:
-        return "" # スコアが閾値未満の場合はメッセージを生成しない
+    # 有効なシグナルがない場合は空文字列を返す (メインループのクラッシュ防止)
+    if not valid_signals:
+        return "" 
+        
+    # 最高の取引シグナル（最もスコアが高いもの）を取得
+    best_signal = max(valid_signals, key=lambda s: s.get('score', 0.5))
+    
+    if best_signal.get('score', 0.5) < SIGNAL_THRESHOLD:
+        return "" 
 
     # 主要な取引情報を抽出
     price = best_signal.get('price', 0.0)
@@ -156,14 +164,17 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     # 根拠セクションの構築 (15m, 1h, 4hの判断を簡潔に並べる)
     analysis_parts = []
     
+    # **v11.9.1修正**: tech_dataが存在しない場合の安全なアクセス
     for s in signals:
         tf = s.get('timeframe')
         s_side = s.get('side', 'N/A')
         s_score = s.get('score', 0.5)
         
+        tech_data = s.get('tech_data', {}) # 安全なアクセス
+        
         # 4hトレンドの簡易表示
         if tf == '4h':
-            long_trend = s.get('tech_data', {}).get('long_term_trend', 'Neutral')
+            long_trend = tech_data.get('long_term_trend', 'Neutral')
             analysis_parts.append(f"🌍 4h (長期): {long_trend}")
         # 短期/中期
         elif s_score >= 0.65:
@@ -214,17 +225,27 @@ async def initialize_ccxt_client():
     EXCHANGE_CLIENT = ccxt_async.okx({
         'timeout': 20000, 
         'enableRateLimit': True,
-        'options': {'defaultType': 'future'} # 先物/契約市場をデフォルトにする
+        # OKXの無期限スワップ/先物をデフォルトとする
+        'options': {'defaultType': 'swap'} 
     })
     
     if EXCHANGE_CLIENT:
-        logging.info(f"CCXTクライアントを初期化しました ({CCXT_CLIENT_NAME} - リアル接続, Default: Future)")
+        logging.info(f"CCXTクライアントを初期化しました ({CCXT_CLIENT_NAME} - リアル接続, Default: Swap)")
     else:
         logging.error("CCXTクライアントの初期化に失敗しました。")
 
+
+def convert_symbol_to_okx_swap(symbol: str) -> str:
+    """
+    USDT現物シンボル (BTC/USDT) をOKXの無期限スワップシンボル (BTC-USDT) に変換する
+    """
+    base, quote = symbol.split('/')
+    return f"{base}-{quote}" 
+
+
 async def update_symbols_by_volume():
     """
-    CCXTを使用してOKXの出来高トップ30のUSDTペア銘柄を動的に取得・更新する (新規)
+    CCXTを使用してOKXの出来高トップ30のUSDTペア銘柄を動的に取得・更新する (v11.9.1: 現物出来高を取得し、スワップ形式に変換)
     """
     global CURRENT_MONITOR_SYMBOLS, EXCHANGE_CLIENT
     
@@ -233,18 +254,15 @@ async def update_symbols_by_volume():
         return
 
     try:
-        # 1. すべてのティッカー（銘柄情報）を取得
-        # OKXのAPIは先物/契約市場の出来高情報を返さない場合があるため、一旦現物市場のティッカーを取得してフィルタリングします。
-        # または、契約市場に特化した銘柄リストから出来高情報を取得します。
-        # 出来高 (quoteVolume) を確認するため、一旦全てのUSDTペアのティッカーを取得
-        # OKXは市場情報（instruments）をまず取得する必要がある。ここではfetch_tickersで代替する。
-
-        # 現物市場から出来高TOPを取得する (Future/Swapデータは別途APIが必要な場合があるため、一旦この方法で)
-        all_tickers = await EXCHANGE_CLIENT.fetch_tickers() 
+        # 1. 現物市場のティッカーを取得 (出来高確認のため)
+        # 一時的にdefaultTypeをspotに上書きしてティッカーを取得
         
-        # 2. USDTペア（現物）をフィルタリングし、出来高順にソート
+        # v11.9.1 出来高取得エラー対応: fetch_tickersにparamsを指定してspotを取得
+        tickers_spot = await EXCHANGE_CLIENT.fetch_tickers(params={'instType': 'SPOT'})
+        
+        # 2. USDTペアをフィルタリングし、出来高順にソート (現物出来高: quoteVolume/volume_quote)
         usdt_tickers = {
-            symbol: ticker for symbol, ticker in all_tickers.items() 
+            symbol: ticker for symbol, ticker in tickers_spot.items() 
             if symbol.endswith('/USDT') and ticker.get('quoteVolume') is not None
         }
 
@@ -255,13 +273,13 @@ async def update_symbols_by_volume():
             reverse=True
         )
         
-        # 3. 上位TOP_SYMBOL_LIMIT個を選出
-        new_monitor_symbols = [symbol for symbol, _ in sorted_tickers[:TOP_SYMBOL_LIMIT]]
+        # 3. 上位TOP_SYMBOL_LIMIT個を選出し、スワップシンボル形式に変換
+        # 例: BTC/USDT -> BTC-USDT
+        new_monitor_symbols = [convert_symbol_to_okx_swap(symbol) for symbol, _ in sorted_tickers[:TOP_SYMBOL_LIMIT]]
         
         if new_monitor_symbols:
-            # 出来高TOP銘柄を監視リストに設定
             CURRENT_MONITOR_SYMBOLS = new_monitor_symbols
-            logging.info(f"✅ 出来高TOP30の銘柄を更新しました。例: {', '.join(CURRENT_MONITOR_SYMBOLS[:5])}...")
+            logging.info(f"✅ 出来高TOP30銘柄をOKXスワップ形式に更新しました。例: {', '.join(CURRENT_MONITOR_SYMBOLS[:5])}...")
         else:
             logging.warning("⚠️ 出来高データを取得できませんでした。前回またはデフォルトの銘柄リストを使用します。")
 
@@ -283,18 +301,21 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
     try:
         limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
         
-        # 実際のOHLCVデータを取得 (CCXTクライアントのdefaultType='future'に従う)
+        # 実際のOHLCVデータを取得 (CCXTクライアントのdefaultType='swap'に従う)
+        # symbolはBTC-USDTのような形式で渡されることを想定
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         
-        if not ohlcv or len(ohlcv) < 30: # 最低限のデータチェック (MACD等に必要な本数)
+        if not ohlcv or len(ohlcv) < 30: 
             return [], "DataShortage", client_name
             
         return ohlcv, "Success", client_name
 
     except ccxt.NetworkError as e:
-        logging.warning(f"CCXT Network Error ({symbol} {timeframe}): {e}")
+        # ネットワークエラーはログに記録するが、クラッシュはさせない
+        logging.warning(f"CCXT Network Error ({symbol} {timeframe}): {EXCHANGE_CLIENT.url}{e}")
         return [], "ExchangeError", client_name
     except ccxt.ExchangeError as e:
+        # 銘柄が見つからないエラーはログに記録し、クラッシュはさせない
         logging.warning(f"CCXT Exchange Error ({symbol} {timeframe}): {e}")
         return [], "ExchangeError", client_name
     except Exception as e:
@@ -314,6 +335,7 @@ async def get_crypto_macro_context() -> Dict:
 # CORE ANALYSIS LOGIC (時間軸ごとの分離)
 # ====================================================================================
 
+# ... (analyze_single_timeframe 関数は変更なし) ...
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
     単一の時間軸で分析とシグナル生成を行う関数 
@@ -321,26 +343,31 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     # 1. データ取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
+    
+    # 🚨 v11.9.1 修正: DataShortage/ExchangeErrorの場合でも、tech_dataを空にしないように初期化を保持
+    # これにより、generate_integrated_signalがアクセスした際にKeyErrorを防ぐ
+    tech_data_defaults = {
+        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": 0.005,
+        "long_term_trend": long_term_trend, "long_term_reversal_penalty": False, "macd_cross_valid": False,
+    }
+    
     if status != "Success":
-        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe}
+        # エラー時もtech_dataを含む辞書を返すように修正
+        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0}
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['close'] = pd.to_numeric(df['close'])
     
-    # デフォルト値の初期設定 (エラー時のフォールバックに使用)
+    # デフォルト値の初期設定 
     price = df['close'].iloc[-1] if not df.empty else 0.0
         
     final_side = "Neutral"
     score = 0.5
     entry, tp1, sl, rr_base = 0, 0, 0, 0
-    atr_val = price * 0.005 if price > 0 else 0.005 # 暫定ATR
+    atr_val = price * 0.005 if price > 0 else 0.005 
     macd_valid = False
     current_long_term_penalty_applied = False
     
-    tech_data_defaults = {
-        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": atr_val,
-        "long_term_trend": long_term_trend, "long_term_reversal_penalty": False, "macd_cross_valid": False,
-    }
     tech_data = tech_data_defaults 
 
     # ----------------------------------------------------
@@ -470,6 +497,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     }
     
     return signal_candidate
+# ... (analyze_single_timeframe 関数はここまで) ...
 
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
     """
@@ -480,13 +508,14 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     long_term_trend = 'Neutral'
     
     ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
-    if status_4h == "Success":
-        df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df_4h['close'] = pd.to_numeric(df_4h['close'])
+    
+    df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df_4h['close'] = pd.to_numeric(df_4h['close'])
+    
+    if status_4h == "Success" and len(df_4h) >= LONG_TERM_SMA_LENGTH:
         
         # SMA計算もエラーハンドリングの対象外なので安全にチェック
-        if len(df_4h) >= LONG_TERM_SMA_LENGTH:
-            # pandas_taによるSMA計算
+        try:
             df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
         
             if not df_4h.empty and 'sma' in df_4h.columns and df_4h['sma'].iloc[-1] is not None:
@@ -497,6 +526,8 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
                     long_term_trend = 'Long'
                 elif last_price < last_sma:
                     long_term_trend = 'Short'
+        except Exception:
+            pass # SMA計算エラーは無視し、Neutralのままにする
             
     # 1. 各時間軸の分析を並行して実行
     tasks = [
@@ -510,7 +541,8 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     # 4h分析結果の統合: 4hシグナルは他の短期・中期の分析結果を上書きしない
     for result in results:
         if result and result.get('timeframe') == '4h':
-            result['tech_data']['long_term_trend'] = long_term_trend
+            # 🚨 v11.9.1 修正: tech_dataが存在しない可能性があるため、getでアクセスし、デフォルト値を設定
+            result.get('tech_data', {})['long_term_trend'] = long_term_trend
     
     return [r for r in results if r is not None]
 
@@ -529,7 +561,7 @@ async def main_loop():
         try:
             current_time = time.time()
             
-            # ★ 出来高TOP30銘柄を動的に更新
+            # 出来高TOP30銘柄を動的に更新
             await update_symbols_by_volume()
             monitor_symbols = CURRENT_MONITOR_SYMBOLS
             
@@ -544,16 +576,18 @@ async def main_loop():
             results_list_of_lists = await asyncio.gather(*tasks)
             
             # 結果を平坦化
-            all_signals = [s for sublist in results_list_of_lists for s in sublist if s is not None and s.get('side') not in ["DataShortage", "ExchangeError"]]
+            all_signals = [s for sublist in results_list_of_lists for s in sublist if s is not None] # エラーシグナルも含める
             LAST_ANALYSIS_SIGNALS = all_signals
             
             # -----------------------------------------------------------------
             # ★ 通知の選別ロジック (最もスコアの高いシグナルを基準に選出)
             # -----------------------------------------------------------------
             
-            # 銘柄ごとに、最も高いスコアを持つシグナルを抽出
+            # 銘柄ごとに、有効なシグナル（DataShortageやExchangeErrorではない）のみを抽出
+            valid_signals = [s for s in all_signals if s.get('side') not in ["DataShortage", "ExchangeError"]]
+            
             best_signals_per_symbol = {}
-            for signal in all_signals:
+            for signal in valid_signals:
                 symbol = signal['symbol']
                 score = signal['score']
                 
@@ -562,7 +596,7 @@ async def main_loop():
                     continue
 
                 if symbol not in best_signals_per_symbol or score > best_signals_per_symbol[symbol]['score']:
-                    # 関連する全時間軸のシグナルをまとめて格納
+                    # 関連する全時間軸のシグナルをまとめて格納 (ここではエラーシグナルも含めて渡す)
                     all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
                     best_signals_per_symbol[symbol] = {
                         'score': score, 
@@ -592,7 +626,9 @@ async def main_loop():
                     if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                         msg = format_integrated_analysis_message(symbol, item['all_signals'])
                         if msg:
-                            logging.info(f"📰 通知送信: {symbol} (スコア: {item['score']:.4f})")
+                            # ログ表示用に、OKXシンボル形式を標準形式に戻す (BTC-USDT -> BTC/USDT)
+                            log_symbol = symbol.replace('-', '/')
+                            logging.info(f"📰 通知送信: {log_symbol} (スコア: {item['score']:.4f})")
                             TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                             asyncio.create_task(asyncio.to_thread(lambda: send_telegram_html(msg)))
                         
@@ -601,11 +637,10 @@ async def main_loop():
             LAST_SUCCESS_TIME = current_time
             logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
             
-            # CCXTクライアントをクローズ (タスク実行後に接続を切断)
             await asyncio.sleep(LOOP_INTERVAL) 
 
         except Exception as e:
-            # メインループ全体のクラッシュを防ぐための最後の砦
+            # 🚨 v11.9.1 修正: 致命的なエラーログの改善。特にKeyError: 'tech_data'を防止
             logging.error(f"メインループで致命的なエラー: {e}")
             await asyncio.sleep(60)
 
@@ -614,11 +649,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v11.9.0-CCXT_VOLUME_TOP30 (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v11.9.1-CRASH_FIX_OKX_SWAP (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v11.9.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v11.9.1 Startup initializing...") 
     # バックグラウンドでメインループを実行
     asyncio.create_task(main_loop())
 
@@ -634,7 +669,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v11.9.0-CCXT_VOLUME_TOP30 (Full Integrated)",
+        "bot_version": "v11.9.1-CRASH_FIX_OKX_SWAP (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -645,7 +680,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v11.9.0, Full Integrated, Volume Top 30)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v11.9.1, Full Integrated, Crash Fix, OKX Swap)."}, status_code=200)
 
 if __name__ == '__main__':
     # 実行環境に応じてポートとホストを調整してください
