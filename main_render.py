@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.1.31 - Variable Scope Fix for Telegram Messaging
-# - v12.1.30のスコアリングロジックは維持。
-# - format_integrated_analysis_message 関数内の変数スコープエラーを修正。
+# Apex BOT v12.1.32 - Syntax Safety & Variable Scope Fix (Final Stable Version)
+# - main_loopのexceptブロック内のロギング構文エラーを修正。
+# - format_integrated_analysis_message内の変数スコープエラー (long_term_trend) を修正。
+# - スコアリングロジックv12.1.30/31を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -141,7 +142,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
     3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (順位表示機能付き)
-    ★ v12.1.31: long_term_trend 変数スコープエラーを修正
+    ★ v12.1.31/32 修正: long_term_trend 変数スコープエラーを修正
     """
     
     # 有効なシグナル（エラーやNeutralではない）のみを抽出
@@ -239,7 +240,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         
         # 4hトレンドの強調表示
         if tf == '4h':
-            # ★v12.1.31 修正: ローカル変数 long_term_trend_4h を使用
+            # ★修正箇所: ローカル変数 long_term_trend_4h を使用
             long_term_trend_4h = tech_data.get('long_term_trend', 'Neutral')
             
             # 4h分析の詳細セクション
@@ -299,7 +300,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.31 - Variable Scope Fix |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.32 - Syntax Safety Fix |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -308,7 +309,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 
 # ====================================================================================
-# CCXT & DATA ACQUISITION (変更なし - v12.1.30と同様)
+# CCXT & DATA ACQUISITION
 # ====================================================================================
 
 async def initialize_ccxt_client():
@@ -407,7 +408,7 @@ async def get_crypto_macro_context() -> Dict:
 
 
 # ====================================================================================
-# CORE ANALYSIS LOGIC (変更なし - v12.1.30と同様)
+# CORE ANALYSIS LOGIC
 # ====================================================================================
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
@@ -523,7 +524,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_high_val = df['DCU_20'].iloc[-1]
         
         # A. MACDに基づく方向性
-        # スコアリングを 0.20 -> 0.25 に強化 (v12.1.30と同様)
+        # スコアリングを 0.20 -> 0.25 に強化
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
             long_score += 0.25 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
@@ -542,7 +543,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.10
 
         # D. ADXに基づくトレンドフォロー強化
-        # スコアリングを 0.05 -> 0.08 に強化 (v12.1.30と同様)
+        # スコアリングを 0.05 -> 0.08 に強化
         if adx_val > ADX_TREND_THRESHOLD:
             if long_score > short_score:
                 long_score += 0.08
@@ -572,13 +573,13 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
-            # スコアリングを 0.15 -> 0.20 に強化 (v12.1.30と同様)
+            # スコアリングを 0.15 -> 0.20 に強化
             if is_breaking_high:
                 long_score += 0.20 
             elif is_breaking_low:
                 short_score += 0.20
         
-        # H. 複合モメンタム加速ボーナス (v12.1.30と同様)
+        # H. 複合モメンタム加速ボーナス
         momentum_bonus = 0.0
         if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
              momentum_bonus = 0.10
@@ -958,7 +959,18 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL) 
 
         except Exception as e:
-            logging.error(f"メインループで致命的なエラー: name '{e.args[0].split(' ')[1].replace(\"'\", \"\")}' is not defined")
+            # ★v12.1.32 修正: 構文エラーを回避しつつ、エラー名（変数名）を抽出する安全な処理
+            error_message = str(e)
+            error_name = "Unknown Error"
+            
+            if 'name' in error_message and 'is not defined' in error_message:
+                try:
+                    # 例: "name 'long_term_trend' is not defined" から 'long_term_trend' を抽出
+                    error_name = error_message.split(' ')[1].strip("'") 
+                except IndexError:
+                    pass # 分割に失敗した場合はそのまま
+            
+            logging.error(f"メインループで致命的なエラー: {error_name}")
             await asyncio.sleep(60)
 
 
@@ -966,11 +978,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.31-Variable Scope Fix")
+app = FastAPI(title="Apex BOT API", version="v12.1.32-Syntax Safety Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.31 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.32 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -984,7 +996,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.31-Variable Scope Fix",
+        "bot_version": "v12.1.32-Syntax Safety Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -995,7 +1007,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.31, Variable Scope Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.32, Syntax Safety Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
