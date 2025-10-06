@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.1.29 - 動的エントリー戦略導入版 (Dynamic Entry)
-# - スコアまたはADXに基づき、Market Entry (成行) と Limit Entry (優位価格指値) を動的に切り替え。
-# - Limit Entryの場合も、乖離が大きい場合はMarketにFallbackする安全策を導入。
+# Apex BOT v12.1.30 - スコアの明確化とモメンタム加速ボーナス導入版
+# - MACDとDonchian Channelのスコア重み付けを強化し、シグナル間のスコア差を拡大。
+# - 複合モメンタム加速ボーナス (MACD+PPO+RSI) を追加。
+# - Render環境安定化のため LOOP_INTERVAL=180 に設定。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -43,7 +44,7 @@ DEFAULT_SYMBOLS = [
     "GALA/USDT", "FTM/USDT", "HBAR/USDT", "VET/USDT", "GRT/USDT", "SHIB/USDT"
 ] 
 TOP_SYMBOL_LIMIT = 30      
-LOOP_INTERVAL = 360        
+LOOP_INTERVAL = 180        # ★修正: Render安定化のため 180秒 に短縮
 
 # CCXT レート制限対策 
 REQUEST_DELAY_PER_SYMBOL = 0.5 
@@ -177,7 +178,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     entry_price = best_signal.get('entry', 0.0)
     tp_price = best_signal.get('tp1', 0.0)
     sl_price = best_signal.get('sl', 0.0)
-    entry_type = best_signal.get('entry_type', 'N/A') # ★追加
+    entry_type = best_signal.get('entry_type', 'N/A') 
 
     
     # OKX形式のシンボル (BTC-USDT) を標準形式 (BTC/USDT) に戻して表示
@@ -242,7 +243,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             
             # 4h分析の詳細セクション
             analysis_detail += (
-                f"🌏 **4h 足** (長期トレンド): **{long_trend}** ({score_in_100}点)\n"
+                f"🌏 **4h 足** (長期トレンド): **{long_term_trend}** ({score_in_100}点)\n"
             )
             
         else:
@@ -297,7 +298,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.29 - Dynamic Entry |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.30 - Clear Score Differentiation |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -410,7 +411,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.29-Dynamic Entry)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.30 - Clear Score Differentiation)
     """
     
     # 1. データ取得
@@ -521,31 +522,33 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_high_val = df['DCU_20'].iloc[-1]
         
         # A. MACDに基づく方向性
+        # ★修正: スコアリングを 0.20 -> 0.25 に強化
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
-            long_score += 0.20 
+            long_score += 0.25 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
-            short_score += 0.20 
+            short_score += 0.25 
 
-        # B. RSIに基づく買われすぎ/売られすぎ
+        # B. RSIに基づく買われすぎ/売られすぎ (0.10で維持)
         if rsi_val < RSI_OVERSOLD:
             long_score += 0.10
         elif rsi_val > RSI_OVERBOUGHT:
             short_score += 0.10
             
-        # C. RSIに基づくモメンタムブレイクアウト
+        # C. RSIに基づくモメンタムブレイクアウト (0.10で維持)
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
             long_score += 0.10
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
             short_score += 0.10
 
         # D. ADXに基づくトレンドフォロー強化
+        # ★修正: スコアリングを 0.05 -> 0.08 に強化
         if adx_val > ADX_TREND_THRESHOLD:
             if long_score > short_score:
-                long_score += 0.05
+                long_score += 0.08
             elif short_score > long_score:
-                short_score += 0.05
+                short_score += 0.08
         
-        # E. VWAPの一致チェック
+        # E. VWAPの一致チェック (0.05で維持)
         vwap_consistent = False
         if price > vwap_val:
             long_score += 0.05
@@ -554,7 +557,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.05
             vwap_consistent = True
         
-        # F. PPOに基づくモメンタム強度の評価
+        # F. PPOに基づくモメンタム強度の評価 (0.05で維持)
         ppo_abs_mean = df[PPO_HIST_COL].abs().mean()
         if ppo_hist_val > 0 and abs(ppo_hist_val) > ppo_abs_mean:
             long_score += 0.05 
@@ -568,11 +571,20 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
+            # ★修正: スコアリングを 0.15 -> 0.20 に強化
             if is_breaking_high:
-                long_score += 0.15 
+                long_score += 0.20 
             elif is_breaking_low:
-                short_score += 0.15
-
+                short_score += 0.20
+        
+        # ★追加: H. 複合モメンタム加速ボーナス
+        momentum_bonus = 0.0
+        if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
+             momentum_bonus = 0.10
+             long_score += momentum_bonus
+        elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
+             momentum_bonus = 0.10
+             short_score += momentum_bonus
         
         # 最終スコア決定 (この時点での中間スコア)
         if long_score > short_score:
@@ -585,10 +597,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             side = "Neutral"
             base_score = 0.5
         
-        score = base_score
+        # スコアを最終的に 1.0 でキャップ
+        score = min(1.0, base_score) 
         
         # ----------------------------------------------------------------------
-        # H. Stochastic RSIに基づくエントリー確証/フィルタリング 
+        # I. Stochastic RSIに基づくエントリー確証/フィルタリング (0.05で維持)
         # ----------------------------------------------------------------------
         stoch_filter_penalty = 0.0
         if timeframe in ['15m', '1h']:
@@ -606,7 +619,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = max(0.5, score - stoch_filter_penalty) 
 
         # ----------------------------------------------------------------------
-        # I. 出来高に基づくシグナル確証
+        # J. 出来高に基づくシグナル確証 (0.05 * 2 = 0.10で維持)
         # ----------------------------------------------------------------------
         volume_confirmation_bonus = 0.0
         if current_volume > average_volume * VOLUME_CONFIRMATION_MULTIPLIER: 
@@ -651,12 +664,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         bb_mid = df['BBM_20_2.0'].iloc[-1] if 'BBM_20_2.0' in df.columns else price
         dc_mid = (df['DCU_20'].iloc[-1] + df['DCL_20'].iloc[-1]) / 2 if dc_cols_present else price
         
-        entry = price # Neutral時の参照用
+        entry = price 
         tp1 = 0
         sl = 0
-        entry_type = "N/A" # ★初期化
+        entry_type = "N/A"
 
-        # ★修正: エントリーモードの決定
+        # エントリーモードの決定
         is_high_conviction = score >= 0.70
         is_strong_trend = adx_val >= 30 
         
@@ -666,15 +679,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         if final_side == "ロング":
             if use_market_entry:
-                # Market Entry: 現在価格をそのまま使用
                 entry = price
             else:
-                # Limit Entry: 優位性のある価格（BB/DC中央値の低い方）を狙う
                 optimal_entry = min(bb_mid, dc_mid) 
-                # 現在価格より上には指値しないよう、安全のために現在価格を上限とする（エントリー価格の精査）
                 entry = min(optimal_entry, price) 
                 
-                # ただし、乖離が大きすぎる場合は、Marketでエントリーした方が良い可能性が高い (SL幅の50%を基準)
+                # 乖離が大きすぎる場合の Market Fallback (SL幅の50%を基準)
                 if price - entry > sl_dist * 0.5: 
                     entry = price
                     entry_type = "Market (Fallback)"
@@ -686,15 +696,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         elif final_side == "ショート":
             if use_market_entry:
-                # Market Entry: 現在価格をそのまま使用
                 entry = price
             else:
-                # Limit Entry: 優位性のある価格（BB/DC中央値の高い方）を狙う
                 optimal_entry = max(bb_mid, dc_mid)
-                # 現在価格より下には指値しないよう、安全のために現在価格を下限とする（エントリー価格の精査）
                 entry = max(optimal_entry, price) 
                 
-                # ただし、乖離が大きすぎる場合は、Marketに切り替え (SL幅の50%を基準)
+                # 乖離が大きすぎる場合の Market Fallback (SL幅の50%を基準)
                 if entry - price > sl_dist * 0.5: 
                     entry = price
                     entry_type = "Market (Fallback)"
@@ -772,7 +779,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "timeframe": timeframe,
         "tech_data": tech_data,
         "volatility_penalty_applied": tech_data['bb_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD,
-        "entry_type": entry_type # ★追加
+        "entry_type": entry_type
     }
     
     return signal_candidate
@@ -957,11 +964,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.29-Dynamic Entry (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.30-Clear Score Differentiation (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.29 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.30 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -975,7 +982,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.29-Dynamic Entry (Full Integrated)",
+        "bot_version": "v12.1.30-Clear Score Differentiation (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -986,7 +993,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.29, Dynamic Entry)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.30, Clear Score Differentiation)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
