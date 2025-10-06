@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v12.1.12 - Keltner Channel Column Fix
+# Apex BOT v12.1.13 - Keltner Channel Robustness Fix
 # 
 # 修正点:
-# - v12.1.11のKeltner Channel (KC) 導入により発生したKeyError ('KCU_20_2.0') を修正。
-# - KC_MULTIPLIERを2.0 (float) から 2 (int) に変更し、pandas_taが生成する列名と一致させる。
+# - v12.1.12で発生したKeltner Channel (KC) の最新足がNaNになる問題を解決。
+# - KCデータ取得ロジックを堅牢化し、最新足がNaNの場合は前足のKC値を使用してエントリー最適化を続行する。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -70,7 +70,7 @@ SHORT_TERM_SL_MULTIPLIER = 1.5
 
 # V12.1.12 FIX: Keltner Channel (KC) の定数
 KC_LENGTH = 20
-KC_MULTIPLIER = 2 # 🚨 2.0から2に修正 (pandas_taの列名問題を解消)
+KC_MULTIPLIER = 2 
 KC_FILTER_PENALTY = 0.04 # KCミドルラインと逆行する場合のペナルティ
 
 # エントリーポジション最適化のための定数
@@ -309,7 +309,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.12 - KC Column Fix |\n" # <-- バージョン変更
+        f"| ⚙️ **BOT Ver** | v12.1.13 - KC Robustness Fix |\n" # <-- バージョン変更
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -423,7 +423,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.12: KC列名修正を適用)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.13: KC列データ堅牢化を適用)
     """
     
     # 1. データ取得
@@ -477,7 +477,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
         
         # V12.1.11 NEW: Keltner Channel (KC) の計算 
-        # KC_MULTIPLIERを2にしたため、列名は 'KCU_20_2' となる
         df.ta.kc(length=KC_LENGTH, scalar=KC_MULTIPLIER, append=True)
         
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -517,19 +516,36 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
-        # V12.1.12 FIX: KC指標値の抽出 (KC_MULTIPLIERを2にしたことによる列名変更)
+        # =========================================================================
+        # V12.1.13 NEW: KC指標値の抽出 (堅牢化)
+        # =========================================================================
         kc_upper_name = f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCU_20_2
         kc_lower_name = f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCL_20_2
         kc_mid_name = f'KCM_{KC_LENGTH}_{KC_MULTIPLIER}'   # 例: KCM_20_2
+
+        kc_upper, kc_lower, kc_mid = 0, 0, 0
+        kc_data_is_valid = False
         
-        if kc_upper_name not in df.columns or pd.isna(df[kc_upper_name].iloc[-1]):
-             # データがない場合はエラーにせず0を設定し、KCロジックを無効化
-             kc_upper, kc_lower, kc_mid = 0, 0, 0
-             logging.warning(f"⚠️ {symbol} ({timeframe}) のKeltner Channel列データがNaNまたは不足しています。代替処理を使用します。")
-        else:
-             kc_upper = df[kc_upper_name].iloc[-1]
-             kc_lower = df[kc_lower_name].iloc[-1]
-             kc_mid = df[kc_mid_name].iloc[-1]
+        if kc_upper_name in df.columns:
+            # 最後に有効なKC値を見つける (最新の2バーをチェック)
+            # i=1: 最新足, i=2: 前足
+            for i in range(1, 3): 
+                # データフレームの長さがi以上であり、かつi番目のインデックスの値がNaNでないことを確認
+                if len(df) >= i and not pd.isna(df[kc_upper_name].iloc[-i]):
+                    kc_upper = df[kc_upper_name].iloc[-i]
+                    kc_lower = df[kc_lower_name].iloc[-i]
+                    kc_mid = df[kc_mid_name].iloc[-i]
+                    kc_data_is_valid = True
+                    
+                    if i > 1:
+                        logging.warning(f"⚠️ {symbol} ({timeframe}) のKeltner Channelデータ ({kc_upper_name}) が最新足でNaNでした。前足の値を使用します。")
+                        
+                    break 
+                    
+        if not kc_data_is_valid:
+            # 2本前の足までNaNの場合、KCベースのロジックは無効
+            logging.warning(f"⚠️ {symbol} ({timeframe}) のKeltner Channel列データがNaNまたは不足しています。代替処理を使用します。")
+        # =========================================================================
         
         # ----------------------------------------------------
         # 2. 動的シグナル判断ロジック (Granular Scoring)
@@ -620,7 +636,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                     vwap_conf_status = "Contradictory"
 
         # I. Keltner Channelによるトレンド/レンジフィルタリング
-        if kc_upper > 0 and kc_lower > 0 and kc_mid > 0: # KCデータが有効な場合のみ実行
+        # kc_upper > 0 のチェックは、V12.1.13のデータ堅牢化ロジックによって保証される
+        if kc_upper > 0: 
             if price > kc_upper: # 強力なロングトレンドブレイクアウト
                 long_score += 0.05
                 kc_filter_status = "Upper_Breakout"
@@ -687,7 +704,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
         tp_dist = sl_dist * rr_base_ratio 
         
-        # V12.1.11 NEW: エントリー価格をKCミドルライン付近に最適化 (プルバックを利用)
+        # エントリー価格をKCミドルライン付近に最適化 (プルバックを利用)
         if kc_mid is not None and kc_mid > 0:
             if side == "ロング":
                 # エントリーは現在価格とKCミドルラインの中間、またはKCミドルラインに設定 (プルバック狙い)
@@ -771,7 +788,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         tech_data = tech_data_defaults 
 
     except Exception as e:
-        # 予期せぬエラー発生時（例: ここでKc列のアクセスエラーを捕捉しないように、上部でエラー処理を分離）
+        # 予期せぬエラー発生時
         logging.error(f"❌ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。", exc_info=True)
         final_side = "Neutral"
         score = BASE_SCORE
@@ -965,11 +982,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.12-KC_COLUMN_FIX (Full Integrated)") # <-- バージョン変更
+app = FastAPI(title="Apex BOT API", version="v12.1.13-KC_ROBUSTNESS_FIX (Full Integrated)") # <-- バージョン変更
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.12 Startup initializing...") # <-- バージョン変更
+    logging.info("🚀 Apex BOT v12.1.13 Startup initializing...") # <-- バージョン変更
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -983,7 +1000,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.12-KC_COLUMN_FIX (Full Integrated)", # <-- バージョン変更
+        "bot_version": "v12.1.13-KC_ROBUSTNESS_FIX (Full Integrated)", # <-- バージョン変更
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -994,7 +1011,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.12, Full Integrated, KC Column Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.13, Full Integrated, KC Robustness Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
