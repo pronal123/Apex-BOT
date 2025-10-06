@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.1.36 - 100 Point Scaling & Win Rate Emphasis
-# - 最終スコアを 100点満点 (XX.XX / 100.00点) に換算。
-# - MACD/DCブレイクアウトの寄与度を微調整し、100点到達を極めて困難に。
-# - 通知メッセージで予測勝率をより分かりやすく強調。
+# Apex BOT v12.1.37 - Enhanced Win Rate via Diverse Analysis (CMF & RVI)
+# - 最終スコアを 100点満点 (XX.XX / 100.00点) に換算し、最高点を厳密化。
+# - Chaikin Money Flow (CMF) を導入し、流動性による確証を追加。
+# - Relative Vigor Index (RVI) を導入し、モメンタムの活力を多角的に判定し、過熱感ペナルティを強化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -75,6 +75,11 @@ RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
 BASE_SCORE = 0.50 # 初期スコアは0.50を維持
 VOLUME_CONFIRMATION_MULTIPLIER = 1.5 
+
+# RVI / CMF 向け追加定数 (v12.1.37 NEW)
+CMF_THRESHOLD = 0.10 
+RVI_OVERHEAT_HIGH = 80
+RVI_OVERHEAT_LOW = 20
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -181,9 +186,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     sl_price = best_signal.get('sl', 0.0)
     entry_type = best_signal.get('entry_type', 'N/A') 
 
-    # ★変更点 1: 100点満点に換算
+    # 100点満点に換算
     score_100 = score_raw * 100
-    # ★変更点 3: 予測勝率を強調表示
+    # 予測勝率を強調表示
     win_rate = get_estimated_win_rate(score_raw, timeframe) * 100
     
     # OKX形式のシンボル (BTC-USDT) を標準形式 (BTC/USDT) に戻して表示
@@ -210,9 +215,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
         f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}\n" 
         f"==================================\n"
-        # ★変更点 3: 勝率を強調
         f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件良好** |\n"
-        # ★変更点 1: 100点満点表示
         f"| 💯 **分析スコア** | <b>{score_100:.2f} / 100.00 点</b> (ベース: {timeframe}足) |\n" 
         f"| ⏰ **TP 到達目安** | {get_tp_reach_time(timeframe)} | (RRR: 1:{rr_ratio:.2f}) |\n"
         f"==================================\n"
@@ -282,9 +285,16 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                  stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: {stoch_penalty * 100:.2f}点]"
             elif stoch_penalty == 0 and tf in ['15m', '1h']:
                  stoch_text = f" [✅ STOCHRSI 確証]"
+                 
+            # RVI 過熱感ペナルティの適用状態 (v12.1.37 NEW)
+            rvi_penalty = tech_data.get('rvi_overheat_penalty', 0.0)
+            rvi_text = ""
+            if rvi_penalty > 0:
+                 rvi_text = f" [⚠️ RVI 過熱感により減点: {rvi_penalty * 100:.2f}点]"
+
 
             analysis_detail += (
-                f"**[{tf} 足] {score_icon}** ({score_in_100:.2f}点) -> **{s_side}**{penalty_status} {momentum_text} {vwap_text} {stoch_text}\n"
+                f"**[{tf} 足] {score_icon}** ({score_in_100:.2f}点) -> **{s_side}**{penalty_status} {momentum_text} {vwap_text} {stoch_text} {rvi_text}\n"
             )
             
             # 採用された時間軸の技術指標を詳細に表示
@@ -292,10 +302,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 regime = best_signal.get('regime', 'N/A')
                 # ADX/Regime
                 analysis_detail += f"   └ **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({regime})\n"
-                # RSI/MACDH/CCI/STOCH
-                stoch_k = tech_data.get('stoch_k', 0.0)
+                # RSI/MACDH/CCI/RVI
                 analysis_detail += f"   └ **RSI/MACDH/CCI**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f} / {tech_data.get('cci', 0.0):.2f}\n"
-                analysis_detail += f"   └ **STOCHRSI (K)**: {stoch_k:.2f}\n"
+                # STOCH/RVI/CMF
+                cmf_value = tech_data.get('cmf_value', 0.0)
+                cmf_bonus = tech_data.get('cmf_bonus', 0.0)
+                cmf_icon = "🟢" if cmf_bonus > 0 else ("🔴" if cmf_bonus < 0 else "🟡")
+                analysis_detail += f"   └ **STOCHRSI(K)/RVI/CMF**: {tech_data.get('stoch_k', 0.0):.2f} / {tech_data.get('rvi_value', 50.0):.2f} / {cmf_value:.3f}\n"
 
                 # 出来高確証の表示
                 volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
@@ -311,7 +324,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.36 - 100 Point Scaling & Win Rate Emphasis |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.37 - CMF & RVI Diversity |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -424,7 +437,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.36 - 100 Point Scaling)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.37 - CMF & RVI Diversity)
     """
     
     # 1. データ取得
@@ -435,7 +448,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "long_term_trend": long_term_trend, "long_term_reversal_penalty": False, "macd_cross_valid": False,
         "cci": 0.0, "vwap_consistent": False, "ppo_hist": 0.0, "dc_high": 0.0, "dc_low": 0.0,
         "stoch_k": 50.0, "stoch_d": 50.0, "stoch_filter_penalty": 0.0,
-        "volume_confirmation_bonus": 0.0, "current_volume": 0.0, "average_volume": 0.0
+        "volume_confirmation_bonus": 0.0, "current_volume": 0.0, "average_volume": 0.0,
+        "cmf_value": 0.0, "cmf_bonus": 0.0, "rvi_value": 50.0, "rvi_signal": 50.0, "rvi_overheat_penalty": 0.0 # <--- NEW
     }
     
     if status != "Success":
@@ -443,7 +457,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['close'] = pd.to_numeric(df['close'])
-    df['volume'] = pd.to_numeric(df['volume']) # 出来高も数値化
+    df['volume'] = pd.to_numeric(df['volume']) 
 
     # DatetimeIndexを設定してVWAPエラーを解消
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
@@ -462,6 +476,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     PPO_HIST_COL = 'PPOh_12_26_9'   
     STOCHRSI_K = 'STOCHRSIk_14_14_3_3'
     STOCHRSI_D = 'STOCHRSId_14_14_3_3'
+    
+    RVI_VALUE_COL = 'RVI_14' 
+    RVI_SIGNAL_COL = 'RVIs_14'
 
     try:
         # テクニカル指標の計算
@@ -489,11 +506,17 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # Stochastic RSI (STOCHRSI) の計算
         df.ta.stochrsi(append=True)
         
+        # ★NEW 1: CMFの計算
+        df['cmf'] = ta.cmf(df['high'], df['low'], df['close'], df['volume'], length=20)
+        
+        # ★NEW 2: RVIの計算
+        df.ta.rvi(append=True) 
+        
         # ----------------------------------------------------------------------
         # データクリーニング
         # ----------------------------------------------------------------------
         
-        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, STOCHRSI_K, STOCHRSI_D] 
+        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, STOCHRSI_K, STOCHRSI_D, 'cmf', RVI_VALUE_COL, RVI_SIGNAL_COL] 
         
         # 必須列にNaNがある行を削除
         df.dropna(subset=required_cols, inplace=True)
@@ -512,12 +535,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         cci_val = df['cci'].iloc[-1] 
         vwap_val = df['vwap'].iloc[-1] 
         ppo_hist_val = df[PPO_HIST_COL].iloc[-1] 
-        
-        # Stochastic RSI の値を取得
         stoch_k_val = df[STOCHRSI_K].iloc[-1] 
         stoch_d_val = df[STOCHRSI_D].iloc[-1] 
+        cmf_val = df['cmf'].iloc[-1] # <--- NEW
+        rvi_val = df[RVI_VALUE_COL].iloc[-1] # <--- NEW
+        rvi_sig_val = df[RVI_SIGNAL_COL].iloc[-1] # <--- NEW
 
-        # 出来高の取得
         current_volume = df['volume'].iloc[-1]
         average_volume = df['volume'].iloc[-31:-1].mean() if len(df) >= 31 else df['volume'].mean()
 
@@ -534,33 +557,32 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_low_val = df['DCL_20'].iloc[-1]     
             dc_high_val = df['DCU_20'].iloc[-1]
         
-        # A. MACDに基づく方向性
-        # ★変更点 A: 寄与度 0.20 -> 0.18
+        # A. MACDに基づく方向性 (寄与度 0.18)
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
             long_score += 0.18 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
             short_score += 0.18 
 
-        # B. RSIに基づく買われすぎ/売られすぎ (0.10で維持)
+        # B. RSIに基づく買われすぎ/売られすぎ (0.10)
         if rsi_val < RSI_OVERSOLD:
             long_score += 0.10
         elif rsi_val > RSI_OVERBOUGHT:
             short_score += 0.10
             
-        # C. RSIに基づくモメンタムブレイクアウト (0.10で維持)
+        # C. RSIに基づくモメンタムブレイクアウト (0.10)
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
             long_score += 0.10
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
             short_score += 0.10
 
-        # D. ADXに基づくトレンドフォロー強化 (0.08で維持)
+        # D. ADXに基づくトレンドフォロー強化 (0.08)
         if adx_val > ADX_TREND_THRESHOLD:
             if long_score > short_score:
                 long_score += 0.08
             elif short_score > long_score:
                 short_score += 0.08
         
-        # E. VWAPの一致チェック (0.05で維持)
+        # E. VWAPの一致チェック (0.05)
         vwap_consistent = False
         if price > vwap_val:
             long_score += 0.05
@@ -569,36 +591,53 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.05
             vwap_consistent = True
         
-        # F. PPOに基づくモメンタム強度の評価 (0.05で維持)
+        # F. PPOに基づくモメンタム強度の評価 (0.05)
         ppo_abs_mean = df[PPO_HIST_COL].abs().mean()
         if ppo_hist_val > 0 and abs(ppo_hist_val) > ppo_abs_mean:
             long_score += 0.05 
         elif ppo_hist_val < 0 and abs(ppo_hist_val) > ppo_abs_mean:
             short_score += 0.05
 
-        # G. Donchian Channelによるブレイクアウト/過熱感フィルター
+        # G. Donchian Channelによるブレイクアウト/過熱感フィルター (寄与度 0.13)
         is_breaking_high = False
         is_breaking_low = False
         if dc_cols_present: 
             is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
-            # ★変更点 G: 寄与度 0.15 -> 0.13
             if is_breaking_high:
                 long_score += 0.13 
             elif is_breaking_low:
                 short_score += 0.13
         
-        # H. 複合モメンタム加速ボーナス
+        # H. 複合モメンタム加速ボーナス (寄与度 0.07)
         momentum_bonus = 0.0
-        # ★変更点 H: 寄与度 0.08 -> 0.07
         if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
              momentum_bonus = 0.07
              long_score += momentum_bonus
         elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
              momentum_bonus = 0.07
              short_score += momentum_bonus
-        
+             
+        # ----------------------------------------------------------------------
+        # ★NEW K. CMF (Chaikin Money Flow)に基づく流動性フィルター (+0.05)
+        # ----------------------------------------------------------------------
+        cmf_bonus = 0.0
+        if cmf_val > CMF_THRESHOLD:
+            cmf_bonus = 0.05 
+            long_score += cmf_bonus
+        elif cmf_val < -CMF_THRESHOLD:
+            cmf_bonus = 0.05 
+            short_score += cmf_bonus
+            
+        # ----------------------------------------------------------------------
+        # ★NEW L. RVI (Relative Vigor Index)に基づくモメンタム確証 (+0.04)
+        # ----------------------------------------------------------------------
+        if rvi_val > 50 and rvi_val > rvi_sig_val:
+            long_score += 0.04
+        elif rvi_val < 50 and rvi_val < rvi_sig_val:
+            short_score += 0.04
+            
         # 最終スコア決定 (この時点での中間スコア)
         if long_score > short_score:
             side = "ロング"
@@ -610,11 +649,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             side = "Neutral"
             base_score = 0.5
         
-        # スコアを最終的に 1.0 でキャップ (この処理は維持)
+        # スコアを最終的に 1.0 でキャップ
         score = min(1.0, base_score) 
         
         # ----------------------------------------------------------------------
-        # I. Stochastic RSIに基づくエントリー確証/フィルタリング (ペナルティ0.05で維持)
+        # I. Stochastic RSIに基づくエントリー確証/フィルタリング (ペナルティ0.05)
         # ----------------------------------------------------------------------
         stoch_filter_penalty = 0.0
         if timeframe in ['15m', '1h']:
@@ -624,15 +663,24 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_short_confirm = (stoch_k_val > 80 and stoch_d_val > 80) or \
                                (stoch_k_val < stoch_d_val and stoch_k_val > 20)
             
-            if side == "ロング" and not is_long_confirm:
-                stoch_filter_penalty = 0.05 
-            elif side == "ショート" and not is_short_confirm:
+            if (side == "ロング" and not is_long_confirm) or (side == "ショート" and not is_short_confirm):
                 stoch_filter_penalty = 0.05 
                 
             score = max(0.5, score - stoch_filter_penalty) 
+            
+        # ----------------------------------------------------------------------
+        # ★NEW M. RVI 過熱感ペナルティ (-0.05)
+        # ----------------------------------------------------------------------
+        rvi_overheat_penalty = 0.0
+        if timeframe in ['15m', '1h']: # 短期足のみに適用
+            if rvi_val > RVI_OVERHEAT_HIGH or rvi_val < RVI_OVERHEAT_LOW:
+                 rvi_overheat_penalty = 0.05
+                 
+            score = max(0.5, score - rvi_overheat_penalty)
+
 
         # ----------------------------------------------------------------------
-        # J. 出来高に基づくシグナル確証 (ボーナス0.10で維持)
+        # J. 出来高に基づくシグナル確証 (ボーナス0.10)
         # ----------------------------------------------------------------------
         volume_confirmation_bonus = 0.0
         if current_volume > average_volume * VOLUME_CONFIRMATION_MULTIPLIER: 
@@ -648,14 +696,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = min(1.0, score + volume_confirmation_bonus)
 
 
-        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) (ペナルティ0.15で維持)
+        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) (ペナルティ0.15)
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
                 score = max(0.5, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
         
-        # 4. MACDクロス確認と減点 (モメンタム反転チェック) (ペナルティ0.10で維持)
+        # 4. MACDクロス確認と減点 (モメンタム反転チェック) (ペナルティ0.10)
         macd_valid = True
         if timeframe in ['15m', '1h']:
              is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
@@ -675,7 +723,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # ボリンジャーバンドとDonchian Channelのミドル/中央値を取得
         bb_mid = df['BBM_20_2.0'].iloc[-1] if 'BBM_20_2.0' in df.columns else price
-        dc_mid = (df['DCU_20'].iloc[-1] + df['DCL_20'].iloc[-1]) / 2 if dc_cols_present else price
+        dc_mid = (dc_high_val + dc_low_val) / 2
         
         entry = price 
         tp1 = 0
@@ -756,6 +804,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "volume_confirmation_bonus": volume_confirmation_bonus,
             "current_volume": current_volume,
             "average_volume": average_volume,
+            # ★NEW データ
+            "cmf_value": cmf_val,
+            "cmf_bonus": cmf_bonus, 
+            "rvi_value": rvi_val, 
+            "rvi_signal": rvi_sig_val,
+            "rvi_overheat_penalty": rvi_overheat_penalty,
         }
         
     except KeyError as e:
@@ -846,7 +900,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
         is_1h_strong_signal = signal_1h_item['score'] >= 0.70
         is_direction_matched = signal_1h_item['side'] == signal_15m_item['side']
         
-        # 15m足に0.05のボーナススコアを加算 (このボーナスは維持)
+        # 15m足に0.05のボーナススコアを加算
         if is_direction_matched and is_1h_strong_signal:
             signal_15m_item['score'] = min(1.0, signal_15m_item['score'] + 0.05)
             
@@ -905,7 +959,6 @@ async def main_loop():
                     all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
                     
                     # 最高のシグナルからタイブレーク用の優位性データを取得
-                    # スコアの精度を維持
                     best_signals_per_symbol[symbol] = {
                         'score': score, 
                         'all_signals': all_symbol_signals,
@@ -913,7 +966,7 @@ async def main_loop():
                         'rr_ratio': signal.get('rr_ratio', 0.0), 
                         'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
                         'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0),
-                        'symbol': symbol # 最終タイブレークキーとしてシンボル名を追加
+                        'symbol': symbol 
                     }
             
             # スコアが近い銘柄間での厳密な順位付けのため、複合ソートキーを維持
@@ -972,7 +1025,6 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL) 
 
         except Exception as e:
-            # v12.1.32 修正: 構文エラー回避の安全な処理を維持
             error_message = str(e)
             error_name = "Unknown Error"
             
@@ -990,11 +1042,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.36-100 Point Scaling")
+app = FastAPI(title="Apex BOT API", version="v12.1.37-CMF & RVI Diversity")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.36 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.37 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1006,9 +1058,11 @@ async def shutdown_event():
 
 @app.get("/status")
 def get_status():
+    global LAST_SUCCESS_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS
+    
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.36-100 Point Scaling",
+        "bot_version": "v12.1.37-CMF & RVI Diversity",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1019,7 +1073,8 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.36, 100 Point Scaling)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.37, CMF & RVI Diversity)."}, status_code=200)
 
 if __name__ == '__main__':
+    # PORT環境変数が設定されていない場合、8080を使用
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
