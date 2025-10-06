@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v12.1.8 - VWAPトレンド確証版 (フルコード)
+# Apex BOT v12.1.9 - VWAP Index Fix版 (フルコード)
 # 
 # 修正点:
-# - 分析手法として「VWAP (出来高加重平均価格)」を追加し、価格とVWAPの比較による
-#   強力なトレンド確証フィルターとして機能させる。
-# - VWAPとシグナル方向が一致する場合にボーナス、逆行する場合にペナルティを適用。
-# - v12.1.7までの全改善 (CCI/Fisher, Dynamic RRR, OBV, Defensive Reinit) を継承。
+# - v12.1.8で発生した「VWAP requires an ordered DatetimeIndex.」エラーを解消するため、
+#   OHLCVデータをPandas DataFrameに変換する際に、CCXTのタイムスタンプ(ms)から
+#   DatetimeIndexを設定する処理を追加した。
+# - v12.1.8までの全改善 (CCI/Fisher, Dynamic RRR, OBV, VWAPトレンド確証) を継承。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -301,7 +301,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.8 - VWAPトレンド確証版 |\n"
+        f"| ⚙️ **BOT Ver** | v12.1.9 - VWAP Index Fix版 |\n"
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -415,7 +415,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.8: VWAPの追加)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.9: VWAPエラーの修正)
     """
     
     # 1. データ取得
@@ -431,6 +431,13 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": BASE_SCORE, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0}
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    
+    # === V12.1.9 FIX: pandas_taのVWAP計算に必要なDatetimeIndexを設定 ===
+    # CCXTのタイムスタンプはミリ秒なので、unit='ms'を指定
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') 
+    df.set_index('timestamp', inplace=True)
+    # =================================================================
+    
     df['close'] = pd.to_numeric(df['close'])
     df['high'] = pd.to_numeric(df['high'])
     df['low'] = pd.to_numeric(df['low'])
@@ -466,12 +473,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20, c=0.015)
         df['fisher_transform'] = ta.fisher(df['high'], df['low'], length=9)['FISHERT_9_1']
         
-        # V12.1.8: VWAPの追加
+        # V12.1.8: VWAPの追加 (DatetimeIndex設定により正常動作へ)
         vwap_series = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
-        if vwap_series.name and vwap_series.name.startswith('VWAP'):
+        
+        # DatetimeIndex設定により、vwap_seriesは確実にSeriesオブジェクトを返すはず
+        if vwap_series is not None and vwap_series.name and vwap_series.name.startswith('VWAP'):
              df['vwap'] = vwap_series 
-        else: # pandas_taのVWAPがシリーズとして返されない場合のフォールバック
-             df['vwap'] = np.nan # スコアリングロジック内でNaNチェック
+        else:
+             df['vwap'] = np.nan 
+
 
         
         rsi_val = df['rsi'].iloc[-1]
@@ -699,6 +709,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         tech_data = tech_data_defaults 
 
     except Exception as e:
+        # VWAPエラーが解消されていれば、このエラーは減るはず
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = BASE_SCORE
@@ -738,9 +749,13 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
         ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
         
         df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df_4h['close'] = pd.to_numeric(df_4h['close'])
         
         if status_4h == "Success" and len(df_4h) >= LONG_TERM_SMA_LENGTH:
+            
+            # 4h足にもDatetimeIndexを設定 (長期トレンド計算のため)
+            df_4h['timestamp'] = pd.to_datetime(df_4h['timestamp'], unit='ms')
+            df_4h.set_index('timestamp', inplace=True)
+            df_4h['close'] = pd.to_numeric(df_4h['close'])
             
             try:
                 df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
@@ -886,11 +901,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.8-VWAP_CONFIRM (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.9-VWAP_INDEX_FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.8 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.9 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -904,7 +919,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.8-VWAP_CONFIRM (Full Integrated)",
+        "bot_version": "v12.1.9-VWAP_INDEX_FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -915,7 +930,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.8, Full Integrated, VWAP Confirm)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.9, Full Integrated, VWAP Index Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
