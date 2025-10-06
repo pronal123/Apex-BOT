@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v12.1.39 - FINAL (MACD_Hist KeyError Fix)
+# Apex BOT v12.1.40 - FINAL (MACD Cross Fix)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -162,6 +162,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     high_score_signals = [s for s in valid_signals if s.get('score', 0.5) >= SIGNAL_THRESHOLD]
     if not high_score_signals: return "" 
         
+    # 最適なシグナルを選択（スコア、RRR、ADX、ATR逆順でソート）
     best_signal = max(
         high_score_signals, 
         key=lambda s: (s.get('score', 0.5), s.get('rr_ratio', 0.0), s.get('tech_data', {}).get('adx', 0.0), -s.get('tech_data', {}).get('atr_value', 1.0), s.get('symbol', ''))
@@ -330,7 +331,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {main_tech_data.get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.39 - FINAL (MACD Fix) |\n" 
+        f"| ⚙️ **BOT Ver** | v12.1.40 - FINAL (MACD Cross Fix) |\n" 
         f"==================================\n"
         f"\n<pre>※ 投資判断は自己責任でお願いします。</pre>"
     )
@@ -444,19 +445,19 @@ async def get_crypto_macro_context() -> Dict:
 
 
 # ====================================================================================
-# CORE ANALYSIS LOGIC (ERROR FIXES APPLIED)
+# CORE ANALYSIS LOGIC (MACD_Hist ERROR FIX APPLIED)
 # ====================================================================================
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.39 - MACD_Hist KeyError修正済み)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.40 - MACD_HistをMACD/Signalのクロスオーバーで代替)
     """
     
     # 1. データ取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
     
     tech_data_defaults = {
-        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "atr_value": 0.005,
+        "rsi": 50.0, "macd_val": 0.0, "macd_signal_val": 0.0, "adx": 25.0, "atr_value": 0.005, # MACD_HistをMACD/Signalに置き換え
         "long_term_trend": long_term_trend, "long_term_reversal_penalty": False, "macd_cross_valid": True,
         "vwap_consistent": False, "dc_high": 0.0, "dc_low": 0.0,
         "stoch_filter_penalty": 0.0, "rvi_overheat_penalty": 0.0, 
@@ -481,15 +482,16 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     df.set_index('timestamp', inplace=True)
     
-    # 指標列名定数 - MACDヒストグラムの列名を修正
-    MACD_HIST_COL = 'MACDh_12_26_9' # <--- ここを修正
+    # 指標列名定数 - MACDヒストグラムの列名を削除し、MACD/Signalを使用
+    MACD_VAL_COL = 'MACD_12_26_9'       # <--- MACDラインの列名
+    MACD_SIGNAL_COL = 'MACDs_12_26_9'   # <--- シグナルラインの列名
     PPO_HIST_COL = 'PPOh_12_26_9'   
     STOCHRSI_K = 'STOCHRSIk_14_14_3_3'
     RVI_VALUE_COL = 'RVI_14' 
 
     # pandas_taの計算結果から、必要な指標の正確な列名を特定する準備
     REQUIRED_COLS_BASE = [
-        'rsi', MACD_HIST_COL, 'ADX_14', 'ATR_14', 'CCI_14_0.015', 'VWAP', 
+        'rsi', MACD_VAL_COL, MACD_SIGNAL_COL, 'ADX_14', 'ATR_14', 'CCI_14_0.015', 'VWAP', # <--- 修正
         PPO_HIST_COL, STOCHRSI_K, 'cmf', RVI_VALUE_COL, 
         'DCL_20', 'DCU_20', 'BBM_20_2.0', 'RVIs_14' 
     ]
@@ -497,7 +499,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     try:
         # テクニカル指標の計算
         df['rsi'] = ta.rsi(df['close'], length=14)
-        df.ta.macd(append=True)
+        df.ta.macd(append=True) # <- MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9 を生成する
         df.ta.adx(append=True)
         df.ta.bbands(append=True) 
         df.ta.atr(append=True)
@@ -520,8 +522,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         # データの安全な取得 (正確な列名を使用)
         rsi_val = df['rsi'].iloc[-1]
-        macd_hist_val = df[MACD_HIST_COL].iloc[-1] # <--- 修正後の定数を使用
-        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] # <--- 修正後の定数を使用
+        
+        # MACD関連の値を取得
+        macd_val = df[MACD_VAL_COL].iloc[-1]        # <--- MACDライン
+        macd_signal_val = df[MACD_SIGNAL_COL].iloc[-1] # <--- シグナルライン
+        
+        macd_val_prev = df[MACD_VAL_COL].iloc[-2]
+        macd_signal_val_prev = df[MACD_SIGNAL_COL].iloc[-2]
+        
         adx_val = df['ADX_14'].iloc[-1] 
         atr_val = df['ATR_14'].iloc[-1] 
         vwap_val = df['VWAP'].iloc[-1] 
@@ -544,14 +552,19 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         # 2. **動的シグナル判断ロジック (スコアリング)**
         
-        # A. MACDに基づく方向性 (寄与度 0.18)
-        if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
+        # A. MACDに基づく方向性 (寄与度 0.18) - クロスオーバーの方向を使用
+        # MACDがシグナル線より上にあり、かつMACDの傾きがシグナル線より大きい（上昇加速）
+        is_long_trend = (macd_val > macd_signal_val) and (macd_val > macd_val_prev)
+        # MACDがシグナル線より下にあり、かつMACDの傾きがシグナル線より小さい（下降加速）
+        is_short_trend = (macd_val < macd_signal_val) and (macd_val < macd_val_prev)
+        
+        if is_long_trend:
             long_score += SCORE_MACD_DIR
             score_bonuses['macd_dir_bonus'] = SCORE_MACD_DIR
-        elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
+        elif is_short_trend:
             short_score += SCORE_MACD_DIR
             score_bonuses['macd_dir_bonus'] = SCORE_MACD_DIR
-
+            
         # B. RSIに基づく買われすぎ/売られすぎ (0.10)
         if rsi_val < RSI_OVERSOLD:
             long_score += SCORE_RSI_OVERSOLD
@@ -608,10 +621,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score_bonuses['dc_breakout_bonus'] = SCORE_DC_BREAKOUT
         
         # H. 複合モメンタム加速ボーナス (寄与度 0.07)
-        if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
+        # MACD > Signal + PPO > 0 + RSI > 50 で複合モメンタム加速と判定
+        is_macd_long_momentum = macd_val > macd_signal_val
+        is_macd_short_momentum = macd_val < macd_signal_val
+        
+        if is_macd_long_momentum and ppo_hist_val > 0 and rsi_val > 50:
              long_score += SCORE_COMPOSITE_MOMENTUM
              score_bonuses['composite_momentum_bonus'] = SCORE_COMPOSITE_MOMENTUM
-        elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
+        elif is_macd_short_momentum and ppo_hist_val < 0 and rsi_val < 50:
              short_score += SCORE_COMPOSITE_MOMENTUM
              score_bonuses['composite_momentum_bonus'] = SCORE_COMPOSITE_MOMENTUM
              
@@ -676,9 +693,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # 3. 出来高に基づくシグナル確証 (ボーナス0.10)
         volume_confirmation_bonus = 0.0
         if current_volume > average_volume * VOLUME_CONFIRMATION_MULTIPLIER: 
+            # 出来高確認のボーナスを決定
             volume_confirmation_bonus = min(BONUS_VOLUME_CONFIRMATION, 
                                             (0.05 if is_breaking_high or is_breaking_low else 0.0) +
-                                            (0.05 if abs(macd_hist_val) > df[MACD_HIST_COL].abs().mean() else 0.0))
+                                            (0.05 if abs(macd_val - macd_signal_val) > 
+                                                     df[MACD_VAL_COL].sub(df[MACD_SIGNAL_COL]).abs().mean() else 0.0))
+            score += volume_confirmation_bonus
             score_bonuses['volume_confirmation_bonus'] = volume_confirmation_bonus
             
         # 4. 4hトレンドフィルターの適用 (15m, 1hのみ) (ペナルティ0.15)
@@ -692,10 +712,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # 5. MACDクロス確認と減点 (モメンタム反転チェック) (ペナルティ0.10)
         macd_valid = True
         if timeframe in ['15m', '1h']:
-             is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
-                                 (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
+             # 現在のバーでMACDとシグナル線がクロスオーバーしているかを確認 (モメンタムの急激な反転)
+             is_macd_crossing = (macd_val > macd_signal_val and macd_val_prev < macd_signal_val_prev) or \
+                                (macd_val < macd_signal_val and macd_val_prev > macd_signal_val_prev)
              
-             if is_macd_reversing and score >= SIGNAL_THRESHOLD:
+             if is_macd_crossing and score >= SIGNAL_THRESHOLD:
+                 # スコアの高いシグナルがクロスオーバーと同時に発生した場合、一旦減点 (モメンタムの変化)
                  score = max(0.5, score - MACD_CROSS_PENALTY)
                  macd_valid = False
              score_bonuses['macd_cross_valid'] = macd_valid
@@ -764,7 +786,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # 8. tech_dataの構築
         tech_data = {
             "rsi": rsi_val,
-            "macd_hist": macd_hist_val, 
+            "macd_val": macd_val,           # <--- MACDラインを格納
+            "macd_signal_val": macd_signal_val, # <--- シグナルラインを格納
             "adx": adx_val,
             "atr_value": atr_val,
             "long_term_trend": long_term_trend,
@@ -910,9 +933,10 @@ async def main_loop():
                 if symbol not in best_signals_per_symbol or score > best_signals_per_symbol[symbol]['score']:
                     all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
                     
+                    # 最高のスコアを持つシグナルのみを格納する (このシグナル自体は最高の時間軸のもの)
                     best_signals_per_symbol[symbol] = {
                         'score': score, 
-                        'all_signals': all_symbol_signals,
+                        'all_signals': all_symbol_signals, # 全時間軸のシグナルを保持（通知用）
                         'rr_ratio': signal.get('rr_ratio', 0.0), 
                         'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
                         'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0),
@@ -990,11 +1014,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.39-FINAL")
+app = FastAPI(title="Apex BOT API", version="v12.1.40-FINAL")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.39 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.40 Startup initializing...") 
     # バックグラウンドでメインループを実行開始
     asyncio.create_task(main_loop())
 
@@ -1011,7 +1035,7 @@ def get_status():
     
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.39-FINAL (MACD Fix)",
+        "bot_version": "v12.1.40-FINAL (MACD Cross Fix)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1022,9 +1046,10 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.39-FINAL)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.40-FINAL)."}, status_code=200)
 
 if __name__ == '__main__':
     # PORT環境変数が設定されていない場合、8080を使用
     # Render, HerokuなどのPaaS環境での実行を想定
+    # Renderのログに出力されるようにホストとポートを設定
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
