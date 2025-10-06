@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v12.1.26 - 順位決定ロジック最終強化版 (RANKING-ULTRA)
-# - 同順位回避のため、複合ソートキーにシンボル名を最終タイブレークとして追加。
-# - Telegram通知メッセージに動的な順位表示を実装。
-# - STOCHRSI, 出来高確証、各種エラー対策を全て継承。
+# Apex BOT v12.1.28 - 最適エントリーポイント導入版 (Optimal Entry)
+# - エントリー価格をBBミドルバンドとDC中央値に基づいた優位性のある指値（Limit）に設定。
+# - 通知メッセージ内のエントリー記述を修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -188,7 +187,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     direction_emoji = "🚀 **ロング (LONG)**" if side == "ロング" else "💥 **ショート (SHORT)**"
     strength = "高 (HIGH)" if score >= 0.75 else "中 (MEDIUM)"
     
-    # ★順位に応じたヘッダーを動的に生成
+    # 順位に応じたヘッダーを動的に生成
     rank_header = ""
     if rank == 1: rank_header = "🥇 **総合 1 位！**"
     elif rank == 2: rank_header = "🥈 **総合 2 位！**"
@@ -202,7 +201,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
         f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}\n" 
         f"==================================\n"
-        f"| 🥇 **分析スコア** | <b>{int(score * 100)} / 100 点</b> (ベース: {timeframe}足) |\n" # スコアを100点換算
+        f"| 🥇 **分析スコア** | <b>{int(score * 100)} / 100 点</b> (ベース: {timeframe}足) |\n" 
         f"| ⏰ **TP 到達目安** | {get_tp_reach_time(timeframe)} | (RRR: 1:{rr_ratio:.2f}) |\n"
         f"| 📈 **予測勝率** | {get_estimated_win_rate(score, timeframe) * 100:.1f}% |\n"
         f"==================================\n"
@@ -214,7 +213,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
-        f"| ➡️ **Entry (Market)** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (現在価格エントリー) |\n" 
+        # ★修正: エントリーを「Entry (Limit)」に変更
+        f"| ➡️ **Entry (Limit)** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (優位価格指値エントリー) |\n" 
         f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | 最小リスク距離 |\n"
         f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 (RRR: 1:{rr_ratio:.2f}) |\n"
         f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({SHORT_TERM_SL_MULTIPLIER:.1f}xATR) |\n"
@@ -295,7 +295,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.26 - RANKING-ULTRA |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.28 - Optimal Entry |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -408,7 +408,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.26-RANKING-ULTRA)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.28-Optimal Entry)
     """
     
     # 1. データ取得
@@ -459,7 +459,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
-        df.ta.bbands(close='close', length=20, append=True)
+        df.ta.bbands(close='close', length=20, append=True) # BBM_20_2.0 を生成
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20)
         df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
@@ -468,7 +468,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.ppo(append=True) 
         
         # Donchian Channel (期間20で設定)
-        df.ta.donchian(length=20, append=True)
+        df.ta.donchian(length=20, append=True) # DCL_20, DCU_20 を生成
         
         # Stochastic RSI (STOCHRSI) の計算
         df.ta.stochrsi(append=True)
@@ -644,17 +644,38 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             rr_base = SHORT_TERM_MAX_RRR
         
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
-        tp_dist = sl_dist * rr_base 
+        
+        # ボリンジャーバンドとDonchian Channelのミドル/中央値を取得
+        bb_mid = df['BBM_20_2.0'].iloc[-1] if 'BBM_20_2.0' in df.columns else price
+        dc_mid = (df['DCU_20'].iloc[-1] + df['DCL_20'].iloc[-1]) / 2 if dc_cols_present else price
+        
+        entry = price # Neutral時の参照用
+        tp1 = 0
+        sl = 0
 
-        # 価格を修正 (現在価格エントリーに統一)
+        # ★修正: エントリー価格を優位性のあるテクニカルポイントに設定
         if side == "ロング":
-            entry = price 
+            # 押し目買いを狙うため、ミドルバンドとDC中央値の「低い方」をエントリー価格とする
+            optimal_entry = min(bb_mid, dc_mid) 
+            # 極端に現在価格から離れすぎないよう、価格の0.05%分を許容幅とする
+            entry = max(optimal_entry, price * 0.9995) 
+
+            # SL/TPはエントリー価格から計算し、RRRを維持
             sl = entry - sl_dist
+            tp_dist = sl_dist * rr_base 
             tp1 = entry + tp_dist
+
         elif side == "ショート":
-            entry = price 
+            # 戻り売りを狙うため、ミドルバンドとDC中央値の「高い方」をエントリー価格とする
+            optimal_entry = max(bb_mid, dc_mid)
+            # 極端に現在価格から離れすぎないよう、価格の0.05%分を許容幅とする
+            entry = min(optimal_entry, price * 1.0005) 
+            
+            # SL/TPはエントリー価格から計算し、RRRを維持
             sl = entry + sl_dist
+            tp_dist = sl_dist * rr_base 
             tp1 = entry - tp_dist
+            
         else:
             entry, sl, tp1, rr_base = price, 0, 0, 0
         
@@ -835,14 +856,14 @@ async def main_loop():
                     best_signals_per_symbol[symbol] = {
                         'score': score, 
                         'all_signals': all_symbol_signals,
-                        # ★順位決定のための補助キー (RRR, ADX, ATR)
+                        # 順位決定のための補助キー (RRR, ADX, ATR)
                         'rr_ratio': signal.get('rr_ratio', 0.0), 
                         'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
                         'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0),
-                        'symbol': symbol # ★最終タイブレークキーとしてシンボル名を追加
+                        'symbol': symbol # 最終タイブレークキーとしてシンボル名を追加
                     }
             
-            # ★修正: 複合ソートキーにシンボル名を追加し、完全に一意の順位を生成
+            # 複合ソートキーにシンボル名を追加し、完全に一意の順位を生成
             sorted_best_signals = sorted(
                 best_signals_per_symbol.values(), 
                 key=lambda x: (
@@ -872,7 +893,7 @@ async def main_loop():
                     
                     if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                         
-                        # ★修正: 順位 (i + 1) を渡してメッセージ生成
+                        # 順位 (i + 1) を渡してメッセージ生成
                         msg = format_integrated_analysis_message(symbol, item['all_signals'], i + 1)
                         
                         if msg:
@@ -904,11 +925,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.26-RANKING-ULTRA (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.28-Optimal Entry (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.26 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.28 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -922,7 +943,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.26-RANKING-ULTRA (Full Integrated)",
+        "bot_version": "v12.1.28-Optimal Entry (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -933,7 +954,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.26, RANKING-ULTRA)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.28, Optimal Entry)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
