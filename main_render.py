@@ -1,10 +1,10 @@
 # ====================================================================================
-# Apex BOT v12.1.24 - Donchian Channel 安定化修正版 (DC-FIX)
-# - Donchian Channel (DCL_20, DCU_20) の Key Error を完全に解消。
-# - 堅牢性を向上し、分析サイクルの中断を防止。
+# Apex BOT v12.1.24 - 順位決定ロジック強化版 (RANKING-FIX)
+# - Donchian Channel (DCL_20, DCU_20) の Key Error を完全に解消 (v12.1.24-DC-FIX相当)。
+# - スコア同点の場合に、RRR, ADX, ATRに基づき順位付けを行い、同順位を排除。
 # ====================================================================================
 
-# 1. 必要なライブラリをインポート (変更なし)
+# 1. 必要なライブラリをインポート
 import os
 import time
 import logging
@@ -25,11 +25,11 @@ from dotenv import load_dotenv
 import sys 
 import random 
 
-# .envファイルから環境変数を読み込む (変更なし)
+# .envファイルから環境変数を読み込む
 load_dotenv()
 
 # ====================================================================================
-# CONFIG & CONSTANTS (変更なし)
+# CONFIG & CONSTANTS
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
@@ -74,7 +74,7 @@ RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
 BASE_SCORE = 0.55  
 
-# グローバル状態変数 (変更なし)
+# グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
 LAST_UPDATE_TIME: float = 0.0
@@ -84,7 +84,7 @@ LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_SUCCESS_TIME: float = 0.0
 LAST_SUCCESSFUL_MONITOR_SYMBOLS: List[str] = CURRENT_MONITOR_SYMBOLS.copy()
 
-# ロギング設定 (変更なし)
+# ロギング設定
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
@@ -93,7 +93,7 @@ logging.basicConfig(level=logging.INFO,
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # ====================================================================================
-# UTILITIES & FORMATTING (変更なし - バージョン情報のみ更新)
+# UTILITIES & FORMATTING
 # ====================================================================================
 
 def get_tp_reach_time(timeframe: str) -> str:
@@ -139,7 +139,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (バージョン情報のみ更新)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する
     """
     
     # 有効なシグナル（エラーやNeutralではない）のみを抽出
@@ -157,7 +157,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     best_signal = max(high_score_signals, key=lambda s: s.get('score', 0.5))
     
     # 主要な取引情報を抽出
-    # ... (抽出ロジックは変更なし)
     price = best_signal.get('price', 0.0)
     timeframe = best_signal.get('timeframe', 'N/A')
     side = best_signal.get('side', 'N/A').upper()
@@ -261,7 +260,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.24 - DC-FIX |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.24 - RANKING-FIX |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -270,7 +269,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
 
 
 # ====================================================================================
-# CCXT & DATA ACQUISITION (変更なし)
+# CCXT & DATA ACQUISITION
 # ====================================================================================
 
 async def initialize_ccxt_client():
@@ -374,7 +373,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (FIXED v12.1.24)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.24-RANKING-FIX)
     """
     
     # 1. データ取得
@@ -432,8 +431,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.donchian(length=20, append=True)
         
         # ----------------------------------------------------------------------
-        # ★修正1: Donchian ChannelのKeyError対策
-        # DCL_20, DCU_20を必須のdropna対象から外し、存在する場合のみ処理
+        # ★ Donchian ChannelのKeyError対策: 必須のdropna対象からDC関連を除外
         # ----------------------------------------------------------------------
         
         required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL]
@@ -459,8 +457,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         short_score = 0.5
         
         # ----------------------------------------------------------------------
-        # ★修正2: Donchian Channelの値の安全な取得
-        # 存在しない場合、dc_high_val/dc_low_valを現在価格に設定し、ブレイクアウトルールを無効化する
+        # ★ Donchian Channelの値の安全な取得
         # ----------------------------------------------------------------------
         dc_low_val = price 
         dc_high_val = price
@@ -470,32 +467,32 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_low_val = df['DCL_20'].iloc[-1]     
             dc_high_val = df['DCU_20'].iloc[-1]
         
-        # A. MACDに基づく方向性 (変更なし)
+        # A. MACDに基づく方向性
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
             long_score += 0.20 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
             short_score += 0.20 
 
-        # B. RSIに基づく買われすぎ/売られすぎ (変更なし)
+        # B. RSIに基づく買われすぎ/売られすぎ
         if rsi_val < RSI_OVERSOLD:
             long_score += 0.10
         elif rsi_val > RSI_OVERBOUGHT:
             short_score += 0.10
             
-        # C. RSIに基づくモメンタムブレイクアウト (変更なし)
+        # C. RSIに基づくモメンタムブレイクアウト
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
             long_score += 0.10
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
             short_score += 0.10
 
-        # D. ADXに基づくトレンドフォロー強化 (変更なし)
+        # D. ADXに基づくトレンドフォロー強化
         if adx_val > ADX_TREND_THRESHOLD:
             if long_score > short_score:
                 long_score += 0.05
             elif short_score > long_score:
                 short_score += 0.05
         
-        # E. VWAPの一致チェック (変更なし)
+        # E. VWAPの一致チェック
         vwap_consistent = False
         if price > vwap_val:
             long_score += 0.05
@@ -504,7 +501,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.05
             vwap_consistent = True
         
-        # F. PPOに基づくモメンタム強度の評価 (変更なし)
+        # F. PPOに基づくモメンタム強度の評価
         ppo_abs_mean = df[PPO_HIST_COL].abs().mean()
         if ppo_hist_val > 0 and abs(ppo_hist_val) > ppo_abs_mean:
             long_score += 0.05 
@@ -512,7 +509,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.05
 
         # G. Donchian Channelによるブレイクアウト/過熱感フィルター
-        if dc_cols_present: # ★修正2: DC列が存在する場合のみ実行
+        if dc_cols_present: # DC列が存在する場合のみ実行
             is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
@@ -522,7 +519,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                 short_score += 0.15
 
         
-        # 最終スコア決定 (変更なし)
+        # 最終スコア決定
         if long_score > short_score:
             side = "ロング"
             base_score = long_score
@@ -535,14 +532,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         score = base_score
         
-        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) (変更なし)
+        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ)
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
                 score = max(0.5, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
         
-        # 4. MACDクロス確認と減点 (モメンタム反転チェック) (変更なし)
+        # 4. MACDクロス確認と減点 (モメンタム反転チェック)
         if timeframe in ['15m', '1h']:
              # MACDヒストグラムがクロス直後に方向転換していないかチェック (モメンタム反転)
              is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
@@ -555,7 +552,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
              else:
                  macd_valid = True
         
-        # 5. TP/SLとRRRの決定 (ATRに基づく動的計算) (変更なし)
+        # 5. TP/SLとRRRの決定 (ATRに基づく動的計算)
         rr_base = SHORT_TERM_BASE_RRR 
         if (timeframe != '4h') and (side == long_term_trend and long_term_trend != "Neutral"):
             rr_base = SHORT_TERM_MAX_RRR
@@ -575,12 +572,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         else:
             entry, sl, tp1, rr_base = price, 0, 0, 0
         
-        # 6. 最終的なサイドの決定 (変更なし)
+        # 6. 最終的なサイドの決定
         final_side = side
         if score < SIGNAL_THRESHOLD or score < (1.0 - SIGNAL_THRESHOLD):
              final_side = "Neutral"
 
-        # 7. tech_dataの構築 (変更なし)
+        # 7. tech_dataの構築
         bb_width_pct_val = (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0
 
         tech_data = {
@@ -588,7 +585,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "macd_hist": macd_hist_val, 
             "adx": adx_val,
             "bb_width_pct": bb_width_pct_val,
-            "atr_value": atr_val,
+            "atr_value": atr_val, # ★タイブレークキー用に追加
             "long_term_trend": long_term_trend,
             "long_term_reversal_penalty": current_long_term_penalty_applied,
             "macd_cross_valid": macd_valid,
@@ -600,7 +597,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         }
         
     except KeyError as e:
-        # PPO/DC/MACDなどのKey Errorをキャッチ (変更なし)
+        # PPO/DC/MACDなどのKey Errorをキャッチ
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に致命的な Key Error が発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -608,14 +605,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         tech_data = tech_data_defaults 
 
     except Exception as e:
-        # その他の予期せぬエラーをキャッチ (変更なし)
+        # その他の予期せぬエラーをキャッチ
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
         entry, tp1, sl, rr_base = price, 0, 0, 0 
         tech_data = tech_data_defaults 
         
-    # 8. シグナル辞書を構築 (変更なし)
+    # 8. シグナル辞書を構築
     signal_candidate = {
         "symbol": symbol,
         "side": final_side,
@@ -637,7 +634,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     return signal_candidate
 
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
-    # ... (変更なし)
     
     # 0. 4hトレンドの事前計算
     long_term_trend = 'Neutral'
@@ -668,7 +664,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
         except Exception:
             pass 
             
-    # 1. 各時間軸の分析を並行して実行 (変更なし)
+    # 1. 各時間軸の分析を並行して実行
     tasks = [
         analyze_single_timeframe(symbol, '15m', macro_context, client_name, long_term_trend, False),
         analyze_single_timeframe(symbol, '1h', macro_context, client_name, long_term_trend, False),
@@ -677,7 +673,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     
     results = await asyncio.gather(*tasks)
     
-    # MTF スコアリングブーストロジック (変更なし)
+    # MTF スコアリングブーストロジック
     signal_1h_item = next((r for r in results if r and r.get('timeframe') == '1h'), None)
     signal_15m_item = next((r for r in results if r and r.get('timeframe') == '15m'), None)
 
@@ -700,7 +696,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 
 
 # ====================================================================================
-# TASK SCHEDULER & MAIN LOOP (変更なし)
+# TASK SCHEDULER & MAIN LOOP
 # ====================================================================================
 
 async def main_loop():
@@ -741,15 +737,28 @@ async def main_loop():
                     continue
 
                 if symbol not in best_signals_per_symbol or score > best_signals_per_symbol[symbol]['score']:
+                    # 最初のシグナル、またはより高スコアのシグナルが見つかった場合
                     all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
+                    
+                    # 最高のシグナルからタイブレーク用の優位性データを取得
                     best_signals_per_symbol[symbol] = {
                         'score': score, 
-                        'all_signals': all_symbol_signals
+                        'all_signals': all_symbol_signals,
+                        # ★順位決定のための補助キーを追加
+                        'rr_ratio': signal.get('rr_ratio', 0.0), 
+                        'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
+                        'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0) 
                     }
             
+            # ★修正: ソートキーに優位性（タイブレーク）の要素を追加し、同順位を排除
             sorted_best_signals = sorted(
                 best_signals_per_symbol.values(), 
-                key=lambda x: x['score'], 
+                key=lambda x: (
+                    x['score'],  # 1. スコア（最も重要、高い方が優位）
+                    x['rr_ratio'],  # 2. RRR (高い方が優位)
+                    x['adx_val'],  # 3. ADX (高い方が優位)
+                    -x['atr_val']  # 4. ATR (値が小さい方が優位なのでマイナスを付けて降順ソート)
+                ), 
                 reverse=True
             )
             
@@ -769,6 +778,7 @@ async def main_loop():
                     
                     if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                         
+                        # 統合メッセージ生成
                         msg = format_integrated_analysis_message(symbol, item['all_signals'])
                         
                         if msg:
@@ -797,10 +807,10 @@ async def main_loop():
 
 
 # ====================================================================================
-# FASTAPI SETUP (バージョン情報のみ更新)
+# FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.24-DC-FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.24-RANKING-FIX (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
@@ -818,7 +828,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.24-DC-FIX (Full Integrated)",
+        "bot_version": "v12.1.24-RANKING-FIX (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -829,7 +839,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.24, DC-FIX)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.24, RANKING-FIX)."}, status_code=200)
 
 if __name__ == '__main__':
     # Renderで実行する場合、main_render:appのようにファイル名とインスタンス名を指定
