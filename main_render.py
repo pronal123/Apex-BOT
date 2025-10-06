@@ -1,11 +1,9 @@
 # ====================================================================================
-# Apex BOT v12.1.11 - Keltner Channel & Entry Optimization
+# Apex BOT v12.1.12 - Keltner Channel Column Fix
 # 
 # 修正点:
-# - v12.1.10のVWAP Index Fixを継承。
-# - 新手法としてKeltner Channel (KC) を導入し、ボリンジャーバンドを置き換え。
-# - エントリー価格決定ロジックをKCミドルライン(EMA)ベースのプルバックに最適化。
-# - KCミドルラインの上下でシグナルと逆行する場合、KC_FILTER_PENALTYを適用。
+# - v12.1.11のKeltner Channel (KC) 導入により発生したKeyError ('KCU_20_2.0') を修正。
+# - KC_MULTIPLIERを2.0 (float) から 2 (int) に変更し、pandas_taが生成する列名と一致させる。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -70,13 +68,13 @@ SHORT_TERM_BASE_RRR = 1.5
 SHORT_TERM_MAX_RRR = 2.5            
 SHORT_TERM_SL_MULTIPLIER = 1.5      
 
-# V12.1.11 NEW: Keltner Channel (KC) の定数
+# V12.1.12 FIX: Keltner Channel (KC) の定数
 KC_LENGTH = 20
-KC_MULTIPLIER = 2.0
+KC_MULTIPLIER = 2 # 🚨 2.0から2に修正 (pandas_taの列名問題を解消)
 KC_FILTER_PENALTY = 0.04 # KCミドルラインと逆行する場合のペナルティ
 
 # エントリーポジション最適化のための定数
-ATR_PULLBACK_MULTIPLIER = 0.5 # (KCベースのエントリーに置き換わるが、フォールバック用に残す)       
+ATR_PULLBACK_MULTIPLIER = 0.5 
 
 # スコアリングロジック用の定数 
 RSI_OVERSOLD = 30
@@ -239,7 +237,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         risk_dist = 0.0
 
     trade_plan = (
-        f"**🎯 推奨取引計画 (Keltner Channel最適化エントリー)**\n" # <-- タイトル変更
+        f"**🎯 推奨取引計画 (Keltner Channel最適化エントリー)**\n"
         f"----------------------------------\n"
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
@@ -311,7 +309,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.11 - KC & Entry Optimization |\n" # <-- バージョン変更
+        f"| ⚙️ **BOT Ver** | v12.1.12 - KC Column Fix |\n" # <-- バージョン変更
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -425,16 +423,16 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.11: KCによる最適化を適用)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.12: KC列名修正を適用)
     """
     
     # 1. データ取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
     
     tech_data_defaults = {
-        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "kc_width_pct": 0.0, "atr_value": 0.005, # <-- kc_width_pctに変更
+        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "kc_width_pct": 0.0, "atr_value": 0.005, 
         "cci": 0.0, "fisher_transform": 0.0, "momentum_confirmation_count": 0, "vwap_confirmation_status": "Neutral",
-        "kc_filter_status": "Neutral", # <-- NEW
+        "kc_filter_status": "Neutral",
         "long_term_trend": four_hour_trend_context, "long_term_reversal_penalty": False, "macd_cross_valid": False,
     }
     
@@ -463,7 +461,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     MACD_HIST_COL = 'MACD_Hist' 
     final_side_override = None 
     vwap_conf_status = "Neutral"
-    kc_filter_status = "Neutral" # <-- NEW
+    kc_filter_status = "Neutral"
 
     try:
         # テクニカル指標の計算
@@ -478,7 +476,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
         
-        # V12.1.11 NEW: Keltner Channel (KC) の計算 (BBANDSは削除)
+        # V12.1.11 NEW: Keltner Channel (KC) の計算 
+        # KC_MULTIPLIERを2にしたため、列名は 'KCU_20_2' となる
         df.ta.kc(length=KC_LENGTH, scalar=KC_MULTIPLIER, append=True)
         
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -518,10 +517,19 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
-        # V12.1.11 NEW: KC指標値の抽出
-        kc_upper = df[f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}'].iloc[-1]
-        kc_lower = df[f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}'].iloc[-1]
-        kc_mid = df[f'KCM_{KC_LENGTH}_{KC_MULTIPLIER}'].iloc[-1]
+        # V12.1.12 FIX: KC指標値の抽出 (KC_MULTIPLIERを2にしたことによる列名変更)
+        kc_upper_name = f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCU_20_2
+        kc_lower_name = f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCL_20_2
+        kc_mid_name = f'KCM_{KC_LENGTH}_{KC_MULTIPLIER}'   # 例: KCM_20_2
+        
+        if kc_upper_name not in df.columns or pd.isna(df[kc_upper_name].iloc[-1]):
+             # データがない場合はエラーにせず0を設定し、KCロジックを無効化
+             kc_upper, kc_lower, kc_mid = 0, 0, 0
+             logging.warning(f"⚠️ {symbol} ({timeframe}) のKeltner Channel列データがNaNまたは不足しています。代替処理を使用します。")
+        else:
+             kc_upper = df[kc_upper_name].iloc[-1]
+             kc_lower = df[kc_lower_name].iloc[-1]
+             kc_mid = df[kc_mid_name].iloc[-1]
         
         # ----------------------------------------------------
         # 2. 動的シグナル判断ロジック (Granular Scoring)
@@ -611,8 +619,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                     long_score = max(BASE_SCORE, long_score - VWAP_PENALTY)
                     vwap_conf_status = "Contradictory"
 
-        # I. V12.1.11 NEW: Keltner Channelによるトレンド/レンジフィルタリング
-        if kc_upper > 0 and kc_lower > 0 and kc_mid > 0:
+        # I. Keltner Channelによるトレンド/レンジフィルタリング
+        if kc_upper > 0 and kc_lower > 0 and kc_mid > 0: # KCデータが有効な場合のみ実行
             if price > kc_upper: # 強力なロングトレンドブレイクアウト
                 long_score += 0.05
                 kc_filter_status = "Upper_Breakout"
@@ -627,7 +635,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                 if long_score > short_score:
                     long_score = max(BASE_SCORE, long_score - KC_FILTER_PENALTY) # ミドルライン下でのロングペナルティ
                     kc_filter_status = "Mid_Line_Contradictory"
-                
+        
         # 最終スコア方向の決定
         if long_score > short_score:
             side = "ロング"
@@ -742,14 +750,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "rsi": rsi_val,
             "macd_hist": macd_hist_val, 
             "adx": adx_val,
-            "kc_width_pct": kc_channel_width_pct, # <-- KC幅に変更
+            "kc_width_pct": kc_channel_width_pct,
             "atr_value": atr_val,
             "cci": cci_val,
             "fisher_transform": fisher_val,
             "vwap": vwap_val,
             "momentum_confirmation_count": momentum_confirmation_count, 
             "vwap_confirmation_status": vwap_conf_status,
-            "kc_filter_status": kc_filter_status, # <-- NEW
+            "kc_filter_status": kc_filter_status,
             "long_term_trend": four_hour_trend_context, 
             "long_term_reversal_penalty": current_long_term_penalty_applied,
             "macd_cross_valid": macd_valid,
@@ -763,7 +771,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         tech_data = tech_data_defaults 
 
     except Exception as e:
-        logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
+        # 予期せぬエラー発生時（例: ここでKc列のアクセスエラーを捕捉しないように、上部でエラー処理を分離）
+        logging.error(f"❌ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。", exc_info=True)
         final_side = "Neutral"
         score = BASE_SCORE
         entry, tp1, sl, rr_final = price, 0, 0, 0 
@@ -785,7 +794,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "client": client_used,
         "timeframe": timeframe,
         "tech_data": tech_data,
-        "volatility_penalty_applied": tech_data['kc_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD, # <- KC幅で代替
+        "volatility_penalty_applied": tech_data['kc_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD, 
     }
     
     return signal_candidate
@@ -956,11 +965,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.11-KC_ENTRY_OPT (Full Integrated)") # <-- バージョン変更
+app = FastAPI(title="Apex BOT API", version="v12.1.12-KC_COLUMN_FIX (Full Integrated)") # <-- バージョン変更
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.11 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.12 Startup initializing...") # <-- バージョン変更
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -974,7 +983,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.11-KC_ENTRY_OPT (Full Integrated)", # <-- バージョン変更
+        "bot_version": "v12.1.12-KC_COLUMN_FIX (Full Integrated)", # <-- バージョン変更
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -985,7 +994,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.11, Full Integrated, KC Entry Optimization)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.12, Full Integrated, KC Column Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
