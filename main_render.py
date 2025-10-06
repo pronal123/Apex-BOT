@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.1.33 - Score Strictness & Compound Tie-Break Enhancement
-# - スコア計算とソートにおける浮動小数点精度を維持し、複合タイブレークを強化。
-# - v12.1.32のすべての安定化修正 (SyntaxError, NameError) を含む。
+# Apex BOT v12.1.36 - 100 Point Scaling & Win Rate Emphasis
+# - 最終スコアを 100点満点 (XX.XX / 100.00点) に換算。
+# - MACD/DCブレイクアウトの寄与度を微調整し、100点到達を極めて困難に。
+# - 通知メッセージで予測勝率をより分かりやすく強調。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -53,7 +54,7 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
-SIGNAL_THRESHOLD = 0.65             
+SIGNAL_THRESHOLD = 0.70             
 TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
@@ -61,7 +62,7 @@ VOLATILITY_BB_PENALTY_THRESHOLD = 5.0
 LONG_TERM_SMA_LENGTH = 50           
 LONG_TERM_REVERSAL_PENALTY = 0.15   
 
-MACD_CROSS_PENALTY = 0.08           
+MACD_CROSS_PENALTY = 0.10           
 SHORT_TERM_BASE_RRR = 1.5           
 SHORT_TERM_MAX_RRR = 2.5            
 SHORT_TERM_SL_MULTIPLIER = 1.5      
@@ -72,7 +73,7 @@ RSI_OVERBOUGHT = 70
 RSI_MOMENTUM_LOW = 45 
 RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
-BASE_SCORE = 0.55  
+BASE_SCORE = 0.50 # 初期スコアは0.50を維持
 VOLUME_CONFIRMATION_MULTIPLIER = 1.5 
 
 # グローバル状態変数
@@ -133,8 +134,8 @@ def send_telegram_html(message: str) -> bool:
         return False
 
 def get_estimated_win_rate(score: float, timeframe: str) -> float:
-    """スコアと時間軸に基づき推定勝率を算出する"""
-    # スコアの厳密性を維持するため、floatのまま計算
+    """スコアと時間軸に基づき推定勝率を算出する (0.0 - 1.0 スケールで計算)"""
+    # 0.50を基準に、スコアが 1.0 に近づくにつれて 0.80 に近づくよう調整
     adjusted_rate = 0.50 + (score - 0.50) * 1.5 
     return max(0.40, min(0.80, adjusted_rate))
 
@@ -157,7 +158,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         return "" 
         
     # スコア、RRR、ADX、-ATR、シンボル名の順で最高のシグナルを決定 (main_loopのソートロジックに合わせる)
-    # スコアの浮動小数点精度を維持
     best_signal = max(
         high_score_signals, 
         key=lambda s: (
@@ -173,7 +173,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     price = best_signal.get('price', 0.0)
     timeframe = best_signal.get('timeframe', 'N/A')
     side = best_signal.get('side', 'N/A').upper()
-    score = best_signal.get('score', 0.5)
+    score_raw = best_signal.get('score', 0.5)
     rr_ratio = best_signal.get('rr_ratio', 0.0)
     
     entry_price = best_signal.get('entry', 0.0)
@@ -181,6 +181,10 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     sl_price = best_signal.get('sl', 0.0)
     entry_type = best_signal.get('entry_type', 'N/A') 
 
+    # ★変更点 1: 100点満点に換算
+    score_100 = score_raw * 100
+    # ★変更点 3: 予測勝率を強調表示
+    win_rate = get_estimated_win_rate(score_raw, timeframe) * 100
     
     # OKX形式のシンボル (BTC-USDT) を標準形式 (BTC/USDT) に戻して表示
     display_symbol = symbol.replace('-', '/')
@@ -189,7 +193,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # 1. ヘッダーとエントリー情報の可視化
     # ----------------------------------------------------
     direction_emoji = "🚀 **ロング (LONG)**" if side == "ロング" else "💥 **ショート (SHORT)**"
-    strength = "高 (HIGH)" if score >= 0.75 else "中 (MEDIUM)"
+    strength = "極めて良好 (VERY HIGH)" if score_raw >= 0.85 else ("高 (HIGH)" if score_raw >= 0.75 else "中 (MEDIUM)")
     
     # 順位に応じたヘッダーを動的に生成
     rank_header = ""
@@ -201,14 +205,16 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # リスク幅を計算
     sl_width = abs(entry_price - sl_price)
     
-    # スコアを小数点以下4桁まで表示し、厳密性を強調
+    # スコアを小数点以下2桁まで表示
     header = (
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
         f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}\n" 
         f"==================================\n"
-        f"| 🥇 **分析スコア** | <b>{score:.4f} / 1.0000 点</b> (ベース: {timeframe}足) |\n" 
+        # ★変更点 3: 勝率を強調
+        f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件良好** |\n"
+        # ★変更点 1: 100点満点表示
+        f"| 💯 **分析スコア** | <b>{score_100:.2f} / 100.00 点</b> (ベース: {timeframe}足) |\n" 
         f"| ⏰ **TP 到達目安** | {get_tp_reach_time(timeframe)} | (RRR: 1:{rr_ratio:.2f}) |\n"
-        f"| 📈 **予測勝率** | {get_estimated_win_rate(score, timeframe) * 100:.1f}% |\n"
         f"==================================\n"
     )
 
@@ -240,8 +246,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         s_score = s.get('score', 0.5)
         tech_data = s.get('tech_data', {})
         
-        # スコアの浮動小数点精度を維持
-        score_in_4dp = s_score 
+        # 100点満点に換算して表示
+        score_in_100 = s_score * 100
         
         # 4hトレンドの強調表示
         if tf == '4h':
@@ -250,7 +256,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             
             # 4h分析の詳細セクション
             analysis_detail += (
-                f"🌏 **4h 足** (長期トレンド): **{long_term_trend_4h}** ({score_in_4dp:.4f}点)\n"
+                f"🌏 **4h 足** (長期トレンド): **{long_term_trend_4h}** ({score_in_100:.2f}点)\n"
             )
             
         else:
@@ -273,12 +279,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             stoch_penalty = tech_data.get('stoch_filter_penalty', 0.0)
             stoch_text = ""
             if stoch_penalty > 0:
-                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: {stoch_penalty:.4f}]"
+                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: {stoch_penalty * 100:.2f}点]"
             elif stoch_penalty == 0 and tf in ['15m', '1h']:
                  stoch_text = f" [✅ STOCHRSI 確証]"
 
             analysis_detail += (
-                f"**[{tf} 足] {score_icon}** ({score_in_4dp:.4f}点) -> **{s_side}**{penalty_status} {momentum_text} {vwap_text} {stoch_text}\n"
+                f"**[{tf} 足] {score_icon}** ({score_in_100:.2f}点) -> **{s_side}**{penalty_status} {momentum_text} {vwap_text} {stoch_text}\n"
             )
             
             # 採用された時間軸の技術指標を詳細に表示
@@ -294,7 +300,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 # 出来高確証の表示
                 volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
                 if volume_bonus > 0:
-                    analysis_detail += f"   └ **出来高確証**: ✅ {volume_bonus:.4f}pt ボーナス追加 (出来高: {tech_data.get('current_volume', 0):.0f})\n"
+                    analysis_detail += f"   └ **出来高確証**: ✅ {volume_bonus * 100:.2f}点 ボーナス追加 (出来高: {tech_data.get('current_volume', 0):.0f})\n"
                 else:
                     analysis_detail += f"   └ **出来高確証**: ❌ 確認なし\n"
 
@@ -305,7 +311,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.33 - Compound Tie-Break Fix |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.36 - 100 Point Scaling & Win Rate Emphasis |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -418,7 +424,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.33 - Score Strictness)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.36 - 100 Point Scaling)
     """
     
     # 1. データ取得
@@ -529,11 +535,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_high_val = df['DCU_20'].iloc[-1]
         
         # A. MACDに基づく方向性
-        # スコアリングを 0.20 -> 0.25 に強化
+        # ★変更点 A: 寄与度 0.20 -> 0.18
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
-            long_score += 0.25 
+            long_score += 0.18 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
-            short_score += 0.25 
+            short_score += 0.18 
 
         # B. RSIに基づく買われすぎ/売られすぎ (0.10で維持)
         if rsi_val < RSI_OVERSOLD:
@@ -547,8 +553,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
             short_score += 0.10
 
-        # D. ADXに基づくトレンドフォロー強化
-        # スコアリングを 0.05 -> 0.08 に強化
+        # D. ADXに基づくトレンドフォロー強化 (0.08で維持)
         if adx_val > ADX_TREND_THRESHOLD:
             if long_score > short_score:
                 long_score += 0.08
@@ -578,19 +583,20 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
-            # スコアリングを 0.15 -> 0.20 に強化
+            # ★変更点 G: 寄与度 0.15 -> 0.13
             if is_breaking_high:
-                long_score += 0.20 
+                long_score += 0.13 
             elif is_breaking_low:
-                short_score += 0.20
+                short_score += 0.13
         
         # H. 複合モメンタム加速ボーナス
         momentum_bonus = 0.0
+        # ★変更点 H: 寄与度 0.08 -> 0.07
         if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
-             momentum_bonus = 0.10
+             momentum_bonus = 0.07
              long_score += momentum_bonus
         elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
-             momentum_bonus = 0.10
+             momentum_bonus = 0.07
              short_score += momentum_bonus
         
         # 最終スコア決定 (この時点での中間スコア)
@@ -604,11 +610,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             side = "Neutral"
             base_score = 0.5
         
-        # スコアを最終的に 1.0 でキャップ
+        # スコアを最終的に 1.0 でキャップ (この処理は維持)
         score = min(1.0, base_score) 
         
         # ----------------------------------------------------------------------
-        # I. Stochastic RSIに基づくエントリー確証/フィルタリング
+        # I. Stochastic RSIに基づくエントリー確証/フィルタリング (ペナルティ0.05で維持)
         # ----------------------------------------------------------------------
         stoch_filter_penalty = 0.0
         if timeframe in ['15m', '1h']:
@@ -618,7 +624,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_short_confirm = (stoch_k_val > 80 and stoch_d_val > 80) or \
                                (stoch_k_val < stoch_d_val and stoch_k_val > 20)
             
-            # ペナルティを 0.05 に維持
             if side == "ロング" and not is_long_confirm:
                 stoch_filter_penalty = 0.05 
             elif side == "ショート" and not is_short_confirm:
@@ -627,7 +632,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = max(0.5, score - stoch_filter_penalty) 
 
         # ----------------------------------------------------------------------
-        # J. 出来高に基づくシグナル確証
+        # J. 出来高に基づくシグナル確証 (ボーナス0.10で維持)
         # ----------------------------------------------------------------------
         volume_confirmation_bonus = 0.0
         if current_volume > average_volume * VOLUME_CONFIRMATION_MULTIPLIER: 
@@ -643,14 +648,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = min(1.0, score + volume_confirmation_bonus)
 
 
-        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ)
+        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) (ペナルティ0.15で維持)
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
                 score = max(0.5, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
         
-        # 4. MACDクロス確認と減点 (モメンタム反転チェック)
+        # 4. MACDクロス確認と減点 (モメンタム反転チェック) (ペナルティ0.10で維持)
         macd_valid = True
         if timeframe in ['15m', '1h']:
              is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
@@ -725,7 +730,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # 6. 最終的なサイドの決定
         final_side = side
-        # スコアの精度を維持するため、丸めずにそのまま使用
         if score < SIGNAL_THRESHOLD:
              final_side = "Neutral"
 
@@ -774,7 +778,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     signal_candidate = {
         "symbol": symbol,
         "side": final_side,
-        "score": score, # 精度を維持したスコア
+        "score": score, # 精度を維持したスコア (0.0 - 1.0)
         "confidence": score,
         "price": price,
         "entry": entry,
@@ -842,8 +846,8 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
         is_1h_strong_signal = signal_1h_item['score'] >= 0.70
         is_direction_matched = signal_1h_item['side'] == signal_15m_item['side']
         
+        # 15m足に0.05のボーナススコアを加算 (このボーナスは維持)
         if is_direction_matched and is_1h_strong_signal:
-            # 15m足に0.05のボーナススコアを加算
             signal_15m_item['score'] = min(1.0, signal_15m_item['score'] + 0.05)
             
             
@@ -912,12 +916,8 @@ async def main_loop():
                         'symbol': symbol # 最終タイブレークキーとしてシンボル名を追加
                     }
             
-            # ★スコア厳密化の核心: 複合ソートキー
-            # 1. Score: 浮動小数点精度で最も重要。
-            # 2. RRR: 高い方が優位。
-            # 3. ADX: 高い方がトレンドが強く優位。
-            # 4. -ATR: ATR (ボラティリティ) が低い方が優位なのでマイナスを付けて降順ソート。
-            # 5. Symbol: 完全に一意にするための最終タイブレーク。
+            # スコアが近い銘柄間での厳密な順位付けのため、複合ソートキーを維持
+            # (Score, RRR, ADX, -ATR, Symbol)
             sorted_best_signals = sorted(
                 best_signals_per_symbol.values(), 
                 key=lambda x: (
@@ -930,6 +930,7 @@ async def main_loop():
                 reverse=True
             )
             
+            # SIGNAL_THRESHOLD (0.70) を超えるシグナルのみを抽出
             top_signals_to_notify = [
                 item for item in sorted_best_signals 
                 if item['score'] >= SIGNAL_THRESHOLD
@@ -952,7 +953,7 @@ async def main_loop():
                         
                         if msg:
                             log_symbol = symbol.replace('-', '/')
-                            logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (順位: {i+1}位, スコア: {item['score']:.4f})")
+                            logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (順位: {i+1}位, スコア: {item['score'] * 100:.2f}点)")
                             TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                             
                             task = asyncio.create_task(asyncio.to_thread(lambda m=msg: send_telegram_html(m)))
@@ -989,11 +990,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.33-Compound Tie-Break Fix")
+app = FastAPI(title="Apex BOT API", version="v12.1.36-100 Point Scaling")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.33 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.36 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1007,7 +1008,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.33-Compound Tie-Break Fix",
+        "bot_version": "v12.1.36-100 Point Scaling",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1018,7 +1019,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.33, Compound Tie-Break Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.36, 100 Point Scaling)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
