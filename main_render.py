@@ -1,9 +1,10 @@
 # ====================================================================================
-# Apex BOT v12.1.20 - リクエストLimitの診断強化
+# Apex BOT v12.1.21 - OKX Limit強制取得の試み
 # 
 # 修正点:
-# - v12.1.19で発生した「ログでは400本が期待されるのに250本しか取得されない」問題の診断ログを追加。
-# - CCXTにリクエストするlimit値を明示的にログ出力し、定数ロードの成功を確認する。
+# - v12.1.20で判明した「OKX側でデータ取得が300本に制限される」問題への対処。
+# - REQUIRED_OHLCV_LIMITSを400から500に増量。
+# - fetch_ohlcvにparams={'limit': limit}を追加し、OKX APIへのリクエストLimitを強制。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -58,8 +59,10 @@ TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
 SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 (0.5-1.0, 65点に相当)
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
 
-# V12.1.19 NEW: KC NaNを解消するために取得データを400本に増量 (V12.1.20でも維持)
-REQUIRED_OHLCV_LIMITS = {'15m': 400, '1h': 400, '4h': 400} 
+# V12.1.21 FIX: OKXがリクエストLimitを無視する問題に対応するため、
+# 1. リクエスト数を500に引き上げ、
+# 2. CCXTの内部パラメータ(params)にもlimitを明示的に渡すことで強制取得を試みる。
+REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # (KC導入によりこの定数は事実上不使用)
 
 LONG_TERM_SMA_LENGTH = 50           
@@ -176,6 +179,7 @@ def get_timeframe_eta(timeframe: str) -> str:
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
     3つの時間軸の分析結果を統合し、可視性を強化したメッセージを整形する。
+    (v12.1.21: バージョン情報のみ更新)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -311,7 +315,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.20 - Limit Check Diagnostics |\n" # <-- バージョン変更
+        f"| ⚙️ **BOT Ver** | v12.1.21 - OKX Limit強制取得の試み |\n" # <-- バージョン変更
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -391,18 +395,24 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         return [], "ExchangeError", client_name
 
     try:
-        # V12.1.19: 400本を取得する設定
-        limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 400)
+        # V12.1.21: 500本を取得する設定
+        limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 500)
         
-        # V12.1.20 NEW: 実際に使われるLIMIT値をログ出力し、定数が正しくロードされているか診断
+        # V12.1.20/V12.1.21: 実際に使われるLIMIT値をログ出力
         logging.info(f"⚙️ {symbol} ({timeframe}): CCXTにリクエストするLimit値: {limit} 本") 
         
-        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
+        # V12.1.21 NEW: CCXTにparams={'limit': limit}も明示的に渡す
+        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(
+            symbol, 
+            timeframe, 
+            limit=limit, 
+            params={'limit': limit} # OKXがリクエストLimitを無視する問題への対策
+        )
         
         if not ohlcv or len(ohlcv) < 30: 
             return [], "DataShortage", client_name
             
-        # V12.1.19: 取得したデータ本数をログ出力
+        # 取得したデータ本数をログ出力
         logging.info(f"✅ {symbol} ({timeframe}): OHLCVデータ {len(ohlcv)} 本を取得しました。")
             
         return ohlcv, "Success", client_name
@@ -427,18 +437,17 @@ async def get_crypto_macro_context() -> Dict:
 
 
 # ====================================================================================
-# CORE ANALYSIS LOGIC
+# CORE ANALYSIS LOGIC (v12.1.21: 変更なし)
 # ====================================================================================
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.19: KC NaN回避のため400本データを前提)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.21: 変更なし)
     """
     
-    # 1. データ取得 (変更なし、ログ診断が追加されている)
+    # 1. データ取得 
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
     
-    # ... (以下の分析ロジックはV12.1.19から変更なし) ...
     
     tech_data_defaults = {
         "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "kc_width_pct": 0.0, "atr_value": 0.005, 
@@ -528,7 +537,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
         # =========================================================================
-        # V12.1.19: KC指標値の抽出とデバッグ強化
+        # V12.1.19: KC指標値の抽出とデバッグ強化 (変更なし)
         # =========================================================================
         kc_upper_name = f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCU_20_2
         kc_lower_name = f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCL_20_2
@@ -563,7 +572,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # =========================================================================
         
         # ----------------------------------------------------
-        # 2. 動的シグナル判断ロジック (Granular Scoring)
+        # 2. 動的シグナル判断ロジック (Granular Scoring) (変更なし)
         # ----------------------------------------------------
         long_score = BASE_SCORE 
         short_score = BASE_SCORE 
@@ -892,7 +901,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 
 
 # ====================================================================================
-# TASK SCHEDULER & MAIN LOOP (変更なし)
+# TASK SCHEDULER & MAIN LOOP (v12.1.21: 変更なし)
 # ====================================================================================
 
 async def notify_integrated_analysis(symbol: str, signals: List[Dict], rank: int):
@@ -997,11 +1006,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.20-Limit_Check_Diagnostics (Full Integrated)") # <-- バージョン変更
+app = FastAPI(title="Apex BOT API", version="v12.1.21-OKX_Limit_Force (Full Integrated)") # <-- バージョン変更
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.20 Startup initializing...") # <-- バージョン変更
+    logging.info("🚀 Apex BOT v12.1.21 Startup initializing...") # <-- バージョン変更
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1015,7 +1024,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.20-Limit_Check_Diagnostics (Full Integrated)", # <-- バージョン変更
+        "bot_version": "v12.1.21-OKX_Limit_Force (Full Integrated)", # <-- バージョン変更
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1026,7 +1035,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.20, Full Integrated, Limit Check Diagnostics)."}, status_code=200) # <-- バージョン変更
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.21, Full Integrated, OKX Limit Force)."}, status_code=200) # <-- バージョン変更
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
