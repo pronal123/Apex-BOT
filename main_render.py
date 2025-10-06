@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v12.1.9 - VWAP Index Fix版 (フルコード)
+# Apex BOT v12.1.11 - Keltner Channel & Entry Optimization
 # 
 # 修正点:
-# - v12.1.8で発生した「VWAP requires an ordered DatetimeIndex.」エラーを解消するため、
-#   OHLCVデータをPandas DataFrameに変換する際に、CCXTのタイムスタンプ(ms)から
-#   DatetimeIndexを設定する処理を追加した。
-# - v12.1.8までの全改善 (CCI/Fisher, Dynamic RRR, OBV, VWAPトレンド確証) を継承。
+# - v12.1.10のVWAP Index Fixを継承。
+# - 新手法としてKeltner Channel (KC) を導入し、ボリンジャーバンドを置き換え。
+# - エントリー価格決定ロジックをKCミドルライン(EMA)ベースのプルバックに最適化。
+# - KCミドルラインの上下でシグナルと逆行する場合、KC_FILTER_PENALTYを適用。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -60,7 +60,7 @@ TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
 SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 (0.5-1.0, 65点に相当)
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
 REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
-VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
+VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # (KC導入によりこの定数は事実上不使用)
 
 LONG_TERM_SMA_LENGTH = 50           
 LONG_TERM_REVERSAL_PENALTY = 0.15   
@@ -70,8 +70,13 @@ SHORT_TERM_BASE_RRR = 1.5
 SHORT_TERM_MAX_RRR = 2.5            
 SHORT_TERM_SL_MULTIPLIER = 1.5      
 
+# V12.1.11 NEW: Keltner Channel (KC) の定数
+KC_LENGTH = 20
+KC_MULTIPLIER = 2.0
+KC_FILTER_PENALTY = 0.04 # KCミドルラインと逆行する場合のペナルティ
+
 # エントリーポジション最適化のための定数
-ATR_PULLBACK_MULTIPLIER = 0.5       
+ATR_PULLBACK_MULTIPLIER = 0.5 # (KCベースのエントリーに置き換わるが、フォールバック用に残す)       
 
 # スコアリングロジック用の定数 
 RSI_OVERSOLD = 30
@@ -83,8 +88,8 @@ BASE_SCORE = 0.50  # 基本スコアを0.50に固定
 VOLUME_BONUS = 0.03 # OBVによるボリューム確証ボーナス
 MOMENTUM_CONFIRMATION_BONUS = 0.05 # CCI & Fisherによる強力なモメンタム確証ボーナス
 MOMENTUM_CONTRARY_PENALTY = 0.05 # 逆行オシレーターによるペナルティ
-VWAP_BONUS = 0.05 # V12.1.8: VWAPによるトレンド一致ボーナス
-VWAP_PENALTY = 0.05 # V12.1.8: VWAPトレンド逆行ペナルティ
+VWAP_BONUS = 0.05 # VWAPによるトレンド一致ボーナス
+VWAP_PENALTY = 0.05 # VWAPトレンド逆行ペナルティ
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -234,12 +239,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         risk_dist = 0.0
 
     trade_plan = (
-        f"**🎯 推奨取引計画 (最適化エントリー)**\n"
+        f"**🎯 推奨取引計画 (Keltner Channel最適化エントリー)**\n" # <-- タイトル変更
         f"----------------------------------\n"
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
-        f"| ➡️ **Entry (Limit)** | <code>${format_price_utility(entry_price, symbol)}</code> | **理想的なプルバック** |\n"
+        f"| ➡️ **Entry (Limit)** | <code>${format_price_utility(entry_price, symbol)}</code> | **KCミドルラインへのプルバック** |\n"
         f"| 📉 **Risk (SL幅)** | <code>${format_price_utility(risk_dist, symbol)}</code> | 最小リスク距離 |\n" 
         f"| {color_tag} TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 (RRR: 1:{rr_ratio:.2f}) |\n"
         f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({SHORT_TERM_SL_MULTIPLIER:.1f}xATR) |\n"
@@ -272,17 +277,22 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             if s_side == "Neutral" and convert_score_to_100(s_score_raw + LONG_TERM_REVERSAL_PENALTY) >= SIGNAL_THRESHOLD * 100: 
                  penalty_status += " <b>[⚠️ モメンタム反転により取消]</b>"
             
-            # v12.1.7: モメンタム確証の詳細
+            # V12.1.7: モメンタム確証の詳細
             momentum_conf_count = tech_data.get('momentum_confirmation_count', 0)
             if momentum_conf_count > 0:
                  penalty_status += f" <b>[✅ モメンタム確証: {momentum_conf_count}点]</b>"
             
-            # v12.1.8: VWAP確証の追加
+            # V12.1.8: VWAP確証の追加
             vwap_conf_status = tech_data.get('vwap_confirmation_status', 'Neutral')
             if vwap_conf_status == 'Confirmed':
                  penalty_status += " <b>[🌊 VWAP一致: OK]</b>"
             elif vwap_conf_status == 'Contradictory':
                  penalty_status += " <b>[❌ VWAP逆行: Penalty]</b>"
+                 
+            # V12.1.11: KCミドルライン確証の追加
+            kc_filter_status = tech_data.get('kc_filter_status', 'Neutral')
+            if kc_filter_status == 'Mid_Line_Contradictory':
+                 penalty_status += " <b>[❌ KC逆行: Penalty]</b>"
             
             analysis_detail += (
                 f"**[{tf} 足] {score_icon}** ({s_score_100}点) -> **{s_side}**{penalty_status}\n"
@@ -301,7 +311,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.9 - VWAP Index Fix版 |\n"
+        f"| ⚙️ **BOT Ver** | v12.1.11 - KC & Entry Optimization |\n" # <-- バージョン変更
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -415,15 +425,16 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.9: VWAPエラーの修正)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.11: KCによる最適化を適用)
     """
     
     # 1. データ取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
     
     tech_data_defaults = {
-        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": 0.005,
+        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "kc_width_pct": 0.0, "atr_value": 0.005, # <-- kc_width_pctに変更
         "cci": 0.0, "fisher_transform": 0.0, "momentum_confirmation_count": 0, "vwap_confirmation_status": "Neutral",
+        "kc_filter_status": "Neutral", # <-- NEW
         "long_term_trend": four_hour_trend_context, "long_term_reversal_penalty": False, "macd_cross_valid": False,
     }
     
@@ -432,8 +443,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
-    # === V12.1.9 FIX: pandas_taのVWAP計算に必要なDatetimeIndexを設定 ===
-    # CCXTのタイムスタンプはミリ秒なので、unit='ms'を指定
+    # === V12.1.9/V12.1.10 FIX: pandas_taのVWAP計算に必要なDatetimeIndexを設定 ===
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') 
     df.set_index('timestamp', inplace=True)
     # =================================================================
@@ -453,11 +463,13 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     MACD_HIST_COL = 'MACD_Hist' 
     final_side_override = None 
     vwap_conf_status = "Neutral"
+    kc_filter_status = "Neutral" # <-- NEW
 
     try:
         # テクニカル指標の計算
         df['rsi'] = ta.rsi(df['close'], length=14)
         
+        # MACD
         df['EMA_12'] = ta.ema(df['close'], length=12)
         df['EMA_26'] = ta.ema(df['close'], length=26)
         df['MACD_Line'] = df['EMA_12'] - df['EMA_26']
@@ -465,7 +477,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
-        df.ta.bbands(close='close', length=20, append=True)
+        
+        # V12.1.11 NEW: Keltner Channel (KC) の計算 (BBANDSは削除)
+        df.ta.kc(length=KC_LENGTH, scalar=KC_MULTIPLIER, append=True)
+        
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['obv'] = ta.obv(df['close'], df['volume'])
         
@@ -473,15 +488,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20, c=0.015)
         df['fisher_transform'] = ta.fisher(df['high'], df['low'], length=9)['FISHERT_9_1']
         
-        # V12.1.8: VWAPの追加 (DatetimeIndex設定により正常動作へ)
+        # V12.1.8: VWAPの追加
         vwap_series = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
         
-        # DatetimeIndex設定により、vwap_seriesは確実にSeriesオブジェクトを返すはず
-        if vwap_series is not None and vwap_series.name and vwap_series.name.startswith('VWAP'):
+        # V12.1.10: 確実なPandas Seriesであることを確認する安全チェック
+        if isinstance(vwap_series, pd.Series) and vwap_series.name and vwap_series.name.startswith('VWAP'):
              df['vwap'] = vwap_series 
         else:
+             # VWAPの計算に失敗した場合
              df['vwap'] = np.nan 
-
 
         
         rsi_val = df['rsi'].iloc[-1]
@@ -503,6 +518,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
+        # V12.1.11 NEW: KC指標値の抽出
+        kc_upper = df[f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}'].iloc[-1]
+        kc_lower = df[f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}'].iloc[-1]
+        kc_mid = df[f'KCM_{KC_LENGTH}_{KC_MULTIPLIER}'].iloc[-1]
+        
         # ----------------------------------------------------
         # 2. 動的シグナル判断ロジック (Granular Scoring)
         # ----------------------------------------------------
@@ -510,7 +530,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         short_score = BASE_SCORE 
         momentum_confirmation_count = 0
         
-        # A. MACDに基づく方向性 (ベース + ダイナミックボーナス)
+        # A. MACDに基づく方向性
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
             long_score += 0.10 
             long_score += min(0.05, abs(macd_hist_val) * 10) 
@@ -518,19 +538,19 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.10 
             short_score += min(0.05, abs(macd_hist_val) * 10)
 
-        # B. RSIに基づく買われすぎ/売られすぎ (固定加点)
+        # B. RSIに基づく買われすぎ/売られすぎ
         if rsi_val < RSI_OVERSOLD:
             long_score += 0.05
         elif rsi_val > RSI_OVERBOUGHT:
             short_score += 0.05
             
-        # C. RSIに基づくモメンタムブレイクアウト (固定加点)
+        # C. RSIに基づくモメンタムブレイクアウト
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
             long_score += 0.05
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
             short_score += 0.05
 
-        # D. ADXに基づくトレンドフォロー強化 (ベース + ダイナミックボーナス)
+        # D. ADXに基づくトレンドフォロー強化
         if adx_val > ADX_TREND_THRESHOLD:
             adx_dynamic_bonus = max(0.0, adx_val - ADX_TREND_THRESHOLD) * 0.001 
             adx_total_bonus = 0.02 + adx_dynamic_bonus
@@ -552,7 +572,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         elif obv_val < obv_val_prev:
             short_score += VOLUME_BONUS
             
-        # G. V12.1.7: CCI & Fisher Transformによるモメンタム確証
+        # G. CCI & Fisher Transformによるモメンタム確証
         cci_long_signal = cci_val > 100
         cci_short_signal = cci_val < -100
         fisher_long_signal = fisher_val > 0.5 
@@ -573,25 +593,41 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             if cci_long_signal or fisher_long_signal:
                  short_score = max(BASE_SCORE, short_score - MOMENTUM_CONTRARY_PENALTY)
 
-        # H. V12.1.8: VWAPによるトレンド確証
+        # H. VWAPによるトレンド確証
         if vwap_val is not None and vwap_val > 0:
-            if price > vwap_val: # 価格がVWAPより上 -> 上昇トレンド優勢
+            if price > vwap_val:
                 if long_score > short_score:
-                    long_score += VWAP_BONUS # ロングシグナルと一致
+                    long_score += VWAP_BONUS 
                     vwap_conf_status = "Confirmed"
                 else:
-                    short_score = max(BASE_SCORE, short_score - VWAP_PENALTY) # ショートシグナルと逆行
+                    short_score = max(BASE_SCORE, short_score - VWAP_PENALTY)
                     vwap_conf_status = "Contradictory"
             
-            elif price < vwap_val: # 価格がVWAPより下 -> 下降トレンド優勢
+            elif price < vwap_val:
                 if short_score > long_score:
-                    short_score += VWAP_BONUS # ショートシグナルと一致
+                    short_score += VWAP_BONUS
                     vwap_conf_status = "Confirmed"
                 else:
-                    long_score = max(BASE_SCORE, long_score - VWAP_PENALTY) # ロングシグナルと逆行
+                    long_score = max(BASE_SCORE, long_score - VWAP_PENALTY)
                     vwap_conf_status = "Contradictory"
 
-
+        # I. V12.1.11 NEW: Keltner Channelによるトレンド/レンジフィルタリング
+        if kc_upper > 0 and kc_lower > 0 and kc_mid > 0:
+            if price > kc_upper: # 強力なロングトレンドブレイクアウト
+                long_score += 0.05
+                kc_filter_status = "Upper_Breakout"
+            elif price < kc_lower: # 強力なショートトレンドブレイクアウト
+                short_score += 0.05
+                kc_filter_status = "Lower_Breakout"
+            elif price > kc_mid: # KCミドルラインより上
+                if short_score > long_score:
+                    short_score = max(BASE_SCORE, short_score - KC_FILTER_PENALTY) # ミドルライン上でのショートペナルティ
+                    kc_filter_status = "Mid_Line_Contradictory"
+            elif price < kc_mid: # KCミドルラインより下
+                if long_score > short_score:
+                    long_score = max(BASE_SCORE, long_score - KC_FILTER_PENALTY) # ミドルライン下でのロングペナルティ
+                    kc_filter_status = "Mid_Line_Contradictory"
+                
         # 最終スコア方向の決定
         if long_score > short_score:
             side = "ロング"
@@ -605,14 +641,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         score = base_score_candidate
         
-        # 3. 4hトレンドフィルターの適用
+        # 3. 4hトレンドフィルターの適用 (変更なし)
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and four_hour_trend_context == "Short") or \
                (side == "ショート" and four_hour_trend_context == "Long"):
                 score = max(BASE_SCORE, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
         
-        # 4. MACDクロス確認と減点 + 強制Neutral化ロジック (15mのみ)
+        # 4. MACDクロス確認と減点 + 強制Neutral化ロジック (変更なし)
         if timeframe == '15m':
              is_long_momentum_loss = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev)
              is_short_momentum_loss = (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
@@ -622,14 +658,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
              
              if is_reversing_against_side and score >= SIGNAL_THRESHOLD:
                  score = max(BASE_SCORE, score - MACD_CROSS_PENALTY)
-                 final_side_override = "Neutral" # 強制ニュートラル化
+                 final_side_override = "Neutral"
              else:
                  macd_valid = True
 
-        # 5. TP/SLとRRRの決定 (エントリー価格の最適化 & Dynamic RRR)
+        # 5. TP/SLとRRRの決定 (KCミドルラインに基づくエントリー最適化)
         rr_base_ratio = SHORT_TERM_BASE_RRR
         
-        # 1. ADXによるボラティリティ/トレンドに基づくRRRの基本値決定 (1.5 -> 2.5)
+        # 1. ADXによるボラティリティ/トレンドに基づくRRRの基本値決定
         adx_val_capped = min(adx_val, 50.0)
         adx_normalized = max(0.0, (adx_val_capped - ADX_TREND_THRESHOLD) / (50.0 - ADX_TREND_THRESHOLD)) 
         
@@ -638,19 +674,36 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # 2. 長期トレンドとの一致による追加ブースト
         if (timeframe != '4h') and (side == four_hour_trend_context and four_hour_trend_context != "Neutral"):
-            rr_base_ratio = max(rr_base_ratio, SHORT_TERM_MAX_RRR)
             rr_base_ratio = min(SHORT_TERM_MAX_RRR + 0.5, rr_base_ratio + 0.5) 
             
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
         tp_dist = sl_dist * rr_base_ratio 
-        pullback_dist = atr_val * ATR_PULLBACK_MULTIPLIER 
+        
+        # V12.1.11 NEW: エントリー価格をKCミドルライン付近に最適化 (プルバックを利用)
+        if kc_mid is not None and kc_mid > 0:
+            if side == "ロング":
+                # エントリーは現在価格とKCミドルラインの中間、またはKCミドルラインに設定 (プルバック狙い)
+                entry = max(price * 0.99, (price * 0.5) + (kc_mid * 0.5)) if price > kc_mid else price
+            elif side == "ショート":
+                # エントリーは現在価格とKCミドルラインの中間、またはKCミドルラインに設定 (戻り売り狙い)
+                entry = min(price * 1.01, (price * 0.5) + (kc_mid * 0.5)) if price < kc_mid else price
+            else:
+                entry = price
+        else:
+            # KCが使えない場合、既存のATRプルバックロジックを使用
+            pullback_dist = atr_val * ATR_PULLBACK_MULTIPLIER 
+            if side == "ロング":
+                entry = price - pullback_dist 
+            elif side == "ショート":
+                entry = price + pullback_dist
+            else:
+                entry = price
 
+        # SL/TPの再計算（新しいエントリー価格を使用）
         if side == "ロング":
-            entry = price - pullback_dist 
             sl = entry - sl_dist
             tp1 = entry + tp_dist
         elif side == "ショート":
-            entry = price + pullback_dist
             sl = entry + sl_dist
             tp1 = entry - tp_dist
         else:
@@ -683,19 +736,20 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score += rr_final * 0.005
 
         # 9. tech_dataの構築
-        bb_width_pct_val = (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0
+        kc_channel_width_pct = (kc_upper - kc_lower) / df['close'].iloc[-1] * 100 if kc_upper > 0 and kc_lower > 0 else 0.0
 
         tech_data = {
             "rsi": rsi_val,
             "macd_hist": macd_hist_val, 
             "adx": adx_val,
-            "bb_width_pct": bb_width_pct_val,
+            "kc_width_pct": kc_channel_width_pct, # <-- KC幅に変更
             "atr_value": atr_val,
             "cci": cci_val,
             "fisher_transform": fisher_val,
-            "vwap": vwap_val, # V12.1.8で追加
+            "vwap": vwap_val,
             "momentum_confirmation_count": momentum_confirmation_count, 
-            "vwap_confirmation_status": vwap_conf_status, # V12.1.8で追加
+            "vwap_confirmation_status": vwap_conf_status,
+            "kc_filter_status": kc_filter_status, # <-- NEW
             "long_term_trend": four_hour_trend_context, 
             "long_term_reversal_penalty": current_long_term_penalty_applied,
             "macd_cross_valid": macd_valid,
@@ -709,7 +763,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         tech_data = tech_data_defaults 
 
     except Exception as e:
-        # VWAPエラーが解消されていれば、このエラーは減るはず
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = BASE_SCORE
@@ -732,15 +785,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "client": client_used,
         "timeframe": timeframe,
         "tech_data": tech_data,
-        "volatility_penalty_applied": tech_data['bb_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD,
+        "volatility_penalty_applied": tech_data['kc_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD, # <- KC幅で代替
     }
     
     return signal_candidate
 
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
-    """3つの時間軸のシグナルを統合して生成する (変更なし)"""
+    """3つの時間軸のシグナルを統合して生成する (長期トレンド計算部分にIndex設定)"""
     
-    # 0. 4hトレンドの事前計算 - 最初に必ず初期化する
+    # 0. 4hトレンドの事前計算 - 最初に必ず初期化する (変更なし)
     four_hour_trend_context = 'Neutral' 
     
     try:
@@ -752,9 +805,11 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
         
         if status_4h == "Success" and len(df_4h) >= LONG_TERM_SMA_LENGTH:
             
-            # 4h足にもDatetimeIndexを設定 (長期トレンド計算のため)
+            # === V12.1.9/V12.1.10 FIX: 4h足の長期トレンド計算にもDatetimeIndexを設定 ===
             df_4h['timestamp'] = pd.to_datetime(df_4h['timestamp'], unit='ms')
             df_4h.set_index('timestamp', inplace=True)
+            # =================================================================
+            
             df_4h['close'] = pd.to_numeric(df_4h['close'])
             
             try:
@@ -901,11 +956,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.9-VWAP_INDEX_FIX (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.11-KC_ENTRY_OPT (Full Integrated)") # <-- バージョン変更
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.9 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.11 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -919,7 +974,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.9-VWAP_INDEX_FIX (Full Integrated)",
+        "bot_version": "v12.1.11-KC_ENTRY_OPT (Full Integrated)", # <-- バージョン変更
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -930,7 +985,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.9, Full Integrated, VWAP Index Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.11, Full Integrated, KC Entry Optimization)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
