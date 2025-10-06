@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v12.1.7 - モメンタム確証版 (フルコード)
+# Apex BOT v12.1.8 - VWAPトレンド確証版 (フルコード)
 # 
 # 修正点:
-# - 分析手法として「CCI (Commodity Channel Index)」と「Fisher Transform」を追加。
-# - Granular Scoringでこれら2つの指標による強力なモメンタム確証ボーナス (最大+0.10) を導入。
-# - 多角的な指標の一致を厳格化し、シグナル確度を飛躍的に向上。
-# - v12.1.6までの全改善 (Dynamic RRR, OBV, Defensive Reinit) を継承。
+# - 分析手法として「VWAP (出来高加重平均価格)」を追加し、価格とVWAPの比較による
+#   強力なトレンド確証フィルターとして機能させる。
+# - VWAPとシグナル方向が一致する場合にボーナス、逆行する場合にペナルティを適用。
+# - v12.1.7までの全改善 (CCI/Fisher, Dynamic RRR, OBV, Defensive Reinit) を継承。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -80,9 +80,11 @@ RSI_MOMENTUM_LOW = 45
 RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
 BASE_SCORE = 0.50  # 基本スコアを0.50に固定
-VOLUME_BONUS = 0.03 # OBVによるボリューム確証ボーナス (0.05から調整)
+VOLUME_BONUS = 0.03 # OBVによるボリューム確証ボーナス
 MOMENTUM_CONFIRMATION_BONUS = 0.05 # CCI & Fisherによる強力なモメンタム確証ボーナス
 MOMENTUM_CONTRARY_PENALTY = 0.05 # 逆行オシレーターによるペナルティ
+VWAP_BONUS = 0.05 # V12.1.8: VWAPによるトレンド一致ボーナス
+VWAP_PENALTY = 0.05 # V12.1.8: VWAPトレンド逆行ペナルティ
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -103,7 +105,7 @@ logging.basicConfig(level=logging.INFO,
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # ====================================================================================
-# UTILITIES & FORMATTING
+# UTILITIES & FORMATTING (変更なし)
 # ====================================================================================
 
 def convert_score_to_100(score: float) -> int:
@@ -275,6 +277,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             if momentum_conf_count > 0:
                  penalty_status += f" <b>[✅ モメンタム確証: {momentum_conf_count}点]</b>"
             
+            # v12.1.8: VWAP確証の追加
+            vwap_conf_status = tech_data.get('vwap_confirmation_status', 'Neutral')
+            if vwap_conf_status == 'Confirmed':
+                 penalty_status += " <b>[🌊 VWAP一致: OK]</b>"
+            elif vwap_conf_status == 'Contradictory':
+                 penalty_status += " <b>[❌ VWAP逆行: Penalty]</b>"
+            
             analysis_detail += (
                 f"**[{tf} 足] {score_icon}** ({s_score_100}点) -> **{s_side}**{penalty_status}\n"
             )
@@ -292,7 +301,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.7 - モメンタム確証版 |\n"
+        f"| ⚙️ **BOT Ver** | v12.1.8 - VWAPトレンド確証版 |\n"
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -406,7 +415,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.7: CCI/Fisher Transformを追加)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.8: VWAPの追加)
     """
     
     # 1. データ取得
@@ -414,7 +423,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     tech_data_defaults = {
         "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": 0.005,
-        "cci": 0.0, "fisher_transform": 0.0, "momentum_confirmation_count": 0,
+        "cci": 0.0, "fisher_transform": 0.0, "momentum_confirmation_count": 0, "vwap_confirmation_status": "Neutral",
         "long_term_trend": four_hour_trend_context, "long_term_reversal_penalty": False, "macd_cross_valid": False,
     }
     
@@ -425,6 +434,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     df['close'] = pd.to_numeric(df['close'])
     df['high'] = pd.to_numeric(df['high'])
     df['low'] = pd.to_numeric(df['low'])
+    df['volume'] = pd.to_numeric(df['volume'])
     
     price = df['close'].iloc[-1] if not df.empty else 0.0
     atr_val = price * 0.005 if price > 0 else 0.005 
@@ -435,6 +445,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     current_long_term_penalty_applied = False
     MACD_HIST_COL = 'MACD_Hist' 
     final_side_override = None 
+    vwap_conf_status = "Neutral"
 
     try:
         # テクニカル指標の計算
@@ -451,9 +462,17 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['obv'] = ta.obv(df['close'], df['volume'])
         
-        # V12.1.7: CCIとFisher Transformの追加
+        # V12.1.7: CCIとFisher Transform
         df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20, c=0.015)
         df['fisher_transform'] = ta.fisher(df['high'], df['low'], length=9)['FISHERT_9_1']
+        
+        # V12.1.8: VWAPの追加
+        vwap_series = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
+        if vwap_series.name and vwap_series.name.startswith('VWAP'):
+             df['vwap'] = vwap_series 
+        else: # pandas_taのVWAPがシリーズとして返されない場合のフォールバック
+             df['vwap'] = np.nan # スコアリングロジック内でNaNチェック
+
         
         rsi_val = df['rsi'].iloc[-1]
         
@@ -469,9 +488,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         obv_val = df['obv'].iloc[-1]
         obv_val_prev = df['obv'].iloc[-2]
         
-        # V12.1.7: CCIとFisher値の取得
         cci_val = df['cci'].iloc[-1]
         fisher_val = df['fisher_transform'].iloc[-1]
+        
+        vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
         # ----------------------------------------------------
         # 2. 動的シグナル判断ロジック (Granular Scoring)
@@ -525,10 +545,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # G. V12.1.7: CCI & Fisher Transformによるモメンタム確証
         cci_long_signal = cci_val > 100
         cci_short_signal = cci_val < -100
-        fisher_long_signal = fisher_val > 0.5 # 0.5を閾値とする
-        fisher_short_signal = fisher_val < -0.5 # -0.5を閾値とする
+        fisher_long_signal = fisher_val > 0.5 
+        fisher_short_signal = fisher_val < -0.5 
         
-        # 確証ボーナス (強力なトレンドを示唆する場合)
         if cci_long_signal and fisher_long_signal:
             long_score += MOMENTUM_CONFIRMATION_BONUS
             momentum_confirmation_count += 1
@@ -536,17 +555,33 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += MOMENTUM_CONFIRMATION_BONUS
             momentum_confirmation_count += 1
         
-        # 逆行ペナルティ (主要なモメンタム指標と大きく乖離する場合)
-        # ロングシグナルがMACD優勢だが、CCI/Fisherが強くショートを示唆する場合
+        # 逆行ペナルティ (CCI/Fisher)
         if long_score > short_score:
             if cci_short_signal or fisher_short_signal:
                  long_score = max(BASE_SCORE, long_score - MOMENTUM_CONTRARY_PENALTY)
-        # ショートシグナルがMACD優勢だが、CCI/Fisherが強くロングを示唆する場合
         elif short_score > long_score:
             if cci_long_signal or fisher_long_signal:
                  short_score = max(BASE_SCORE, short_score - MOMENTUM_CONTRARY_PENALTY)
 
-        
+        # H. V12.1.8: VWAPによるトレンド確証
+        if vwap_val is not None and vwap_val > 0:
+            if price > vwap_val: # 価格がVWAPより上 -> 上昇トレンド優勢
+                if long_score > short_score:
+                    long_score += VWAP_BONUS # ロングシグナルと一致
+                    vwap_conf_status = "Confirmed"
+                else:
+                    short_score = max(BASE_SCORE, short_score - VWAP_PENALTY) # ショートシグナルと逆行
+                    vwap_conf_status = "Contradictory"
+            
+            elif price < vwap_val: # 価格がVWAPより下 -> 下降トレンド優勢
+                if short_score > long_score:
+                    short_score += VWAP_BONUS # ショートシグナルと一致
+                    vwap_conf_status = "Confirmed"
+                else:
+                    long_score = max(BASE_SCORE, long_score - VWAP_PENALTY) # ロングシグナルと逆行
+                    vwap_conf_status = "Contradictory"
+
+
         # 最終スコア方向の決定
         if long_score > short_score:
             side = "ロング"
@@ -648,7 +683,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "atr_value": atr_val,
             "cci": cci_val,
             "fisher_transform": fisher_val,
-            "momentum_confirmation_count": momentum_confirmation_count, # シグナル確証の可視化用
+            "vwap": vwap_val, # V12.1.8で追加
+            "momentum_confirmation_count": momentum_confirmation_count, 
+            "vwap_confirmation_status": vwap_conf_status, # V12.1.8で追加
             "long_term_trend": four_hour_trend_context, 
             "long_term_reversal_penalty": current_long_term_penalty_applied,
             "macd_cross_valid": macd_valid,
@@ -849,11 +886,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.7-MOMENTUM_CONFIRM (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.8-VWAP_CONFIRM (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.7 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.8 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -867,7 +904,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.7-MOMENTUM_CONFIRM (Full Integrated)",
+        "bot_version": "v12.1.8-VWAP_CONFIRM (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -878,7 +915,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.7, Full Integrated, Momentum Confirm)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.8, Full Integrated, VWAP Confirm)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
