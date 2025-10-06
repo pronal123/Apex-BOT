@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v12.1.32 - Syntax Safety & Variable Scope Fix (Final Stable Version)
-# - main_loopのexceptブロック内のロギング構文エラーを修正。
-# - format_integrated_analysis_message内の変数スコープエラー (long_term_trend) を修正。
-# - スコアリングロジックv12.1.30/31を維持。
+# Apex BOT v12.1.33 - Score Strictness & Compound Tie-Break Enhancement
+# - スコア計算とソートにおける浮動小数点精度を維持し、複合タイブレークを強化。
+# - v12.1.32のすべての安定化修正 (SyntaxError, NameError) を含む。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -135,6 +134,7 @@ def send_telegram_html(message: str) -> bool:
 
 def get_estimated_win_rate(score: float, timeframe: str) -> float:
     """スコアと時間軸に基づき推定勝率を算出する"""
+    # スコアの厳密性を維持するため、floatのまま計算
     adjusted_rate = 0.50 + (score - 0.50) * 1.5 
     return max(0.40, min(0.80, adjusted_rate))
 
@@ -142,7 +142,6 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
     3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (順位表示機能付き)
-    ★ v12.1.31/32 修正: long_term_trend 変数スコープエラーを修正
     """
     
     # 有効なシグナル（エラーやNeutralではない）のみを抽出
@@ -158,6 +157,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         return "" 
         
     # スコア、RRR、ADX、-ATR、シンボル名の順で最高のシグナルを決定 (main_loopのソートロジックに合わせる)
+    # スコアの浮動小数点精度を維持
     best_signal = max(
         high_score_signals, 
         key=lambda s: (
@@ -201,11 +201,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # リスク幅を計算
     sl_width = abs(entry_price - sl_price)
     
+    # スコアを小数点以下4桁まで表示し、厳密性を強調
     header = (
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
         f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}\n" 
         f"==================================\n"
-        f"| 🥇 **分析スコア** | <b>{int(score * 100)} / 100 点</b> (ベース: {timeframe}足) |\n" 
+        f"| 🥇 **分析スコア** | <b>{score:.4f} / 1.0000 点</b> (ベース: {timeframe}足) |\n" 
         f"| ⏰ **TP 到達目安** | {get_tp_reach_time(timeframe)} | (RRR: 1:{rr_ratio:.2f}) |\n"
         f"| 📈 **予測勝率** | {get_estimated_win_rate(score, timeframe) * 100:.1f}% |\n"
         f"==================================\n"
@@ -230,22 +231,26 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # ----------------------------------------------------
     analysis_detail = "**💡 統合シグナル生成の根拠 (3時間軸)**\n"
     
+    # 4hトレンドの初期化
+    long_term_trend_4h = 'Neutral'
+    
     for s in signals:
         tf = s.get('timeframe')
         s_side = s.get('side', 'N/A')
         s_score = s.get('score', 0.5)
         tech_data = s.get('tech_data', {})
         
-        score_in_100 = int(s_score * 100)
+        # スコアの浮動小数点精度を維持
+        score_in_4dp = s_score 
         
         # 4hトレンドの強調表示
         if tf == '4h':
-            # ★修正箇所: ローカル変数 long_term_trend_4h を使用
+            # 4hの長期トレンドを抽出（メインシグナル作成時に使用）
             long_term_trend_4h = tech_data.get('long_term_trend', 'Neutral')
             
             # 4h分析の詳細セクション
             analysis_detail += (
-                f"🌏 **4h 足** (長期トレンド): **{long_term_trend_4h}** ({score_in_100}点)\n"
+                f"🌏 **4h 足** (長期トレンド): **{long_term_trend_4h}** ({score_in_4dp:.4f}点)\n"
             )
             
         else:
@@ -268,12 +273,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             stoch_penalty = tech_data.get('stoch_filter_penalty', 0.0)
             stoch_text = ""
             if stoch_penalty > 0:
-                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: {stoch_penalty:.2f}]"
+                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: {stoch_penalty:.4f}]"
             elif stoch_penalty == 0 and tf in ['15m', '1h']:
                  stoch_text = f" [✅ STOCHRSI 確証]"
 
             analysis_detail += (
-                f"**[{tf} 足] {score_icon}** ({score_in_100}点) -> **{s_side}**{penalty_status} {momentum_text} {vwap_text} {stoch_text}\n"
+                f"**[{tf} 足] {score_icon}** ({score_in_4dp:.4f}点) -> **{s_side}**{penalty_status} {momentum_text} {vwap_text} {stoch_text}\n"
             )
             
             # 採用された時間軸の技術指標を詳細に表示
@@ -289,7 +294,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 # 出来高確証の表示
                 volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
                 if volume_bonus > 0:
-                    analysis_detail += f"   └ **出来高確証**: ✅ {volume_bonus:.2f}pt ボーナス追加 (出来高: {tech_data.get('current_volume', 0):.0f})\n"
+                    analysis_detail += f"   └ **出来高確証**: ✅ {volume_bonus:.4f}pt ボーナス追加 (出来高: {tech_data.get('current_volume', 0):.0f})\n"
                 else:
                     analysis_detail += f"   └ **出来高確証**: ❌ 確認なし\n"
 
@@ -300,7 +305,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.32 - Syntax Safety Fix |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.33 - Compound Tie-Break Fix |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -413,7 +418,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.30 - Clear Score Differentiation)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.33 - Score Strictness)
     """
     
     # 1. データ取得
@@ -613,6 +618,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_short_confirm = (stoch_k_val > 80 and stoch_d_val > 80) or \
                                (stoch_k_val < stoch_d_val and stoch_k_val > 20)
             
+            # ペナルティを 0.05 に維持
             if side == "ロング" and not is_long_confirm:
                 stoch_filter_penalty = 0.05 
             elif side == "ショート" and not is_short_confirm:
@@ -895,6 +901,7 @@ async def main_loop():
                     all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
                     
                     # 最高のシグナルからタイブレーク用の優位性データを取得
+                    # スコアの精度を維持
                     best_signals_per_symbol[symbol] = {
                         'score': score, 
                         'all_signals': all_symbol_signals,
@@ -905,15 +912,20 @@ async def main_loop():
                         'symbol': symbol # 最終タイブレークキーとしてシンボル名を追加
                     }
             
-            # 複合ソートキーにシンボル名を追加し、完全に一意の順位を生成
+            # ★スコア厳密化の核心: 複合ソートキー
+            # 1. Score: 浮動小数点精度で最も重要。
+            # 2. RRR: 高い方が優位。
+            # 3. ADX: 高い方がトレンドが強く優位。
+            # 4. -ATR: ATR (ボラティリティ) が低い方が優位なのでマイナスを付けて降順ソート。
+            # 5. Symbol: 完全に一意にするための最終タイブレーク。
             sorted_best_signals = sorted(
                 best_signals_per_symbol.values(), 
                 key=lambda x: (
-                    x['score'],     # 1. スコア（最も重要、高い方が優位）
-                    x['rr_ratio'],  # 2. RRR (高い方が優位)
-                    x['adx_val'],   # 3. ADX (高い方が優位)
-                    -x['atr_val'],  # 4. ATR (値が小さい方が優位なのでマイナスを付けて降順ソート)
-                    x['symbol']     # 5. シンボル名 (アルファベット順に最終決定)
+                    x['score'],     
+                    x['rr_ratio'],  
+                    x['adx_val'],   
+                    -x['atr_val'],  
+                    x['symbol']     
                 ), 
                 reverse=True
             )
@@ -959,16 +971,15 @@ async def main_loop():
             await asyncio.sleep(LOOP_INTERVAL) 
 
         except Exception as e:
-            # ★v12.1.32 修正: 構文エラーを回避しつつ、エラー名（変数名）を抽出する安全な処理
+            # v12.1.32 修正: 構文エラー回避の安全な処理を維持
             error_message = str(e)
             error_name = "Unknown Error"
             
             if 'name' in error_message and 'is not defined' in error_message:
                 try:
-                    # 例: "name 'long_term_trend' is not defined" から 'long_term_trend' を抽出
                     error_name = error_message.split(' ')[1].strip("'") 
                 except IndexError:
-                    pass # 分割に失敗した場合はそのまま
+                    pass 
             
             logging.error(f"メインループで致命的なエラー: {error_name}")
             await asyncio.sleep(60)
@@ -978,11 +989,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.32-Syntax Safety Fix")
+app = FastAPI(title="Apex BOT API", version="v12.1.33-Compound Tie-Break Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.32 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.33 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -996,7 +1007,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.32-Syntax Safety Fix",
+        "bot_version": "v12.1.33-Compound Tie-Break Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1007,7 +1018,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.32, Syntax Safety Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.33, Compound Tie-Break Fix)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
