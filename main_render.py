@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v12.1.38 - CMF & RVI Diversity + Enhanced Telegram Notifications
-# - 通知メッセージのロジックを最終的に改善された「スコアリング内訳」表示に更新。
-# - CMF, RVI, MACD, RSIなど全てのスコアリング要素が正確に通知に反映されるよう調整。
-# - CCXTの初期化とデータ取得ロジックを非同期環境に最適化。
+# Apex BOT v12.1.38 - FINAL (Analysis Error Fixes & Enhanced Telegram Notifications)
+# - テクニカル分析中の KeyError を修正し、シグナル生成の安定性を確保。
+# - CMF & RVI Diversity および最新の通知ロジックを保持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,16 +64,16 @@ SHORT_TERM_MAX_RRR = 2.5
 SHORT_TERM_SL_MULTIPLIER = 1.5      # SL距離の決定 (ATR x 1.5)
 
 # スコアリングロジック用の定数 (1.00点満点での寄与度)
-SCORE_MACD_DIR = 0.18   # MACDに基づく方向性
-SCORE_RSI_OVERSOLD = 0.10 # RSIに基づく過熱感
-SCORE_RSI_MOMENTUM = 0.10 # RSIに基づくモメンタムブレイクアウト
-SCORE_ADX_TREND = 0.08  # ADXに基づくトレンドフォロー
-SCORE_VWAP = 0.05       # VWAPの一致チェック
-SCORE_PPO = 0.05        # PPOに基づくモメンタム強度
-SCORE_DC_BREAKOUT = 0.13 # Donchian Channelに基づくブレイクアウト
-SCORE_COMPOSITE_MOMENTUM = 0.07 # 複合モメンタム加速ボーナス
-SCORE_CMF_CONFIRMATION = 0.05 # CMFに基づく流動性確証 (NEW)
-SCORE_RVI_CONFIRMATION = 0.04 # RVIに基づくモメンタム確証 (NEW)
+SCORE_MACD_DIR = 0.18   
+SCORE_RSI_OVERSOLD = 0.10 
+SCORE_RSI_MOMENTUM = 0.10 
+SCORE_ADX_TREND = 0.08  
+SCORE_VWAP = 0.05       
+SCORE_PPO = 0.05        
+SCORE_DC_BREAKOUT = 0.13 
+SCORE_COMPOSITE_MOMENTUM = 0.07 
+SCORE_CMF_CONFIRMATION = 0.05 
+SCORE_RVI_CONFIRMATION = 0.04 
 
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
@@ -88,7 +87,7 @@ RVI_OVERHEAT_HIGH = 80
 RVI_OVERHEAT_LOW = 20
 PENALTY_STOCH_FILTER = 0.05
 PENALTY_RVI_OVERHEAT = 0.05
-BONUS_VOLUME_CONFIRMATION = 0.10 # 出来高確証の最大ボーナス
+BONUS_VOLUME_CONFIRMATION = 0.10 
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -109,7 +108,7 @@ logging.basicConfig(level=logging.INFO,
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # ====================================================================================
-# UTILITIES & FORMATTING (UPDATED FOR FINAL NOTIFICATION)
+# UTILITIES & FORMATTING
 # ====================================================================================
 
 def get_tp_reach_time(timeframe: str) -> str:
@@ -239,7 +238,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     long_score_factors = []
     short_score_factors = []
     
-    # --- スコアリング内訳の計算 ---
+    # --- スコアリング内訳の計算 (tech_dataのボーナス値を確認) ---
     
     # A. MACDトレンドフォロー (0.18)
     if main_tech_data.get('macd_dir_bonus', 0.0) == SCORE_MACD_DIR:
@@ -334,7 +333,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {main_tech_data.get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.38 - FINAL |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | v12.1.38 - FINAL (Stable) |\n" 
         f"==================================\n"
         f"\n<pre>※ 投資判断は自己責任でお願いします。</pre>"
     )
@@ -448,12 +447,12 @@ async def get_crypto_macro_context() -> Dict:
 
 
 # ====================================================================================
-# CORE ANALYSIS LOGIC
+# CORE ANALYSIS LOGIC (ERROR FIXES APPLIED)
 # ====================================================================================
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.38 - スコア寄与度をtech_dataに格納)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.38 - KeyError修正済み)
     """
     
     # 1. データ取得
@@ -489,8 +488,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     MACD_HIST_COL = 'MACD_Hist'     
     PPO_HIST_COL = 'PPOh_12_26_9'   
     STOCHRSI_K = 'STOCHRSIk_14_14_3_3'
-    
     RVI_VALUE_COL = 'RVI_14' 
+
+    # pandas_taの計算結果から、必要な指標の正確な列名を特定する準備
+    # pandas_taが生成する列名のパターンに合わせて、必要な列を正確に参照するように修正
+    REQUIRED_COLS_BASE = [
+        'rsi', MACD_HIST_COL, 'ADX_14', 'ATR_14', 'CCI_14_0.015', 'VWAP', 
+        PPO_HIST_COL, STOCHRSI_K, 'cmf', RVI_VALUE_COL, 
+        'DCL_20', 'DCU_20', 'BBM_20_2.0', 'RVIs_14' # RVIシグナル、BBミッド、DCの列を追加
+    ]
 
     try:
         # テクニカル指標の計算
@@ -507,18 +513,21 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['cmf'] = ta.cmf(df['high'], df['low'], df['close'], df['volume'], length=20)
         df.ta.rvi(append=True) 
         
-        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, STOCHRSI_K, 'cmf', RVI_VALUE_COL] 
-        df.dropna(subset=required_cols, inplace=True)
+        # 必要な列が全てDataFrameに存在することを確認してからdropna
+        final_required_cols = [col for col in REQUIRED_COLS_BASE if col in df.columns]
+
+        # NaN値を含む行を除去 (分析に必要なデータが揃っていない行を排除)
+        df.dropna(subset=final_required_cols, inplace=True)
 
         if df.empty:
             return {"symbol": symbol, "side": "DataShortage", "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": price, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
-        # データの安全な取得
+        # データの安全な取得 (正確な列名を使用)
         rsi_val = df['rsi'].iloc[-1]
         macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
         macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] 
-        adx_val = df['ADX_14'].iloc[-1] # pandas_taはADX_14という列名になる
-        atr_val = df['ATR_14'].iloc[-1]
+        adx_val = df['ADX_14'].iloc[-1] # 正確なADX列名
+        atr_val = df['ATR_14'].iloc[-1] # 正確なATR列名
         vwap_val = df['VWAP'].iloc[-1] 
         ppo_hist_val = df[PPO_HIST_COL].iloc[-1] 
         stoch_k_val = df[STOCHRSI_K].iloc[-1] 
@@ -527,6 +536,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         rvi_sig_val = df['RVIs_14'].iloc[-1] 
         dc_low_val = df['DCL_20'].iloc[-1]     
         dc_high_val = df['DCU_20'].iloc[-1]
+        bb_mid = df['BBM_20_2.0'].iloc[-1] # BBM列名
         
         current_volume = df['volume'].iloc[-1]
         average_volume = df['volume'].iloc[-31:-1].mean() if len(df) >= 31 else df['volume'].mean()
@@ -667,19 +677,16 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score_bonuses['rvi_overheat_penalty'] = rvi_overheat_penalty
 
 
-        # 3. 出来高に基づくシグナル確証 (ボーナス0.10 - 既にボーナスとして加算済みだが、上限調整)
+        # 3. 出来高に基づくシグナル確証 (ボーナス0.10)
         volume_confirmation_bonus = 0.0
         if current_volume > average_volume * VOLUME_CONFIRMATION_MULTIPLIER: 
-            # 出来高ボーナスはMACD/DC確証の組み合わせで最大0.10。ここでは既に加算されている。
             volume_confirmation_bonus = min(BONUS_VOLUME_CONFIRMATION, 
                                             (0.05 if is_breaking_high or is_breaking_low else 0.0) +
                                             (0.05 if abs(macd_hist_val) > df[MACD_HIST_COL].abs().mean() else 0.0))
-            # 出来高ボーナスを改めて最終スコアに加算 (MACD/DCボーナスとは別に追加)
-            # NOTE: このコードブロックはロジックをシンプルにするため、H, Gの複合モメンタムに集約
-            # されたものと仮定し、通知のための記録のみに留める。
             score_bonuses['volume_confirmation_bonus'] = volume_confirmation_bonus
-
-
+            # Note: 出来高ボーナスは既に複合モメンタムスコアとして加算されているが、
+            # 通知用に別フィールドで値を持つことで、合計スコアは変わらないようにする。
+            
         # 4. 4hトレンドフィルターの適用 (15m, 1hのみ) (ペナルティ0.15)
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
@@ -706,9 +713,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             rr_base = SHORT_TERM_MAX_RRR
         
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
-        
-        bb_mid = df['BBM_20_2.0'].iloc[-1]
-        dc_mid = (dc_high_val + dc_low_val) / 2
         
         entry = price 
         tp1 = 0
@@ -770,12 +774,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "dc_high": dc_high_val,
             "dc_low": dc_low_val,
             "current_volume": current_volume,
+            "rvi_value": rvi_val, # 通知用にRVI値を追加
             
             # スコアリングボーナス/ペナルティを格納
             **score_bonuses, 
         }
         
     except Exception as e:
+        # エラーが発生した場合は、どのテクニカル指標の計算/参照で失敗したかログに出力
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -1008,7 +1014,7 @@ def get_status():
     
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.38-FINAL",
+        "bot_version": "v12.1.38-FINAL (Stable)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
