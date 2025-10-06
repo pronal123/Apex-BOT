@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v12.1.18 - OHLCVデータ取得数の大増量 (250本)
+# Apex BOT v12.1.19 - OHLCVデータ取得数の最終増量 (400本)
 # 
 # 修正点:
-# - v12.1.17で解消できなかったKCのNaN警告を解消するため、OHLCVデータ取得数を100本から
-#   250本に大幅に増加させ、KC計算に必要なウォームアップ期間を確保。
+# - v12.1.18で解消できなかったKCのNaN警告に対し、OHLCVデータ取得数を400本に最終増量。
+# - KCの有効データが検出された際に、その情報をログに出力しデバッグを強化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -58,8 +58,8 @@ TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
 SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 (0.5-1.0, 65点に相当)
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
 
-# V12.1.18 NEW: KC NaNを解消するために取得データを250本に増量
-REQUIRED_OHLCV_LIMITS = {'15m': 250, '1h': 250, '4h': 250} 
+# V12.1.19 NEW: KC NaNを解消するために取得データを400本に増量
+REQUIRED_OHLCV_LIMITS = {'15m': 400, '1h': 400, '4h': 400} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # (KC導入によりこの定数は事実上不使用)
 
 LONG_TERM_SMA_LENGTH = 50           
@@ -311,7 +311,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.18 - OHLCV Data Increase to 250 Bars |\n" # <-- バージョン変更
+        f"| ⚙️ **BOT Ver** | v12.1.19 - OHLCV Data Increase to 400 Bars |\n" # <-- バージョン変更
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -391,8 +391,8 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         return [], "ExchangeError", client_name
 
     try:
-        # V12.1.18: 250本を取得する
-        limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 250)
+        # V12.1.19: 400本を取得する
+        limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 400)
         
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         
@@ -426,13 +426,13 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.17: KC指標の後方探索を全バーに拡張)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.19: KC NaN回避のため400本データを前提)
     """
     
     # 1. データ取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
     
-    # --- V12.1.17 NEW: デバッグログの追加 ---
+    # --- V12.1.19: デバッグログの変更 ---
     if status == "Success":
         logging.info(f"✅ {symbol} ({timeframe}): OHLCVデータ {len(ohlcv)} 本を取得しました。")
     # -----------------------------------
@@ -525,7 +525,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
         # =========================================================================
-        # V12.1.17: KC指標値の抽出 (後方探索を全バーに拡張) - ロジックは維持
+        # V12.1.19: KC指標値の抽出とデバッグ強化
         # =========================================================================
         kc_upper_name = f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCU_20_2
         kc_lower_name = f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCL_20_2
@@ -548,6 +548,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                     if i > 1:
                         # Log if we had to use an older bar
                         logging.warning(f"⚠️ {symbol} ({timeframe}) のKeltner Channelデータ ({kc_upper_name}) が最新足でNaNでした。{i-1}本前の有効な値を使用します。")
+                    
+                    # V12.1.19 NEW: KCデータが有効であることを確認する新しいログを追加
+                    logging.info(f"✅ {symbol} ({timeframe}): Keltner Channelの有効な値 (バー: {len(df) - i}, 値: {kc_mid:.4f}) を発見し、使用します。")
                         
                     break 
                     
@@ -991,11 +994,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.18-OHLCV_250_BARS (Full Integrated)") # <-- バージョン変更
+app = FastAPI(title="Apex BOT API", version="v12.1.19-OHLCV_400_BARS (Full Integrated)") # <-- バージョン変更
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.18 Startup initializing...") # <-- バージョン変更
+    logging.info("🚀 Apex BOT v12.1.19 Startup initializing...") # <-- バージョン変更
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1009,7 +1012,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.18-OHLCV_250_BARS (Full Integrated)", # <-- バージョン変更
+        "bot_version": "v12.1.19-OHLCV_400_BARS (Full Integrated)", # <-- バージョン変更
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1020,7 +1023,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.18, Full Integrated, OHLCV 250 Bars)."}, status_code=200) # <-- バージョン変更
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.19, Full Integrated, OHLCV 400 Bars)."}, status_code=200) # <-- バージョン変更
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
