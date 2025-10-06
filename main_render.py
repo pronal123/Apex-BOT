@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.1.25 - 勝率向上版 (WINRATE-BOOST)
-# - STOCHRSIによる過熱感フィルタリングを追加。
-# - 出来高に基づくシグナル確証ボーナスを追加。
-# - スコア同点の場合の順位決定ロジックを継承。
-# - Donchian Channel (DCL_20, DCU_20) の Key Error 対策を継承。
+# Apex BOT v12.1.26 - 順位決定ロジック最終強化版 (RANKING-ULTRA)
+# - 同順位回避のため、複合ソートキーにシンボル名を最終タイブレークとして追加。
+# - Telegram通知メッセージに動的な順位表示を実装。
+# - STOCHRSI, 出来高確証、各種エラー対策を全て継承。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -75,7 +74,7 @@ RSI_MOMENTUM_LOW = 45
 RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
 BASE_SCORE = 0.55  
-VOLUME_CONFIRMATION_MULTIPLIER = 1.5 # 平均出来高の1.5倍
+VOLUME_CONFIRMATION_MULTIPLIER = 1.5 
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -140,9 +139,9 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
     return max(0.40, min(0.80, adjusted_rate))
 
 
-def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
+def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (順位表示機能付き)
     """
     
     # 有効なシグナル（エラーやNeutralではない）のみを抽出
@@ -157,14 +156,15 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     if not high_score_signals:
         return "" 
         
-    # スコア、RRR、ADX、-ATRの順で最高のシグナルを決定（main_loopのソートロジックに合わせる）
+    # スコア、RRR、ADX、-ATR、シンボル名の順で最高のシグナルを決定 (main_loopのソートロジックに合わせる)
     best_signal = max(
         high_score_signals, 
         key=lambda s: (
             s.get('score', 0.5), 
             s.get('rr_ratio', 0.0), 
             s.get('tech_data', {}).get('adx', 0.0), 
-            -s.get('tech_data', {}).get('atr_value', 1.0)
+            -s.get('tech_data', {}).get('atr_value', 1.0),
+            s.get('symbol', '')
         )
     )
     
@@ -186,16 +186,21 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     # 1. ヘッダーとエントリー情報の可視化
     # ----------------------------------------------------
     direction_emoji = "🚀 **ロング (LONG)**" if side == "ロング" else "💥 **ショート (SHORT)**"
-    
-    # RRRの強さに応じて MEDIUM/HIGHを決定 (ログ形式を再現)
     strength = "高 (HIGH)" if score >= 0.75 else "中 (MEDIUM)"
     
+    # ★順位に応じたヘッダーを動的に生成
+    rank_header = ""
+    if rank == 1: rank_header = "🥇 **総合 1 位！**"
+    elif rank == 2: rank_header = "🥈 **総合 2 位！**"
+    elif rank == 3: rank_header = "🥉 **総合 3 位！**"
+    else: rank_header = f"🏆 **総合 {rank} 位！**"
+
     # リスク幅を計算
     sl_width = abs(entry_price - sl_price)
     
     header = (
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
-        f"**🥉 総合 3 位！** 📈 {strength} 発生！ - {direction_emoji}\n" # 総合順位はダミー
+        f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}\n" 
         f"==================================\n"
         f"| 🥇 **分析スコア** | <b>{int(score * 100)} / 100 点</b> (ベース: {timeframe}足) |\n" # スコアを100点換算
         f"| ⏰ **TP 到達目安** | {get_tp_reach_time(timeframe)} | (RRR: 1:{rr_ratio:.2f}) |\n"
@@ -290,7 +295,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.25 - WINRATE-BOOST |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.26 - RANKING-ULTRA |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -403,7 +408,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.25-WINRATE-BOOST)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.26-RANKING-ULTRA)
     """
     
     # 1. データ取得
@@ -465,16 +470,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # Donchian Channel (期間20で設定)
         df.ta.donchian(length=20, append=True)
         
-        # ★ Stochastic RSI (STOCHRSI) の計算を追加 (New)
+        # Stochastic RSI (STOCHRSI) の計算
         df.ta.stochrsi(append=True)
         
         # ----------------------------------------------------------------------
-        # ★ Donchian Channel / STOCHRSI のKeyError対策とデータクリーニング
+        # データクリーニング
         # ----------------------------------------------------------------------
         
-        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL]
-        # STOCHRSIも必須列に追加
-        required_cols.extend([STOCHRSI_K, STOCHRSI_D]) 
+        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, STOCHRSI_K, STOCHRSI_D] 
         
         # 必須列にNaNがある行を削除
         df.dropna(subset=required_cols, inplace=True)
@@ -494,13 +497,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         vwap_val = df['vwap'].iloc[-1] 
         ppo_hist_val = df[PPO_HIST_COL].iloc[-1] 
         
-        # Stochastic RSI の値を取得 (New)
+        # Stochastic RSI の値を取得
         stoch_k_val = df[STOCHRSI_K].iloc[-1] 
         stoch_d_val = df[STOCHRSI_D].iloc[-1] 
 
         # 出来高の取得
         current_volume = df['volume'].iloc[-1]
-        # 過去30本（直近1本を除く）の平均出来高
         average_volume = df['volume'].iloc[-31:-1].mean() if len(df) >= 31 else df['volume'].mean()
 
         
@@ -560,7 +562,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # G. Donchian Channelによるブレイクアウト/過熱感フィルター
         is_breaking_high = False
         is_breaking_low = False
-        if dc_cols_present: # DC列が存在する場合のみ実行
+        if dc_cols_present: 
             is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
@@ -584,15 +586,13 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         score = base_score
         
         # ----------------------------------------------------------------------
-        # H. Stochastic RSIに基づくエントリー確証/フィルタリング (New)
+        # H. Stochastic RSIに基づくエントリー確証/フィルタリング 
         # ----------------------------------------------------------------------
         stoch_filter_penalty = 0.0
         if timeframe in ['15m', '1h']:
-            # ロングシグナル：STOCHRSIが売られすぎ(20)から上昇 or 買われすぎ(80)未満
             is_long_confirm = (stoch_k_val < 20 and stoch_d_val < 20) or \
                               (stoch_k_val > stoch_d_val and stoch_k_val < 80)
             
-            # ショートシグナル：STOCHRSIが買われすぎ(80)から下降 or 売られすぎ(20)超
             is_short_confirm = (stoch_k_val > 80 and stoch_d_val > 80) or \
                                (stoch_k_val < stoch_d_val and stoch_k_val > 20)
             
@@ -604,7 +604,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = max(0.5, score - stoch_filter_penalty) 
 
         # ----------------------------------------------------------------------
-        # I. 出来高に基づくシグナル確証 (New)
+        # I. 出来高に基づくシグナル確証
         # ----------------------------------------------------------------------
         volume_confirmation_bonus = 0.0
         if current_volume > average_volume * VOLUME_CONFIRMATION_MULTIPLIER: 
@@ -630,7 +630,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # 4. MACDクロス確認と減点 (モメンタム反転チェック)
         macd_valid = True
         if timeframe in ['15m', '1h']:
-             # MACDヒストグラムがクロス直後に方向転換していないかチェック (モメンタム反転)
              is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
                                  (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
              
@@ -661,6 +660,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # 6. 最終的なサイドの決定
         final_side = side
+        # スコアの精度を維持するため、丸めずにそのまま使用
         if score < SIGNAL_THRESHOLD:
              final_side = "Neutral"
 
@@ -681,12 +681,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "ppo_hist": ppo_hist_val, 
             "dc_high": dc_high_val,
             "dc_low": dc_low_val,
-            "stoch_k": stoch_k_val, # New
-            "stoch_d": stoch_d_val, # New
-            "stoch_filter_penalty": stoch_filter_penalty, # New
-            "volume_confirmation_bonus": volume_confirmation_bonus, # New
-            "current_volume": current_volume, # New
-            "average_volume": average_volume, # New
+            "stoch_k": stoch_k_val,
+            "stoch_d": stoch_d_val,
+            "stoch_filter_penalty": stoch_filter_penalty,
+            "volume_confirmation_bonus": volume_confirmation_bonus,
+            "current_volume": current_volume,
+            "average_volume": average_volume,
         }
         
     except KeyError as e:
@@ -707,7 +707,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     signal_candidate = {
         "symbol": symbol,
         "side": final_side,
-        "score": score,
+        "score": score, # 精度を維持したスコア
         "confidence": score,
         "price": price,
         "entry": entry,
@@ -838,17 +838,19 @@ async def main_loop():
                         # ★順位決定のための補助キー (RRR, ADX, ATR)
                         'rr_ratio': signal.get('rr_ratio', 0.0), 
                         'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
-                        'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0) 
+                        'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0),
+                        'symbol': symbol # ★最終タイブレークキーとしてシンボル名を追加
                     }
             
-            # ★優位性（タイブレーク）の要素を追加した複合ソートキーで順位を決定
+            # ★修正: 複合ソートキーにシンボル名を追加し、完全に一意の順位を生成
             sorted_best_signals = sorted(
                 best_signals_per_symbol.values(), 
                 key=lambda x: (
                     x['score'],     # 1. スコア（最も重要、高い方が優位）
                     x['rr_ratio'],  # 2. RRR (高い方が優位)
                     x['adx_val'],   # 3. ADX (高い方が優位)
-                    -x['atr_val']   # 4. ATR (値が小さい方が優位なのでマイナスを付けて降順ソート)
+                    -x['atr_val'],  # 4. ATR (値が小さい方が優位なのでマイナスを付けて降順ソート)
+                    x['symbol']     # 5. シンボル名 (アルファベット順に最終決定)
                 ), 
                 reverse=True
             )
@@ -870,11 +872,8 @@ async def main_loop():
                     
                     if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                         
-                        # 統合メッセージ生成
-                        # 順位を一時的に上書きしてメッセージ生成（format_integrated_analysis_message内での「🥉 総合 3 位！」を一時的に置き換えられるようにするなら、ここで操作が必要。ここではログのみ）
-                        msg = format_integrated_analysis_message(symbol, item['all_signals'])
-                        
-                        # 総合順位をメッセージ内に動的に挿入するロジックがないため、手動でヘッダーを更新（今回は関数内FIXのため保留）
+                        # ★修正: 順位 (i + 1) を渡してメッセージ生成
+                        msg = format_integrated_analysis_message(symbol, item['all_signals'], i + 1)
                         
                         if msg:
                             log_symbol = symbol.replace('-', '/')
@@ -905,11 +904,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.25-WINRATE-BOOST (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.26-RANKING-ULTRA (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.25 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.26 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -923,7 +922,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.25-WINRATE-BOOST (Full Integrated)",
+        "bot_version": "v12.1.26-RANKING-ULTRA (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -934,7 +933,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.25, WINRATE-BOOST)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.26, RANKING-ULTRA)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
