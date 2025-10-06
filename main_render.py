@@ -1,7 +1,5 @@
 # ====================================================================================
-# Apex BOT v12.1.38 - FINAL (Analysis Error Fixes & Enhanced Telegram Notifications)
-# - テクニカル分析中の KeyError を修正し、シグナル生成の安定性を確保。
-# - CMF & RVI Diversity および最新の通知ロジックを保持。
+# Apex BOT v12.1.39 - FINAL (MACD_Hist KeyError Fix)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -268,7 +266,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     # H. 複合モメンタム加速ボーナス (0.07)
     if main_tech_data.get('composite_momentum_bonus', 0.0) == SCORE_COMPOSITE_MOMENTUM:
-        (long_score_factors if side == "ロング" else short_score_factors).append(f"複合モメンタム +{SCORE_COMPOSITE_MOMENTUM * 100:.2f}点")
+         (long_score_factors if side == "ロング" else short_score_factors).append(f"複合モメンタム +{SCORE_COMPOSITE_MOMENTUM * 100:.2f}点")
         
     # K. CMF流動性確証 (0.05)
     if main_tech_data.get('cmf_bonus', 0.0) == SCORE_CMF_CONFIRMATION:
@@ -325,15 +323,14 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 f"   └ フィルタリング: {penalty_line}\n"
             )
 
-    # ----------------------------------------------------
-    # 5. フッター
+    # 4. フッター
     # ----------------------------------------------------
     regime = best_signal.get('regime', 'N/A')
     
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {main_tech_data.get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.38 - FINAL (Stable) |\n" 
+        f"| ⚙️ **BOT Ver** | v12.1.39 - FINAL (MACD Fix) |\n" 
         f"==================================\n"
         f"\n<pre>※ 投資判断は自己責任でお願いします。</pre>"
     )
@@ -452,7 +449,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.38 - KeyError修正済み)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.39 - MACD_Hist KeyError修正済み)
     """
     
     # 1. データ取得
@@ -484,18 +481,17 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     df.set_index('timestamp', inplace=True)
     
-    # 指標列名定数
-    MACD_HIST_COL = 'MACD_Hist'     
+    # 指標列名定数 - MACDヒストグラムの列名を修正
+    MACD_HIST_COL = 'MACDh_12_26_9' # <--- ここを修正
     PPO_HIST_COL = 'PPOh_12_26_9'   
     STOCHRSI_K = 'STOCHRSIk_14_14_3_3'
     RVI_VALUE_COL = 'RVI_14' 
 
     # pandas_taの計算結果から、必要な指標の正確な列名を特定する準備
-    # pandas_taが生成する列名のパターンに合わせて、必要な列を正確に参照するように修正
     REQUIRED_COLS_BASE = [
         'rsi', MACD_HIST_COL, 'ADX_14', 'ATR_14', 'CCI_14_0.015', 'VWAP', 
         PPO_HIST_COL, STOCHRSI_K, 'cmf', RVI_VALUE_COL, 
-        'DCL_20', 'DCU_20', 'BBM_20_2.0', 'RVIs_14' # RVIシグナル、BBミッド、DCの列を追加
+        'DCL_20', 'DCU_20', 'BBM_20_2.0', 'RVIs_14' 
     ]
 
     try:
@@ -524,10 +520,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         # データの安全な取得 (正確な列名を使用)
         rsi_val = df['rsi'].iloc[-1]
-        macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
-        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] 
-        adx_val = df['ADX_14'].iloc[-1] # 正確なADX列名
-        atr_val = df['ATR_14'].iloc[-1] # 正確なATR列名
+        macd_hist_val = df[MACD_HIST_COL].iloc[-1] # <--- 修正後の定数を使用
+        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] # <--- 修正後の定数を使用
+        adx_val = df['ADX_14'].iloc[-1] 
+        atr_val = df['ATR_14'].iloc[-1] 
         vwap_val = df['VWAP'].iloc[-1] 
         ppo_hist_val = df[PPO_HIST_COL].iloc[-1] 
         stoch_k_val = df[STOCHRSI_K].iloc[-1] 
@@ -536,7 +532,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         rvi_sig_val = df['RVIs_14'].iloc[-1] 
         dc_low_val = df['DCL_20'].iloc[-1]     
         dc_high_val = df['DCU_20'].iloc[-1]
-        bb_mid = df['BBM_20_2.0'].iloc[-1] # BBM列名
+        bb_mid = df['BBM_20_2.0'].iloc[-1] 
         
         current_volume = df['volume'].iloc[-1]
         average_volume = df['volume'].iloc[-31:-1].mean() if len(df) >= 31 else df['volume'].mean()
@@ -544,7 +540,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         long_score = 0.5
         short_score = 0.5
-        score_bonuses = tech_data_defaults.copy() # ボーナスを記録するための辞書
+        score_bonuses = tech_data_defaults.copy() 
 
         # 2. **動的シグナル判断ロジック (スコアリング)**
         
@@ -589,7 +585,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         elif price < vwap_val:
             short_score += SCORE_VWAP
             vwap_consistent = True
-        score_bonuses['vwap_consistent'] = vwap_consistent # 整合性をtech_dataに記録
+        score_bonuses['vwap_consistent'] = vwap_consistent 
         
         # F. PPOに基づくモメンタム強度の評価 (0.05)
         ppo_abs_mean = df[PPO_HIST_COL].abs().mean()
@@ -684,8 +680,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                                             (0.05 if is_breaking_high or is_breaking_low else 0.0) +
                                             (0.05 if abs(macd_hist_val) > df[MACD_HIST_COL].abs().mean() else 0.0))
             score_bonuses['volume_confirmation_bonus'] = volume_confirmation_bonus
-            # Note: 出来高ボーナスは既に複合モメンタムスコアとして加算されているが、
-            # 通知用に別フィールドで値を持つことで、合計スコアは変わらないようにする。
             
         # 4. 4hトレンドフィルターの適用 (15m, 1hのみ) (ペナルティ0.15)
         if timeframe in ['15m', '1h']:
@@ -726,6 +720,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         use_market_entry = is_high_conviction or is_strong_trend
         entry_type = "Market" if use_market_entry else "Limit"
+        
+        # ドンチャンチャネルの中央値はBBミッドを使用
+        dc_mid = (dc_high_val + dc_low_val) / 2
 
         if side == "ロング":
             if use_market_entry:
@@ -774,7 +771,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "dc_high": dc_high_val,
             "dc_low": dc_low_val,
             "current_volume": current_volume,
-            "rvi_value": rvi_val, # 通知用にRVI値を追加
+            "rvi_value": rvi_val, 
             
             # スコアリングボーナス/ペナルティを格納
             **score_bonuses, 
@@ -793,7 +790,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     signal_candidate = {
         "symbol": symbol,
         "side": final_side,
-        "score": score, # 精度を維持したスコア (0.0 - 1.0)
+        "score": score, 
         "confidence": score,
         "price": price,
         "entry": entry,
@@ -993,11 +990,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.38-FINAL")
+app = FastAPI(title="Apex BOT API", version="v12.1.39-FINAL")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.38 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.39 Startup initializing...") 
     # バックグラウンドでメインループを実行開始
     asyncio.create_task(main_loop())
 
@@ -1014,7 +1011,7 @@ def get_status():
     
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.38-FINAL (Stable)",
+        "bot_version": "v12.1.39-FINAL (MACD Fix)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1025,7 +1022,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.38-FINAL)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.39-FINAL)."}, status_code=200)
 
 if __name__ == '__main__':
     # PORT環境変数が設定されていない場合、8080を使用
