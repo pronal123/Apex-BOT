@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v12.1.28 - 最適エントリーポイント導入版 (Optimal Entry)
-# - エントリー価格をBBミドルバンドとDC中央値に基づいた優位性のある指値（Limit）に設定。
-# - 通知メッセージ内のエントリー記述を修正。
+# Apex BOT v12.1.29 - 動的エントリー戦略導入版 (Dynamic Entry)
+# - スコアまたはADXに基づき、Market Entry (成行) と Limit Entry (優位価格指値) を動的に切り替え。
+# - Limit Entryの場合も、乖離が大きい場合はMarketにFallbackする安全策を導入。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -177,6 +177,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     entry_price = best_signal.get('entry', 0.0)
     tp_price = best_signal.get('tp1', 0.0)
     sl_price = best_signal.get('sl', 0.0)
+    entry_type = best_signal.get('entry_type', 'N/A') # ★追加
+
     
     # OKX形式のシンボル (BTC-USDT) を標準形式 (BTC/USDT) に戻して表示
     display_symbol = symbol.replace('-', '/')
@@ -213,8 +215,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
-        # ★修正: エントリーを「Entry (Limit)」に変更
-        f"| ➡️ **Entry (Limit)** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (優位価格指値エントリー) |\n" 
+        # ★修正: エントリーを動的に表示
+        f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション ({entry_type}注文) |\n" 
         f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | 最小リスク距離 |\n"
         f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | 利確 (RRR: 1:{rr_ratio:.2f}) |\n"
         f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({SHORT_TERM_SL_MULTIPLIER:.1f}xATR) |\n"
@@ -295,7 +297,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.28 - Optimal Entry |\n" # バージョンを更新
+        f"| ⚙️ **BOT Ver** | v12.1.29 - Dynamic Entry |\n" # バージョンを更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -408,7 +410,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.28-Optimal Entry)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.29-Dynamic Entry)
     """
     
     # 1. データ取得
@@ -423,7 +425,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     }
     
     if status != "Success":
-        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0}
+        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['close'] = pd.to_numeric(df['close'])
@@ -459,7 +461,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
         df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
-        df.ta.bbands(close='close', length=20, append=True) # BBM_20_2.0 を生成
+        df.ta.bbands(close='close', length=20, append=True) # BBM_20_2.0, BBU_20_2.0, BBL_20_2.0 を生成
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20)
         df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
@@ -483,7 +485,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.dropna(subset=required_cols, inplace=True)
 
         if df.empty:
-            return {"symbol": symbol, "side": "DataShortage", "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": price, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0}
+            return {"symbol": symbol, "side": "DataShortage", "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": price, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
         # 2. **動的シグナル判断ロジック (スコアリング)**
         
@@ -652,31 +654,58 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         entry = price # Neutral時の参照用
         tp1 = 0
         sl = 0
+        entry_type = "N/A" # ★初期化
 
-        # ★修正: エントリー価格を優位性のあるテクニカルポイントに設定
-        if side == "ロング":
-            # 押し目買いを狙うため、ミドルバンドとDC中央値の「低い方」をエントリー価格とする
-            optimal_entry = min(bb_mid, dc_mid) 
-            # 極端に現在価格から離れすぎないよう、価格の0.05%分を許容幅とする
-            entry = max(optimal_entry, price * 0.9995) 
+        # ★修正: エントリーモードの決定
+        is_high_conviction = score >= 0.70
+        is_strong_trend = adx_val >= 30 
+        
+        use_market_entry = is_high_conviction or is_strong_trend
+        entry_type = "Market" if use_market_entry else "Limit"
 
-            # SL/TPはエントリー価格から計算し、RRRを維持
+
+        if final_side == "ロング":
+            if use_market_entry:
+                # Market Entry: 現在価格をそのまま使用
+                entry = price
+            else:
+                # Limit Entry: 優位性のある価格（BB/DC中央値の低い方）を狙う
+                optimal_entry = min(bb_mid, dc_mid) 
+                # 現在価格より上には指値しないよう、安全のために現在価格を上限とする（エントリー価格の精査）
+                entry = min(optimal_entry, price) 
+                
+                # ただし、乖離が大きすぎる場合は、Marketでエントリーした方が良い可能性が高い (SL幅の50%を基準)
+                if price - entry > sl_dist * 0.5: 
+                    entry = price
+                    entry_type = "Market (Fallback)"
+
+            # SL/TPは、最終決定されたエントリー価格から計算
             sl = entry - sl_dist
             tp_dist = sl_dist * rr_base 
             tp1 = entry + tp_dist
 
-        elif side == "ショート":
-            # 戻り売りを狙うため、ミドルバンドとDC中央値の「高い方」をエントリー価格とする
-            optimal_entry = max(bb_mid, dc_mid)
-            # 極端に現在価格から離れすぎないよう、価格の0.05%分を許容幅とする
-            entry = min(optimal_entry, price * 1.0005) 
+        elif final_side == "ショート":
+            if use_market_entry:
+                # Market Entry: 現在価格をそのまま使用
+                entry = price
+            else:
+                # Limit Entry: 優位性のある価格（BB/DC中央値の高い方）を狙う
+                optimal_entry = max(bb_mid, dc_mid)
+                # 現在価格より下には指値しないよう、安全のために現在価格を下限とする（エントリー価格の精査）
+                entry = max(optimal_entry, price) 
+                
+                # ただし、乖離が大きすぎる場合は、Marketに切り替え (SL幅の50%を基準)
+                if entry - price > sl_dist * 0.5: 
+                    entry = price
+                    entry_type = "Market (Fallback)"
             
-            # SL/TPはエントリー価格から計算し、RRRを維持
+            # SL/TPは、最終決定されたエントリー価格から計算
             sl = entry + sl_dist
             tp_dist = sl_dist * rr_base 
             tp1 = entry - tp_dist
             
         else:
+            entry_type = "N/A"
             entry, sl, tp1, rr_base = price, 0, 0, 0
         
         # 6. 最終的なサイドの決定
@@ -716,6 +745,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         score = 0.5
         entry, tp1, sl, rr_base = price, 0, 0, 0 
         tech_data = tech_data_defaults 
+        entry_type = "N/A"
 
     except Exception as e:
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
@@ -723,6 +753,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         score = 0.5
         entry, tp1, sl, rr_base = price, 0, 0, 0 
         tech_data = tech_data_defaults 
+        entry_type = "N/A"
         
     # 8. シグナル辞書を構築
     signal_candidate = {
@@ -741,6 +772,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "timeframe": timeframe,
         "tech_data": tech_data,
         "volatility_penalty_applied": tech_data['bb_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD,
+        "entry_type": entry_type # ★追加
     }
     
     return signal_candidate
@@ -925,11 +957,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.28-Optimal Entry (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.29-Dynamic Entry (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.28 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.29 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -943,7 +975,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.28-Optimal Entry (Full Integrated)",
+        "bot_version": "v12.1.29-Dynamic Entry (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -954,7 +986,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.28, Optimal Entry)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.29, Dynamic Entry)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
