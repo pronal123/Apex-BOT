@@ -1,11 +1,10 @@
 # ====================================================================================
-# Apex BOT v12.1.5 - 防御的再初期化版 (フルコード)
+# Apex BOT v12.1.6 - 勝率強化版 (フルコード)
 # 
 # 修正点:
-# - 再発する 'name 'long_term_trend' is not defined' エラーに対し、
-#   generate_integrated_signal/analyze_single_timeframe 関数の引数/ローカル変数を
-#   'four_hour_trend_context'にリネームし、スコープの競合/喪失を防御的に回避。
-# - メインループの安定性をさらに確保。
+# - Granular ScoringにOBVによるボリューム確証ボーナスを追加。
+# - ADX (トレンドの強さ) に基づいて、RRR (リスクリワード比) を動的に最適化。
+# - 致命的なエラー修正 (v12.1.5) を継承し、安定稼働を確保。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -66,8 +65,8 @@ LONG_TERM_SMA_LENGTH = 50
 LONG_TERM_REVERSAL_PENALTY = 0.15   
 
 MACD_CROSS_PENALTY = 0.08           
-SHORT_TERM_BASE_RRR = 1.5           
-SHORT_TERM_MAX_RRR = 2.5            
+SHORT_TERM_BASE_RRR = 1.5           # RRRの最小値
+SHORT_TERM_MAX_RRR = 2.5            # RRRの標準的な最大値
 SHORT_TERM_SL_MULTIPLIER = 1.5      
 
 # エントリーポジション最適化のための定数
@@ -80,6 +79,7 @@ RSI_MOMENTUM_LOW = 45
 RSI_MOMENTUM_HIGH = 55
 ADX_TREND_THRESHOLD = 25
 BASE_SCORE = 0.50  # 基本スコアを0.50に固定
+VOLUME_BONUS = 0.05 # v12.1.6: OBVによるボリューム確証ボーナス
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -211,10 +211,10 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     
     header = (
         f"--- {color_tag} --- **{display_symbol}** --- {color_tag} ---\n"
-        f"**{rank_icon} 総合 {rank} 位！** {strength_icon_text} 発生！ - {direction_emoji}\n" # ランキングを最上部に表示
+        f"**{rank_icon} 総合 {rank} 位！** {strength_icon_text} 発生！ - {direction_emoji}\n" 
         f"==================================\n"
         f"| 🥇 **分析スコア** | <b><u>{score_100} / 100 点</u></b> (ベース: {timeframe}足) |\n"
-        f"| ⏰ **TP 到達目安** | <b>{eta_time}</b> | (RRR: 1:{rr_ratio:.2f}) |\n" 
+        f"| ⏰ **TP 到達目安** | <b>{eta_time}</b> | (RRR: 1:{rr_ratio:.2f}) |\n" # RRRは動的に変動
         f"| 📈 **予測勝率** | <b>{get_estimated_win_rate(score_raw, timeframe) * 100:.1f}%</b> |\n"
         f"==================================\n"
     )
@@ -253,7 +253,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         tech_data = s.get('tech_data', {})
         
         if tf == '4h':
-            # tech_dataのキーは互換性のため維持
             long_trend = tech_data.get('long_term_trend', 'Neutral')
             analysis_detail += (
                 f"🌏 **{tf} 足** (長期トレンド): **{long_trend}** ({s_score_100}点)\n"
@@ -284,7 +283,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.5 - 防御的再初期化版 |\n"
+        f"| ⚙️ **BOT Ver** | v12.1.6 - 勝率強化版 |\n"
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -396,10 +395,9 @@ async def get_crypto_macro_context() -> Dict:
 # CORE ANALYSIS LOGIC
 # ====================================================================================
 
-# long_term_trend を four_hour_trend_context に変更
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, four_hour_trend_context: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.5: four_hour_trend_context を使用)
+    単一の時間軸で分析とシグナル生成を行う関数 (v12.1.6: OBVとDynamic RRRを追加)
     """
     
     # 1. データ取得
@@ -407,7 +405,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     tech_data_defaults = {
         "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": 0.005,
-        # キー名は互換性のため維持
         "long_term_trend": four_hour_trend_context, "long_term_reversal_penalty": False, "macd_cross_valid": False,
     }
     
@@ -441,6 +438,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.bbands(close='close', length=20, append=True)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
+        # V12.1.6: OBVの追加
+        df['obv'] = ta.obv(df['close'], df['volume'])
+        
         rsi_val = df['rsi'].iloc[-1]
         
         if df[MACD_HIST_COL].empty or pd.isna(df[MACD_HIST_COL].iloc[-1]) or pd.isna(df[MACD_HIST_COL].iloc[-2]):
@@ -451,6 +451,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         adx_val = df['adx'].iloc[-1]
         atr_val = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else atr_val
+
+        # V12.1.6: OBV値の取得
+        obv_val = df['obv'].iloc[-1]
+        obv_val_prev = df['obv'].iloc[-2]
         
         # ----------------------------------------------------
         # 2. 動的シグナル判断ロジック (Granular Scoring)
@@ -458,7 +462,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         long_score = BASE_SCORE 
         short_score = BASE_SCORE 
         
-        # A. MACDに基づく方向性
+        # A. MACDに基づく方向性 (ベース + ダイナミックボーナス)
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
             long_score += 0.10 
             long_score += min(0.05, abs(macd_hist_val) * 10) 
@@ -466,19 +470,19 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             short_score += 0.10 
             short_score += min(0.05, abs(macd_hist_val) * 10)
 
-        # B. RSIに基づく買われすぎ/売られすぎ
+        # B. RSIに基づく買われすぎ/売られすぎ (固定加点)
         if rsi_val < RSI_OVERSOLD:
             long_score += 0.05
         elif rsi_val > RSI_OVERBOUGHT:
             short_score += 0.05
             
-        # C. RSIに基づくモメンタムブレイクアウト
+        # C. RSIに基づくモメンタムブレイクアウト (固定加点)
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
             long_score += 0.05
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
             short_score += 0.05
 
-        # D. ADXに基づくトレンドフォロー強化
+        # D. ADXに基づくトレンドフォロー強化 (ベース + ダイナミックボーナス)
         if adx_val > ADX_TREND_THRESHOLD:
             adx_dynamic_bonus = max(0.0, adx_val - ADX_TREND_THRESHOLD) * 0.001 
             adx_total_bonus = 0.02 + adx_dynamic_bonus
@@ -493,6 +497,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             long_score += rsi_dist_bonus
         elif rsi_val > 50:
             short_score += rsi_dist_bonus
+
+        # F. V12.1.6: ボリューム確証 (OBV)
+        if obv_val > obv_val_prev:
+            long_score += VOLUME_BONUS
+        elif obv_val < obv_val_prev:
+            short_score += VOLUME_BONUS
         
         # 最終スコア方向の決定
         if long_score > short_score:
@@ -528,11 +538,24 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
              else:
                  macd_valid = True
 
-        # 5. TP/SLとRRRの決定 (エントリー価格の最適化)
-        rr_base_ratio = SHORT_TERM_BASE_RRR 
-        if (timeframe != '4h') and (side == four_hour_trend_context and four_hour_trend_context != "Neutral"):
-            rr_base_ratio = SHORT_TERM_MAX_RRR
+        # 5. TP/SLとRRRの決定 (エントリー価格の最適化 & Dynamic RRR: V12.1.6)
+        rr_base_ratio = SHORT_TERM_BASE_RRR
         
+        # 1. ADXによるボラティリティ/トレンドに基づくRRRの基本値決定 (1.5 -> 2.5)
+        adx_val_capped = min(adx_val, 50.0)
+        # ADX_TREND_THRESHOLD (25.0) から 50.0 の範囲で正規化 (0.0 to 1.0)
+        adx_normalized = max(0.0, (adx_val_capped - ADX_TREND_THRESHOLD) / (50.0 - ADX_TREND_THRESHOLD)) 
+        
+        if adx_normalized > 0:
+            # RRRを1.5から2.5の間でADXに線形補間
+            rr_base_ratio = SHORT_TERM_BASE_RRR + adx_normalized * (SHORT_TERM_MAX_RRR - SHORT_TERM_BASE_RRR)
+        
+        # 2. 長期トレンドとの一致による追加ブースト
+        if (timeframe != '4h') and (side == four_hour_trend_context and four_hour_trend_context != "Neutral"):
+            # 長期トレンドと一致する場合、最低でもSHORT_TERM_MAX_RRR (2.5)を確保し、最大で3.0まで引き上げ
+            rr_base_ratio = max(rr_base_ratio, SHORT_TERM_MAX_RRR)
+            rr_base_ratio = min(SHORT_TERM_MAX_RRR + 0.5, rr_base_ratio + 0.5) 
+            
         sl_dist = atr_val * SHORT_TERM_SL_MULTIPLIER 
         tp_dist = sl_dist * rr_base_ratio 
         pullback_dist = atr_val * ATR_PULLBACK_MULTIPLIER 
@@ -556,8 +579,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         elif score < SIGNAL_THRESHOLD:
              final_side = "Neutral"
 
-        # 7. RRRの計算
-        rr_base = 0.0
+        # 7. RRRの計算 (最終的なRRR)
+        rr_final = 0.0
         if final_side != "Neutral" and sl > 0 and tp1 > 0:
             if final_side == "ロング":
                 risk = entry - sl
@@ -567,12 +590,13 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                 reward = entry - tp1
             
             if risk > 0 and reward > 0:
-                 rr_base = round(reward / risk, 4) 
-                 rr_base = min(SHORT_TERM_MAX_RRR * 3, rr_base) 
+                 rr_final = round(reward / risk, 4) 
+                 # 極端な数値にならないよう、最大値を設定
+                 rr_final = min(SHORT_TERM_MAX_RRR * 2, rr_final) 
         
         # 8. RRRに基づく最終的な微調整スコア 
-        if final_side != "Neutral" and rr_base > 0:
-            score += rr_base * 0.005
+        if final_side != "Neutral" and rr_final > 0:
+            score += rr_final * 0.005
 
         # 9. tech_dataの構築
         bb_width_pct_val = (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0
@@ -583,7 +607,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "adx": adx_val,
             "bb_width_pct": bb_width_pct_val,
             "atr_value": atr_val,
-            # キー名は互換性のため維持
             "long_term_trend": four_hour_trend_context, 
             "long_term_reversal_penalty": current_long_term_penalty_applied,
             "macd_cross_valid": macd_valid,
@@ -593,14 +616,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中にデータエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = BASE_SCORE
-        entry, tp1, sl, rr_base = price, 0, 0, 0 
+        entry, tp1, sl, rr_final = price, 0, 0, 0 
         tech_data = tech_data_defaults 
 
     except Exception as e:
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = BASE_SCORE
-        entry, tp1, sl, rr_base = price, 0, 0, 0 
+        entry, tp1, sl, rr_final = price, 0, 0, 0 
         tech_data = tech_data_defaults 
         
     # 10. シグナル辞書を構築
@@ -613,7 +636,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "entry": entry,
         "tp1": tp1,
         "sl": sl,
-        "rr_ratio": rr_base if final_side != "Neutral" else 0.0,
+        "rr_ratio": rr_final if final_side != "Neutral" else 0.0,
         "regime": "トレンド" if tech_data['adx'] >= ADX_TREND_THRESHOLD else "レンジ",
         "macro_context": macro_context,
         "client": client_used,
@@ -624,14 +647,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     return signal_candidate
 
-# long_term_trend を four_hour_trend_context に変更
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
     """3つの時間軸のシグナルを統合して生成する"""
     
     # 0. 4hトレンドの事前計算 - 最初に必ず初期化する
     four_hour_trend_context = 'Neutral' 
     
-    # 総合エラーハンドリングを追加
     try:
         
         # 4h足のOHLCVを取得
@@ -658,7 +679,6 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
                 
         # 1. 各時間軸の分析を並行して実行
         tasks = [
-            # four_hour_trend_context を渡す
             analyze_single_timeframe(symbol, '15m', macro_context, client_name, four_hour_trend_context, False),
             analyze_single_timeframe(symbol, '1h', macro_context, client_name, four_hour_trend_context, False),
             analyze_single_timeframe(symbol, '4h', macro_context, client_name, four_hour_trend_context, False) 
@@ -669,7 +689,6 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
         # 4h分析結果の統合
         for result in results:
             if result and result.get('timeframe') == '4h':
-                # 4hの分析結果には、計算された長期トレンドを格納 (キー名は互換性のため維持)
                 result.setdefault('tech_data', {})['long_term_trend'] = four_hour_trend_context
         
         return [r for r in results if r is not None]
@@ -683,7 +702,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 
 
 # ====================================================================================
-# TASK SCHEDULER & MAIN LOOP (変更なし)
+# TASK SCHEDULER & MAIN LOOP
 # ====================================================================================
 
 async def notify_integrated_analysis(symbol: str, signals: List[Dict], rank: int):
@@ -788,11 +807,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.5-DEFENSIVE_REINIT (Full Integrated)")
+app = FastAPI(title="Apex BOT API", version="v12.1.6-WINRATE_ENHANCE (Full Integrated)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.5 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.6 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -806,7 +825,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.5-DEFENSIVE_REINIT (Full Integrated)",
+        "bot_version": "v12.1.6-WINRATE_ENHANCE (Full Integrated)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -817,7 +836,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.5, Full Integrated, Defensive Reinit Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.6, Full Integrated, Winrate Enhance)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
