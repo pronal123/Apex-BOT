@@ -1,10 +1,9 @@
 # ====================================================================================
-# Apex BOT v12.1.17 - KCデータアクセス超堅牢化 (全バー探索)
+# Apex BOT v12.1.18 - OHLCVデータ取得数の大増量 (250本)
 # 
 # 修正点:
-# - v12.1.16で解消できなかったKCのNaN警告を解消するため、有効なKC値を見つけるための後方探索を
-#   「データフレームの全バー」まで拡張。
-# - OHLCVデータ取得数をログに出力し、データ不足の可能性を検証。
+# - v12.1.17で解消できなかったKCのNaN警告を解消するため、OHLCVデータ取得数を100本から
+#   250本に大幅に増加させ、KC計算に必要なウォームアップ期間を確保。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -58,7 +57,9 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 2時間クールダウン
 SIGNAL_THRESHOLD = 0.65             # 通知対象となる最低シグナル閾値 (0.5-1.0, 65点に相当)
 TOP_SIGNAL_COUNT = 3                # 通知する上位銘柄数
-REQUIRED_OHLCV_LIMITS = {'15m': 100, '1h': 100, '4h': 100} 
+
+# V12.1.18 NEW: KC NaNを解消するために取得データを250本に増量
+REQUIRED_OHLCV_LIMITS = {'15m': 250, '1h': 250, '4h': 250} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # (KC導入によりこの定数は事実上不使用)
 
 LONG_TERM_SMA_LENGTH = 50           
@@ -310,7 +311,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.17 - Ultra-Aggressive KC Lookback (All Bars) |\n" # <-- バージョン変更
+        f"| ⚙️ **BOT Ver** | v12.1.18 - OHLCV Data Increase to 250 Bars |\n" # <-- バージョン変更
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -390,7 +391,8 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         return [], "ExchangeError", client_name
 
     try:
-        limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
+        # V12.1.18: 250本を取得する
+        limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 250)
         
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         
@@ -523,7 +525,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         vwap_val = df['vwap'].iloc[-1] if 'vwap' in df.columns and not pd.isna(df['vwap'].iloc[-1]) else None
         
         # =========================================================================
-        # V12.1.17 NEW: KC指標値の抽出 (後方探索を全バーに拡張)
+        # V12.1.17: KC指標値の抽出 (後方探索を全バーに拡張) - ロジックは維持
         # =========================================================================
         kc_upper_name = f'KCU_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCU_20_2
         kc_lower_name = f'KCL_{KC_LENGTH}_{KC_MULTIPLIER}' # 例: KCL_20_2
@@ -535,7 +537,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         if kc_upper_name in df.columns:
             # 最後に有効なKC値を見つける (全バーをチェック)
             # i=1: 最新足, i=i: i-1本前の足
-            for i in range(1, len(df) + 1): # <-- 修正点: 後方探索を全バーに拡張
+            for i in range(1, len(df) + 1): 
                 # データフレームの長さがi以上であり、かつi番目のインデックスの値がNaNでないことを確認
                 if not pd.isna(df[kc_upper_name].iloc[-i]):
                     kc_upper = df[kc_upper_name].iloc[-i]
@@ -989,11 +991,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.17-ULTRA_AGGRESSIVE_KC_LOOKBACK (Full Integrated)") # <-- バージョン変更
+app = FastAPI(title="Apex BOT API", version="v12.1.18-OHLCV_250_BARS (Full Integrated)") # <-- バージョン変更
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.17 Startup initializing...") # <-- バージョン変更
+    logging.info("🚀 Apex BOT v12.1.18 Startup initializing...") # <-- バージョン変更
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1007,7 +1009,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.17-ULTRA_AGGRESSIVE_KC_LOOKBACK (Full Integrated)", # <-- バージョン変更
+        "bot_version": "v12.1.18-OHLCV_250_BARS (Full Integrated)", # <-- バージョン変更
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1018,7 +1020,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.17, Full Integrated, Ultra-Aggressive KC Lookback)."}, status_code=200) # <-- バージョン変更
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.18, Full Integrated, OHLCV 250 Bars)."}, status_code=200) # <-- バージョン変更
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
