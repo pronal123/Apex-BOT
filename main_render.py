@@ -3,7 +3,6 @@
 # - 最終スコアを 100点満点 (XX.XX / 100.00点) に換算。
 # - MACD/DCブレイクアウトの寄与度を微調整し、100点到達を極めて困難に。
 # - 通知メッセージで予測勝率をより分かりやすく強調。
-# - 実行時エラー (ufunc 'isfinite' / VWAP) 対策として、データクレンジングを強化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -367,7 +366,6 @@ async def update_symbols_by_volume():
             reverse=True
         )
         
-        # OKXの無期限スワップシンボルに変換
         new_monitor_symbols = [convert_symbol_to_okx_swap(symbol) for symbol, _ in sorted_tickers[:TOP_SYMBOL_LIMIT]]
         
         if new_monitor_symbols:
@@ -394,8 +392,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
     try:
         limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
-        # OKXの無期限スワップ (SWAP) を明示的に指定
-        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit, params={'instType': 'SWAP'})
+        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         
         if not ohlcv or len(ohlcv) < 30: 
             return [], "DataShortage", client_name
@@ -406,24 +403,8 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         logging.warning(f"CCXT Network Error ({symbol} {timeframe}): {e}")
         return [], "ExchangeError", client_name
     except ccxt.ExchangeError as e:
-        # 例外処理を追加: シンボルが見つからない場合、OKX現物を試行
-        if 'market symbol' in str(e) or 'not found' in str(e):
-             # OKXの現物シンボル (BTC/USDT) に変換して再試行
-             spot_symbol = symbol.replace('-', '/')
-             try:
-                 ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(spot_symbol, timeframe, limit=limit, params={'instType': 'SPOT'})
-                 if not ohlcv or len(ohlcv) < 30: 
-                     return [], "DataShortage", client_name
-                 # 成功した場合、現物シンボルで続行 (OKX現物は通常 BTC-USDT ではなく BTC/USDT)
-                 return ohlcv, "Success", client_name
-             except Exception:
-                 # 現物でも失敗した場合
-                 logging.warning(f"CCXT Exchange Error (SPOT Fallback Failed - {symbol} {timeframe}): {e}")
-                 return [], "ExchangeError", client_name
-        
         logging.warning(f"CCXT Exchange Error ({symbol} {timeframe}): {e}")
         return [], "ExchangeError", client_name
-        
     except Exception as e:
         logging.error(f"予期せぬデータ取得エラー ({symbol} {timeframe}): {e}")
         return [], "ExchangeError", client_name
@@ -461,17 +442,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    
-    # 💡 実行時エラー対策 1: データ型変換とインデックス設定の厳格化
-    # 数値列をfloat64に安全に変換 (エラー行はNaNになる)
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').astype('float64')
+    df['close'] = pd.to_numeric(df['close'])
+    df['volume'] = pd.to_numeric(df['volume']) # 出来高も数値化
 
     # DatetimeIndexを設定してVWAPエラーを解消
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     df.set_index('timestamp', inplace=True)
     
-    price = df['close'].iloc[-1] if not df.empty and not pd.isna(df['close'].iloc[-1]) else 0.0
+    price = df['close'].iloc[-1] if not df.empty else 0.0
     atr_val = price * 0.005 if price > 0 else 0.005 
 
     # 初期設定
@@ -500,8 +478,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.bbands(close='close', length=20, append=True) # BBM_20_2.0, BBU_20_2.0, BBL_20_2.0 を生成
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20)
-        
-        # VWAP (volume列のNaNはここでは問題にならない)
         df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
         
         # PPO (Percentage Price Oscillator)
@@ -514,26 +490,20 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.stochrsi(append=True)
         
         # ----------------------------------------------------------------------
-        # 💡 実行時エラー対策 2: データクリーニング (NaN値の削除)
+        # データクリーニング
         # ----------------------------------------------------------------------
         
-        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL] 
-        # Stochastic RSI の列は計算されたか確認
-        if STOCHRSI_K in df.columns: required_cols.append(STOCHRSI_K)
-        if STOCHRSI_D in df.columns: required_cols.append(STOCHRSI_D)
+        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, STOCHRSI_K, STOCHRSI_D] 
         
         # 必須列にNaNがある行を削除
         df.dropna(subset=required_cols, inplace=True)
 
-        # ドンチャンチャンネルの列も存在すれば含める
-        dc_cols_present = 'DCL_20' in df.columns and 'DCU_20' in df.columns
-        
-        if df.empty or len(df) < 2: # 最低限2行（現在値と1つ前）が必要
+        if df.empty:
             return {"symbol": symbol, "side": "DataShortage", "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": price, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
         # 2. **動的シグナル判断ロジック (スコアリング)**
         
-        # データの安全な取得 (クリーン後のdfから)
+        # データの安全な取得
         rsi_val = df['rsi'].iloc[-1]
         macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
         macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] 
@@ -544,8 +514,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         ppo_hist_val = df[PPO_HIST_COL].iloc[-1] 
         
         # Stochastic RSI の値を取得
-        stoch_k_val = df[STOCHRSI_K].iloc[-1] if STOCHRSI_K in df.columns else 50.0
-        stoch_d_val = df[STOCHRSI_D].iloc[-1] if STOCHRSI_D in df.columns else 50.0
+        stoch_k_val = df[STOCHRSI_K].iloc[-1] 
+        stoch_d_val = df[STOCHRSI_D].iloc[-1] 
 
         # 出来高の取得
         current_volume = df['volume'].iloc[-1]
@@ -558,6 +528,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # Donchian Channelの値の安全な取得
         dc_low_val = price 
         dc_high_val = price
+        dc_cols_present = 'DCL_20' in df.columns and 'DCU_20' in df.columns
 
         if dc_cols_present:
             dc_low_val = df['DCL_20'].iloc[-1]     
@@ -796,7 +767,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         entry_type = "N/A"
 
     except Exception as e:
-        # ufunc 'isfinite' not supported for the input types... のエラーはこちらでキャッチされます
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -834,14 +804,13 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
     
     df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df_4h['close'] = pd.to_numeric(df_4h['close'])
     
-    # データクレンジング (4hトレンド計算の安全性を確保)
-    df_4h['close'] = pd.to_numeric(df_4h['close'], errors='coerce').astype('float64')
+    # DatetimeIndexを設定してVWAPエラーを解消
     df_4h['timestamp'] = pd.to_datetime(df_4h['timestamp'], unit='ms', utc=True)
     df_4h.set_index('timestamp', inplace=True)
     
-    # SMA計算に必要な行数未満、またはデータ取得失敗
-    if status_4h == "Success" and len(df_4h.dropna(subset=['close'])) >= LONG_TERM_SMA_LENGTH:
+    if status_4h == "Success" and len(df_4h) >= LONG_TERM_SMA_LENGTH:
         
         try:
             df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
@@ -855,8 +824,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
                     long_term_trend = 'Long'
                 elif last_price < last_sma:
                     long_term_trend = 'Short'
-        except Exception as e:
-            logging.warning(f"4hトレンド計算エラー ({symbol}): {e}")
+        except Exception:
             pass 
             
     # 1. 各時間軸の分析を並行して実行
