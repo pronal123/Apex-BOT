@@ -1,4 +1,4 @@
-# PythonのWebフレームワーク
+# Python Webフレームワークとサーバー
 fastapi
 uvicorn
 
@@ -12,9 +12,11 @@ numpy
 # テクニカル分析ライブラリ
 pandas-ta
 
-# 仮想通貨取引所API (非同期サポート込み)
+# 仮想通貨取引所API (非同期サポートを有効化)
 ccxt[async]
 
-# その他 (requests, yfinance はコード内にはありますが、必要に応じてコメントアウト可)
+# HTTPクライアント
 requests
-# yfinance # 仮想通貨ボットでは通常不要
+
+# 株価/金融データ取得 (コードでyfとしてインポートされているため必須)
+yfinance
