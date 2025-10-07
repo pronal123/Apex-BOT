@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v12.1.37 - 安定化最終版 (STABLE_FINAL)
-# - v12.1.36 の並列化と VWAP 導入をベースに、以下の安定化修正を適用:
-#   1. VWAP DatetimeIndex エラーの修正
-#   2. ufunc 'isfinite' データ型エラーの修正
-#   3. notify_tasks スコープエラーの修正
+# Apex BOT v12.1.38 - データクレンジング強化版 (CLEAN_DATA)
+# - v12.1.37 をベースに、ufunc 'isfinite' エラー対策としてデータクレンジングを強化:
+#   1. OHLCVデータから無限大 (np.inf) を明示的に NaN に変換する処理を追加。
+#   2. DatetimeIndexの設定と数値変換の堅牢性を再確認。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -31,7 +30,7 @@ import math
 load_dotenv()
 
 # ====================================================================================
-# CONFIG & CONSTANTS
+# CONFIG & CONSTANTS (変更なし)
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
@@ -244,7 +243,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict]) -> str:
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v12.1.37 - STABLE_FINAL |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | v12.1.38 - CLEAN_DATA |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -351,12 +350,12 @@ async def get_crypto_macro_context() -> Dict:
 
 
 # ====================================================================================
-# CORE ANALYSIS LOGIC (データ前処理に修正あり)
+# CORE ANALYSIS LOGIC (データ前処理を強化)
 # ====================================================================================
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (STABLE_FINAL)
+    単一の時間軸で分析とシグナル生成を行う関数 (CLEAN_DATA)
     """
     
     # 1. データ取得
@@ -382,11 +381,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         logging.warning(f"⚠️ {symbol} ({timeframe}): Timestamp処理エラー: {e}")
         return {"symbol": symbol, "side": "DataShortage", "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
-    # ★修正2: 全てのOHLCVとVolumeを数値型に変換し、NaN/Infを処理 (ufunc Fix)
+    # ★修正2: 全てのOHLCVとVolumeを数値型に変換し、NaN/Infを処理 (ufunc Fix 強化)
     for col in ['open', 'high', 'low', 'close', 'volume']:
-        # to_numericでエラーを強制し、NaNに変換
+        # to_numericでエラーを強制し、NaNに変換 (非数値データを除去)
         df[col] = pd.to_numeric(df[col], errors='coerce') 
-    
+        
+    # **強化ポイント:** 無限大の値をNaNに置き換える (np.isfiniteエラーの最終対策)
+    df.replace([np.inf, -np.inf], np.nan, inplace=True) 
+
     # NaN行の削除 (OHLCV全てが揃っている行のみ残す)
     df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True) 
     
@@ -406,7 +408,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     DC_LOW_COL = 'DCL_20'
 
     try:
-        # テクニカル指標の計算 (VWAPがDatetimeIndexを要求するようになったため、このブロックのVWAPより前に配置)
+        # テクニカル指標の計算
         df['rsi'] = ta.rsi(df['close'], length=14)
         df['EMA_12'] = ta.ema(df['close'], length=12)
         df['EMA_26'] = ta.ema(df['close'], length=26)
@@ -424,16 +426,17 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.donchian(append=True) 
         df.ta.stochrsi(append=True) 
         
-        # データの安全な取得とクリーンアップ
+        # データの安全な取得とクリーンアップ (計算後の指標にもNaN/Infチェック)
         required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', DC_HIGH_COL, DC_LOW_COL, PPO_HIST_COL, 'STOCHRSIk_14_14_3_3']
         
-        # 必要な指標がNaNやInfでない行のみに絞る (テクニカル指標計算後のチェック)
+        # 必要な指標がNaNやInfでない行のみに絞る 
         df_filtered = df.copy() 
         for col in required_cols:
              if col in df_filtered.columns:
-                 # np.isfiniteは数値配列を期待するため、列が確実に数値であることを確認
-                 if df_filtered[col].dtype != np.float64: 
-                     df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
+                 # 計算結果に無限大が含まれていたらNaNに
+                 df_filtered[col].replace([np.inf, -np.inf], np.nan, inplace=True)
+                 # 確実に数値型に (pandas-taが出力する型が混ざることを防ぐ)
+                 df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce') 
                  df_filtered.dropna(subset=[col], inplace=True)
         
         if df_filtered.empty or len(df_filtered) < 2:
@@ -458,8 +461,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         current_volume = df_filtered['volume'].iloc[-1]
         average_volume = df_filtered['volume'].rolling(window=20).mean().iloc[-1] if len(df_filtered) >= 20 else df_filtered['volume'].mean()
 
-        # ... (スコアリングロジックは変更なし) ...
-        # Score Weighting (ULTRA_HIGH_CONV)
+        # Score Weighting (ULTRA_HIGH_CONV) - 変更なし
         long_score = 0.5
         short_score = 0.5
         volume_confirmation_bonus = 0.0
@@ -626,6 +628,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         }
         
     except Exception as e:
+        # エラーログには原因となった例外を明確に含める
         logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}。Neutralとして処理を継続します。")
         final_side = "Neutral"
         score = 0.5
@@ -651,7 +654,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     return signal_candidate
 
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
-    """3つの時間軸のシグナルを統合して生成する (変更なし)"""
+    """3つの時間軸のシグナルを統合して生成する (修正なし)"""
     
     long_term_trend = 'Neutral'
     ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
@@ -662,7 +665,8 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
             # 4H足のデータ前処理も安定化のため修正
             df_4h['close'] = pd.to_numeric(df_4h['close'], errors='coerce')
             df_4h.dropna(subset=['close'], inplace=True)
-            
+            df_4h.replace([np.inf, -np.inf], np.nan, inplace=True) # 強化
+
             df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
             df_4h.dropna(subset=['sma'], inplace=True)
             
@@ -689,7 +693,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 
 
 # ====================================================================================
-# TASK SCHEDULER & MAIN LOOP (エラー修正あり)
+# TASK SCHEDULER & MAIN LOOP (notify_tasksの初期化は適切に配置済み)
 # ====================================================================================
 
 async def main_loop():
@@ -782,7 +786,7 @@ async def main_loop():
             # 通知実行ロジック
             # -----------------------------------------------------------------
             
-            # ★修正3: notify_tasks をブロックの前に初期化する
+            # notify_tasks はここで確実に初期化される
             notify_tasks = [] 
 
             if top_signals_to_notify:
@@ -812,16 +816,18 @@ async def main_loop():
             logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
             
             if notify_tasks:
-                 # notify_tasksが空でなければ実行 (NameError回避)
+                 # notify_tasksが空でなければ実行
                  await asyncio.gather(*notify_tasks, return_exceptions=True)
 
             await asyncio.sleep(LOOP_INTERVAL) 
 
         except Exception as e:
-            # メインループの致命的なエラー処理も修正 (eを文字列化してログ出力)
+            # メインループの致命的なエラー処理
             error_name = str(e)
-            if 'cannot access local variable' in error_name:
-                error_name = "NameError: notify_tasks (スコープエラー)"
+            if 'cannot access local variable' in error_name and 'notify_tasks' in error_name:
+                 # notify_tasksは本来定義されているはずだが、もしアクセスエラーが発生した場合の安全策
+                 error_name = "NameError: notify_tasks (スコープエラーの再発生 - 暫定的に処理スキップ)"
+                 pass # エラーをログに出力後、次のループへ
             
             logging.error(f"メインループで致命的なエラー: {error_name}")
             await asyncio.sleep(60)
@@ -831,11 +837,11 @@ async def main_loop():
 # FASTAPI SETUP (バージョン表記のみ更新)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v12.1.37-STABLE_FINAL")
+app = FastAPI(title="Apex BOT API", version="v12.1.38-CLEAN_DATA")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v12.1.37 Startup initializing...") 
+    logging.info("🚀 Apex BOT v12.1.38 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -849,7 +855,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v12.1.37-STABLE_FINAL",
+        "bot_version": "v12.1.38-CLEAN_DATA",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -860,7 +866,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v12.1.37, STABLE_FINAL)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v12.1.38, CLEAN_DATA)."}, status_code=200)
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
