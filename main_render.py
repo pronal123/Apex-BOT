@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v19.0.3 - DTS & Dominance Bias Filter (BadSymbol Buffering Fix)
-# - NEW: BadSymbolエラーで除外されたシンボルを代替候補で自動的に埋め、常に30銘柄を監視する機能を実装。
-# - FIX: TOP_SYMBOL_LIMITをFINAL_MONITORING_LIMITにリネームし、初期監視リストの概念を導入。
+# Apex BOT v19.0.4 - DTS & Dominance Bias Filter (Cooldown Removed)
+# - NEW: TRADE_SIGNAL_COOLDOWN を完全に撤廃し、分析サイクルごとにスコアが閾値を超えたシグナルを即時通知するよう変更。
+# - FIX: BadSymbolエラーで除外されたシンボルを代替候補で自動的に埋め、常に30銘柄を監視する機能を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -58,7 +58,7 @@ REQUEST_DELAY_PER_SYMBOL = 0.5
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
-TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
+# TRADE_SIGNAL_COOLDOWN は撤廃されました (v19.0.4)
 SIGNAL_THRESHOLD = 0.75             # 閾値を 0.75 に設定
 TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
@@ -97,6 +97,7 @@ CCXT_CLIENT_NAME: str = 'OKX'
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
 LAST_UPDATE_TIME: float = 0.0
 CURRENT_MONITOR_SYMBOLS: List[str] = [s.replace('/', '-') for s in DEFAULT_SYMBOLS[:FINAL_MONITORING_LIMIT]] 
+# TRADE_NOTIFIED_SYMBOLS は、クールダウン撤廃に伴い、通知チェックには使用されなくなりました。
 TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} 
 LAST_ANALYSIS_SIGNALS: List[Dict] = [] 
 LAST_SUCCESS_TIME: float = 0.0
@@ -158,7 +159,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v19.0.3対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v19.0.4対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -357,7 +358,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v19.0.3** - BadSymbol Buffering Fix |\n" 
+        f"| ⚙️ **BOT Ver** | **v19.0.4** - Cooldown Removed |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -941,7 +942,7 @@ def calculate_trade_score(
         return "Short", short_score, tech_data
     elif long_score > short_score:
         return "WeakLong", long_score, tech_data
-    elif short_score > long_score:
+    elif short_score > short_score:
         return "WeakShort", short_score, tech_data
     else:
         return "Neutral", long_score, tech_data
@@ -1080,13 +1081,8 @@ async def main_loop():
             
             current_time = time.time()
             
-            # 1. クールダウン中のシグナルをクリア
-            symbols_to_remove = [
-                symbol for symbol, timestamp in TRADE_NOTIFIED_SYMBOLS.items() 
-                if current_time - timestamp > TRADE_SIGNAL_COOLDOWN
-            ]
-            for symbol in symbols_to_remove:
-                del TRADE_NOTIFIED_SYMBOLS[symbol]
+            # 1. クールダウン中のシグナルをクリア (クールダウン撤廃のため、このステップはスキップ)
+            # TRADE_NOTIFIED_SYMBOLS は通知チェックに使用されなくなりました。
 
             # 2. マクロコンテキストの取得
             if current_time - LAST_UPDATE_TIME > 60 * 60: # 1時間ごとにマクロ情報を更新
@@ -1111,11 +1107,11 @@ async def main_loop():
             timeframes = ['15m', '1h', '4h']
             
             for symbol in CURRENT_MONITOR_SYMBOLS:
-                if symbol not in TRADE_NOTIFIED_SYMBOLS:
-                    for tf in timeframes:
-                        # 1シンボルあたり0.5秒のレート制限を考慮して、タスクを生成
-                        analysis_tasks.append(perform_analysis_and_signal_generation(symbol, tf, macro_context))
-                        await asyncio.sleep(REQUEST_DELAY_PER_SYMBOL / len(timeframes))
+                # クールダウンチェックを削除し、常に分析を実行します
+                for tf in timeframes:
+                    # 1シンボルあたり0.5秒のレート制限を考慮して、タスクを生成
+                    analysis_tasks.append(perform_analysis_and_signal_generation(symbol, tf, macro_context))
+                    await asyncio.sleep(REQUEST_DELAY_PER_SYMBOL / len(timeframes))
                 
             all_signals = await asyncio.gather(*analysis_tasks, return_exceptions=True)
             
@@ -1165,16 +1161,13 @@ async def main_loop():
 
             for rank, signal in enumerate(final_signals, 1):
                 symbol = signal['symbol']
-                # 通知クールダウンを再チェック
-                if symbol in TRADE_NOTIFIED_SYMBOLS:
-                    continue
-                    
-                # Telegram通知を送信
+                
+                # Telegram通知を送信 (クールダウンチェックなし)
                 telegram_message = format_integrated_analysis_message(symbol, signal['all_signals'], rank)
                 if telegram_message:
                     is_sent = send_telegram_html(telegram_message)
                     if is_sent:
-                        TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
+                        # クールダウンがないため、TRADE_NOTIFIED_SYMBOLSへの記録は不要
                         notification_count += 1
                         
             # 7. 出来高による監視シンボルの更新 (24時間ごと)
@@ -1211,12 +1204,12 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-# バージョンを v19.0.3 に更新
-app = FastAPI(title="Apex BOT API", version="v19.0.3 - BadSymbol Buffering Fix")
+# バージョンを v19.0.4 に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.4 - Cooldown Removed")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.3 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v19.0.4 Startup initializing...") # バージョン更新
     # メインループを非同期タスクとして開始
     asyncio.create_task(main_loop())
 
@@ -1231,7 +1224,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.3 - BadSymbol Buffering Fix", # バージョン更新
+        "bot_version": "v19.0.4 - Cooldown Removed", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1242,4 +1235,4 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running on v19.0.3"})
+    return JSONResponse(content={"message": "Apex BOT is running on v19.0.4"})
