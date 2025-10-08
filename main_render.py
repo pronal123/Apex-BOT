@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v16.0.1 - DTS & Dominance Bias Filter (Structural SL Buffer Fix)
-# - FIX: 構造的SL (S1/R1) を使用する際に、エントリーポイントとの一致を避けるため、SLに 0.5 * ATR のバッファを追加
-# - BTCドミナンスの増減トレンドを判定し、Altcoinのシグナルスコアに反映 (+/- 0.05点)
+# Apex BOT v16.0.2 - Structural Levels Report
+# - FIX: 構造的S/R (R1/S1) の価格を分析メッセージ内に明示的に報告する機能を追加。
+# - v16.0.1 の Structural SL Buffer Fix は維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -146,7 +146,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.1対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.2対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -227,8 +227,21 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     )
 
     sl_source_str = "ATR基準"
-    if best_signal.get('tech_data', {}).get('structural_sl_used', False):
-        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" # FIX反映
+    tech_data = best_signal.get('tech_data', {})
+    if tech_data.get('structural_sl_used', False):
+        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" 
+    
+    # v16.0.2: 構造的レベルを抽出
+    raw_R1 = tech_data.get('raw_R1', 0.0)
+    raw_S1 = tech_data.get('raw_S1', 0.0)
+    
+    structural_info = ""
+    if raw_R1 > 0.0 and raw_S1 > 0.0:
+        # ユーザー要望に応じてR1/S1を明示的に通知
+        structural_info = (
+            f"| 📈 **R1 (抵抗候補)** | <code>${format_price_utility(raw_R1, symbol)}</code> | **利確/反転候補** |\n"
+            f"| 📉 **S1 (支持候補)** | <code>${format_price_utility(raw_S1, symbol)}</code> | **反転/エントリー候補** |\n"
+        )
         
     # 取引計画の表示をDTSに合わせて変更
     trade_plan = (
@@ -237,6 +250,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
+        f"{structural_info}" # 構造的レベルの通知を追加
         f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (**<ins>底/天井を狙う Limit 注文</ins>**) |\n" 
         f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}) |\n"
         f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | **動的決済** (DTSにより利益最大化) |\n" 
@@ -255,12 +269,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         tf = s.get('timeframe')
         s_side = s.get('side', 'N/A')
         s_score = s.get('score', 0.5)
-        tech_data = s.get('tech_data', {})
+        tech_data_s = s.get('tech_data', {})
         
         score_in_100 = s_score * 100
         
         if tf == '4h':
-            long_term_trend_4h = tech_data.get('long_term_trend', 'Neutral')
+            long_term_trend_4h = tech_data_s.get('long_term_trend', 'Neutral')
             analysis_detail += (
                 f"🌏 **4h 足** (長期トレンド): **{long_term_trend_4h}** ({score_in_100:.2f}点)\n"
             )
@@ -268,15 +282,15 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         else:
             score_icon = "🔥" if s_score >= 0.75 else ("📈" if s_score >= 0.65 else "🟡" )
             
-            penalty_status = f" (逆張りペナルティ: -{tech_data.get('long_term_reversal_penalty_value', 0.0) * 100:.1f}点適用)" if tech_data.get('long_term_reversal_penalty') else ""
+            penalty_status = f" (逆張りペナルティ: -{tech_data_s.get('long_term_reversal_penalty_value', 0.0) * 100:.1f}点適用)" if tech_data_s.get('long_term_reversal_penalty') else ""
             
-            momentum_valid = tech_data.get('macd_cross_valid', True)
-            momentum_text = "[✅ モメンタム確証: OK]" if momentum_valid else f"[⚠️ モメンタム反転により減点: -{tech_data.get('macd_cross_penalty_value', 0.0) * 100:.1f}点]"
+            momentum_valid = tech_data_s.get('macd_cross_valid', True)
+            momentum_text = "[✅ モメンタム確証: OK]" if momentum_valid else f"[⚠️ モメンタム反転により減点: -{tech_data_s.get('macd_cross_penalty_value', 0.0) * 100:.1f}点]"
 
-            vwap_consistent = tech_data.get('vwap_consistent', False)
+            vwap_consistent = tech_data_s.get('vwap_consistent', False)
             vwap_text = "[🌊 VWAP一致: OK]" if vwap_consistent else "[🌊 VWAP不一致: NG]"
 
-            stoch_penalty = tech_data.get('stoch_filter_penalty', 0.0)
+            stoch_penalty = tech_data_s.get('stoch_filter_penalty', 0.0)
             stoch_text = ""
             if stoch_penalty > 0:
                  stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: -{stoch_penalty * 100:.2f}点]"
@@ -291,25 +305,25 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             if tf == timeframe:
                 regime = best_signal.get('regime', 'N/A')
                 # ADX/Regime
-                analysis_detail += f"   └ **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({regime})\n"
+                analysis_detail += f"   └ **ADX/Regime**: {tech_data_s.get('adx', 0.0):.2f} ({regime})\n"
                 # RSI/MACDH/CCI/STOCH
-                analysis_detail += f"   └ **RSI/MACDH/CCI**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f} / {tech_data.get('cci', 0.0):.2f}\n"
+                analysis_detail += f"   └ **RSI/MACDH/CCI**: {tech_data_s.get('rsi', 0.0):.2f} / {tech_data_s.get('macd_hist', 0.0):.4f} / {tech_data_s.get('cci', 0.0):.2f}\n"
 
                 # Structural/Pivot Analysis
-                pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
+                pivot_bonus = tech_data_s.get('structural_pivot_bonus', 0.0)
                 pivot_status = "✅ 構造的S/R確証" if pivot_bonus > 0 else "❌ 構造確証なし"
                 analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} (+{pivot_bonus * 100:.2f}点)\n"
 
                 # 出来高確証の表示
-                volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
+                volume_bonus = tech_data_s.get('volume_confirmation_bonus', 0.0)
                 if volume_bonus > 0:
-                    analysis_detail += f"   └ **出来高/流動性確証**: ✅ +{volume_bonus * 100:.2f}点 ボーナス追加 (平均比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
+                    analysis_detail += f"   └ **出来高/流動性確証**: ✅ +{volume_bonus * 100:.2f}点 ボーナス追加 (平均比率: {tech_data_s.get('volume_ratio', 0.0):.1f}x)\n"
                 else:
-                    analysis_detail += f"   └ **出来高/流動性確証**: ❌ 確認なし (比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
+                    analysis_detail += f"   └ **出来高/流動性確証**: ❌ 確認なし (比率: {tech_data_s.get('volume_ratio', 0.0):.1f}x)\n"
                 
                 # Funding Rate Analysis
-                funding_rate_val = tech_data.get('funding_rate_value', 0.0)
-                funding_rate_bonus = tech_data.get('funding_rate_bonus_value', 0.0)
+                funding_rate_val = tech_data_s.get('funding_rate_value', 0.0)
+                funding_rate_bonus = tech_data_s.get('funding_rate_bonus_value', 0.0)
                 funding_rate_status = ""
                 if funding_rate_bonus > 0:
                     funding_rate_status = f"✅ 優位性あり (+{funding_rate_bonus * 100:.2f}点)"
@@ -321,8 +335,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 analysis_detail += f"   └ **資金調達率 (FR)**: {funding_rate_val * 100:.4f}% (8h) - {funding_rate_status}\n"
 
                 # Dominance Analysis
-                dominance_trend = tech_data.get('dominance_trend', 'Neutral')
-                dominance_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
+                dominance_trend = tech_data_s.get('dominance_trend', 'Neutral')
+                dominance_bonus = tech_data_s.get('dominance_bias_bonus_value', 0.0)
                 
                 dominance_status = ""
                 if dominance_bonus > 0:
@@ -345,7 +359,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v16.0.1** - Structural SL Buffer Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v16.0.2** - Structural Levels Report |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -596,7 +610,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str) -> Tuple
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v16.0.1 - Structural SL Buffer Fix)
+    単一の時間軸で分析とシグナル生成を行う関数 (v16.0.2 - Structural Levels Report)
     """
     
     # 1. データ取得とFunding Rate取得
@@ -621,7 +635,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "funding_rate_bonus_value": 0.0, 
         "dynamic_exit_strategy": "DTS",
         "dominance_trend": "Neutral",
-        "dominance_bias_bonus_value": 0.0
+        "dominance_bias_bonus_value": 0.0,
+        "raw_R1": 0.0, # v16.0.2: Raw R1
+        "raw_S1": 0.0, # v16.0.2: Raw S1
+        "raw_P": 0.0,  # v16.0.2: Raw P
     }
     
     if status != "Success":
@@ -707,7 +724,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_low_val = df['DCL_20'].iloc[-1]     
             dc_high_val = df['DCU_20'].iloc[-1]
         
-        # A-H スコアリングロジックの実行... (変更なし)
+        # A-H スコアリングロジックの実行... 
 
         # A. MACDに基づく方向性 (0.15)
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
@@ -971,7 +988,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "funding_rate_bonus_value": funding_rate_bonus,
             "dominance_trend": dominance_trend,
             "dominance_bias_bonus_value": dominance_bonus,
-            "dynamic_exit_strategy": "DTS" 
+            "dynamic_exit_strategy": "DTS",
+            "raw_R1": pivots.get('R1', 0.0), # v16.0.2: Raw R1を追加
+            "raw_S1": pivots.get('S1', 0.0), # v16.0.2: Raw S1を追加
+            "raw_P": pivots.get('P', 0.0),   # v16.0.2: Raw Pを追加
         }
         
     except Exception as e:
@@ -1199,11 +1219,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v16.0.1 - Structural SL Buffer Fix")
+app = FastAPI(title="Apex BOT API", version="v16.0.2 - Structural Levels Report")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v16.0.1 Startup initializing...") 
+    logging.info("🚀 Apex BOT v16.0.2 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1217,7 +1237,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v16.0.1 - Structural SL Buffer Fix",
+        "bot_version": "v16.0.2 - Structural Levels Report",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1228,7 +1248,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v16.0.1, Structural SL Buffer Fix)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v16.0.2, Structural Levels Report)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
