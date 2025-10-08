@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v13.0.0 - Enhanced Market Structure & Risk Logic
-# - エントリー、SL、TPの動的な決定ロジックを大幅強化 (Structural SL & Dynamic RRR)
-# - 市場センチメント（FGI Proxy）およびPivot Point分析をスコアリングに追加 (合計1.00点満点)
-# - 実行時エラー対策 (v12.1.36) を維持し、安定性を向上。
+# Apex BOT v14.0.0 - Strict High-Conviction Logic & Enhanced Win Rate Focus
+# - スコア条件を厳密化 (SIGNAL_THRESHOLDを0.75、BASE_SCOREを0.40に調整)
+# - ペナルティ/確証要素の重みを強化し、高スコアを出すための条件を厳格化
+# - 動的なSL/TP、構造的分析、FGI Proxy統合はv13.0.0から維持
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -52,28 +52,27 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
-SIGNAL_THRESHOLD = 0.70             
+SIGNAL_THRESHOLD = 0.75             # 閾値を 0.70 -> 0.75 に引き上げ (厳格化)
 TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
 LONG_TERM_SMA_LENGTH = 50           
-LONG_TERM_REVERSAL_PENALTY = 0.15   
-
-MACD_CROSS_PENALTY = 0.10           
+LONG_TERM_REVERSAL_PENALTY = 0.20   # ペナルティを 0.15 -> 0.20 に強化
+MACD_CROSS_PENALTY = 0.15           # ペナルティを 0.10 -> 0.15 に強化
 SHORT_TERM_MIN_RRR = 1.5           
-SHORT_TERM_MAX_RRR = 3.0            # Dynamic RRR Maxを3.0に引き上げ
-SHORT_TERM_SL_MULTIPLIER = 1.5      # ATR SLの基本倍率
-ATR_TP_MIN_MULTIPLIER = 1.5         # TPの最小ATR倍率
+SHORT_TERM_MAX_RRR = 3.0            
+SHORT_TERM_SL_MULTIPLIER = 1.5      
+ATR_TP_MIN_MULTIPLIER = 1.5         
 
-# スコアリングロジック用の定数 (v13.0.0 変更点)
+# スコアリングロジック用の定数 (v14.0.0 変更点)
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
-RSI_MOMENTUM_LOW = 45 
-RSI_MOMENTUM_HIGH = 55
-ADX_TREND_THRESHOLD = 25
-BASE_SCORE = 0.50 
-VOLUME_CONFIRMATION_MULTIPLIER = 2.0 # Liquidity Confirmationのために倍率を強化
+RSI_MOMENTUM_LOW = 40               # 45 -> 40 に変更 (より強いモメンタムを要求)
+RSI_MOMENTUM_HIGH = 60              # 55 -> 60 に変更 (より強いモメンタムを要求)
+ADX_TREND_THRESHOLD = 30            # 25 -> 30 に変更 (強いトレンドのみボーナス)
+BASE_SCORE = 0.40                   # 0.50 -> 0.40 に変更 (高スコアをより困難に)
+VOLUME_CONFIRMATION_MULTIPLIER = 2.5 # 2.0 -> 2.5 に変更 (出来高急増の閾値強化)
 
 # グローバル状態変数
 CCXT_CLIENT_NAME: str = 'OKX' 
@@ -135,14 +134,14 @@ def send_telegram_html(message: str) -> bool:
 
 def get_estimated_win_rate(score: float, timeframe: str) -> float:
     """スコアと時間軸に基づき推定勝率を算出する (0.0 - 1.0 スケールで計算)"""
-    # 0.50を基準に、スコアが 1.0 に近づくにつれて 0.80 に近づくよう調整
-    adjusted_rate = 0.50 + (score - 0.50) * 1.5 
-    return max(0.40, min(0.80, adjusted_rate))
+    # 0.75を基準に、1.00で最大の85%に近づくよう調整 (より厳しい傾斜を設定)
+    adjusted_rate = 0.50 + (score - 0.50) * 1.45 
+    return max(0.40, min(0.85, adjusted_rate))
 
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v13.0.0対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v14.0.0対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -199,16 +198,16 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     market_sentiment_str = ""
     macro_sentiment = best_signal.get('macro_context', {}).get('sentiment_fgi_proxy', 0.0)
-    if macro_sentiment >= 0.03:
+    if macro_sentiment >= 0.05: # 0.03 -> 0.05 (厳格化された閾値)
          market_sentiment_str = " (リスクオン傾向)"
-    elif macro_sentiment <= -0.03:
+    elif macro_sentiment <= -0.05:
          market_sentiment_str = " (リスクオフ傾向)"
     
     header = (
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
         f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}{market_sentiment_str}\n" 
         f"==================================\n"
-        f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件良好** |\n"
+        f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件極めて良好** |\n"
         f"| 💯 **分析スコア** | <b>{score_100:.2f} / 100.00 点</b> (ベース: {timeframe}足) |\n" 
         f"| ⏰ **TP 到達目安** | {get_tp_reach_time(timeframe)} | (RRR: 1:{rr_ratio:.2f}) |\n"
         f"==================================\n"
@@ -254,12 +253,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             )
             
         else:
-            score_icon = "🔥" if s_score >= 0.70 else ("📈" if s_score >= 0.60 else "🟡" )
+            score_icon = "🔥" if s_score >= 0.75 else ("📈" if s_score >= 0.65 else "🟡" )
             
-            penalty_status = " (逆張りペナルティ適用)" if tech_data.get('long_term_reversal_penalty') else ""
+            penalty_status = f" (逆張りペナルティ: -{tech_data.get('long_term_reversal_penalty_value', 0.0) * 100:.1f}点適用)" if tech_data.get('long_term_reversal_penalty') else ""
             
             momentum_valid = tech_data.get('macd_cross_valid', True)
-            momentum_text = "[✅ モメンタム確証: OK]" if momentum_valid else f"[⚠️ モメンタム反転により取消]"
+            momentum_text = "[✅ モメンタム確証: OK]" if momentum_valid else f"[⚠️ モメンタム反転により減点: -{tech_data.get('macd_cross_penalty_value', 0.0) * 100:.1f}点]"
 
             vwap_consistent = tech_data.get('vwap_consistent', False)
             vwap_text = "[🌊 VWAP一致: OK]" if vwap_consistent else "[🌊 VWAP不一致: NG]"
@@ -267,7 +266,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             stoch_penalty = tech_data.get('stoch_filter_penalty', 0.0)
             stoch_text = ""
             if stoch_penalty > 0:
-                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: {stoch_penalty * 100:.2f}点]"
+                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: -{stoch_penalty * 100:.2f}点]"
             elif stoch_penalty == 0 and tf in ['15m', '1h']:
                  stoch_text = f" [✅ STOCHRSI 確証]"
 
@@ -286,15 +285,15 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 # New: Structural/Pivot Analysis
                 pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
                 pivot_status = "✅ 構造的S/R確証" if pivot_bonus > 0 else "❌ 構造確証なし"
-                analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} ({pivot_bonus * 100:.2f}点)\n"
+                analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} (+{pivot_bonus * 100:.2f}点)\n"
 
 
                 # 出来高確証の表示
                 volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
                 if volume_bonus > 0:
-                    analysis_detail += f"   └ **出来高/流動性確証**: ✅ {volume_bonus * 100:.2f}点 ボーナス追加 (平均比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
+                    analysis_detail += f"   └ **出来高/流動性確証**: ✅ +{volume_bonus * 100:.2f}点 ボーナス追加 (平均比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
                 else:
-                    analysis_detail += f"   └ **出来高/流動性確証**: ❌ 確認なし\n"
+                    analysis_detail += f"   └ **出来高/流動性確証**: ❌ 確認なし (比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
 
 
     # 3. リスク管理とフッター
@@ -303,7 +302,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | v13.0.0 - Enhanced Market Structure & Risk Logic |\n" 
+        f"| ⚙️ **BOT Ver** | v14.0.0 - Strict High-Conviction Logic |\n" 
         f"==================================\n"
         f"\n<pre>※ このシグナルは高度なテクニカル分析に基づきますが、投資判断は自己責任でお願いします。</pre>"
     )
@@ -314,7 +313,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # ====================================================================================
 # CCXT & DATA ACQUISITION
 # ====================================================================================
-# (v12.1.36のCCXTロジックは安定しているため、シンボル変換含め維持)
+# (データ取得ロジックはv13.0.0から変更なし)
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (OKX)"""
     global EXCHANGE_CLIENT
@@ -445,15 +444,12 @@ async def get_crypto_macro_context() -> Dict:
             elif df_eth['close'].iloc[-1] < df_eth['sma'].iloc[-1]: eth_trend = -1 # Short
 
     # 2. FGI Proxyの計算 (恐怖指数/市場センチメント)
-    # 以下のロジックでセンチメントをスコア化 (Max: 0.05, Min: -0.05)
-    # - BTC/ETHが両方Long: Strong Risk-On (+0.05)
-    # - BTC/ETHが両方Short: Strong Risk-Off (-0.05)
-    # - どちらか一方のみ: Neutral-Mixed (0.00)
+    # 以下のロジックでセンチメントをスコア化 (Max: 0.05 -> 0.07, Min: -0.05 -> -0.07)
     sentiment_score = 0.0
     if btc_trend == 1 and eth_trend == 1:
-        sentiment_score = 0.05 # 強いリスクオン
+        sentiment_score = 0.07 # 強いリスクオン (ボーナス強化)
     elif btc_trend == -1 and eth_trend == -1:
-        sentiment_score = -0.05 # 強いリスクオフ (恐怖)
+        sentiment_score = -0.07 # 強いリスクオフ (恐怖) (ボーナス強化)
         
     return {
         "btc_trend_4h": "Long" if btc_trend == 1 else ("Short" if btc_trend == -1 else "Neutral"),
@@ -487,12 +483,13 @@ def calculate_fib_pivot(df: pd.DataFrame) -> Dict:
 
 def analyze_structural_proximity(price: float, pivots: Dict, side: str) -> Tuple[float, float, float]:
     """
-    価格とPivotポイントを比較し、構造的なSL/TPを決定し、ボーナススコアを返す (0.05点)
+    価格とPivotポイントを比較し、構造的なSL/TPを決定し、ボーナススコアを返す (0.05 -> 0.07点)
     返り値: (ボーナススコア, 構造的SL, 構造的TP)
     """
     bonus = 0.0
     structural_sl = 0.0
     structural_tp = 0.0
+    BONUS_POINT = 0.07 # ボーナスを 0.07 に強化
 
     R1 = pivots.get('R1', np.nan)
     S1 = pivots.get('S1', np.nan)
@@ -504,24 +501,24 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str) -> Tuple
     if side == "ロング":
         # PriceがS1の上、かつS1に近い: 買いの確証 + SLをS1に設定 (よりタイトなSLを採用)
         if price > S1 and (price - S1) / (R1 - S1) < 0.5:
-            bonus = 0.05 # 構造的サポートの確証
+            bonus = BONUS_POINT # 構造的サポートの確証
             structural_sl = S1
-            structural_tp = R1 * 1.01 # R1を超えて少し利確
+            structural_tp = R1 * 1.01 
         # PriceがR1をブレイクした直後: Continuation
         elif price > R1:
-            bonus = 0.05
+            bonus = BONUS_POINT
             structural_sl = R1 # R1をSLに設定
             structural_tp = R1 * 1.05 
             
     elif side == "ショート":
         # PriceがR1の下、かつR1に近い: 売りの確証 + SLをR1に設定 (よりタイトなSLを採用)
         if price < R1 and (R1 - price) / (R1 - S1) < 0.5:
-            bonus = 0.05 # 構造的レジスタンスの確証
+            bonus = BONUS_POINT # 構造的レジスタンスの確証
             structural_sl = R1
-            structural_tp = S1 * 0.99 # S1を超えて少し利確
+            structural_tp = S1 * 0.99 
         # PriceがS1をブレイクした直後: Continuation
         elif price < S1:
-            bonus = 0.05
+            bonus = BONUS_POINT
             structural_sl = S1 # S1をSLに設定
             structural_tp = S1 * 0.95 
 
@@ -529,7 +526,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str) -> Tuple
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v13.0.0 - Enhanced Logic)
+    単一の時間軸で分析とシグナル生成を行う関数 (v14.0.0 - Strict Logic)
     """
     
     # 1. データ取得
@@ -541,8 +538,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "cci": 0.0, "vwap_consistent": False, "ppo_hist": 0.0, "dc_high": 0.0, "dc_low": 0.0,
         "stoch_k": 50.0, "stoch_d": 50.0, "stoch_filter_penalty": 0.0,
         "volume_confirmation_bonus": 0.0, "current_volume": 0.0, "average_volume": 0.0,
-        "sentiment_fgi_proxy_bonus": 0.0, "structural_pivot_bonus": 0.0, # v13.0.0 NEW
-        "volume_ratio": 0.0, "structural_sl_used": False
+        "sentiment_fgi_proxy_bonus": 0.0, "structural_pivot_bonus": 0.0, 
+        "volume_ratio": 0.0, "structural_sl_used": False,
+        "long_term_reversal_penalty_value": 0.0, # NEW for logging
+        "macd_cross_penalty_value": 0.0 # NEW for logging
     }
     
     if status != "Success":
@@ -561,7 +560,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     atr_val = price * 0.005 if price > 0 else 0.005 
 
     final_side = "Neutral"
-    base_score = 0.5
+    base_score = BASE_SCORE # 0.40 からスタート (v14.0.0)
     macd_valid = False
     current_long_term_penalty_applied = False
     
@@ -618,8 +617,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         average_volume = df['volume'].iloc[-31:-1].mean() if len(df) >= 31 else df['volume'].mean()
         volume_ratio = current_volume / average_volume if average_volume > 0 else 0.0
 
-        long_score = 0.5
-        short_score = 0.5
+        long_score = BASE_SCORE # 0.40
+        short_score = BASE_SCORE # 0.40
         
         # Donchian Channelの値の安全な取得
         dc_low_val = price 
@@ -629,48 +628,48 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_low_val = df['DCL_20'].iloc[-1]     
             dc_high_val = df['DCU_20'].iloc[-1]
         
-        # A. MACDに基づく方向性
+        # A. MACDに基づく方向性 (0.18 -> 0.15)
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
-            long_score += 0.18 
+            long_score += 0.15 
         elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
-            short_score += 0.18 
+            short_score += 0.15 
 
-        # B. RSIに基づく買われすぎ/売られすぎ
+        # B. RSIに基づく買われすぎ/売られすぎ (0.10 -> 0.08)
         if rsi_val < RSI_OVERSOLD:
-            long_score += 0.10
+            long_score += 0.08
         elif rsi_val > RSI_OVERBOUGHT:
-            short_score += 0.10
+            short_score += 0.08
             
-        # C. RSIに基づくモメンタムブレイクアウト
+        # C. RSIに基づくモメンタムブレイクアウト (0.10 -> 0.12)
         if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
-            long_score += 0.10
+            long_score += 0.12 # 閾値が60に上がったため、ボーナスを維持
         elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
-            short_score += 0.10
+            short_score += 0.12 # 閾値が40に下がったため、ボーナスを維持
 
-        # D. ADXに基づくトレンドフォロー強化
+        # D. ADXに基づくトレンドフォロー強化 (0.08 -> 0.10 / ADX閾値 25 -> 30)
         if adx_val > ADX_TREND_THRESHOLD:
             if long_score > short_score:
-                long_score += 0.08
+                long_score += 0.10
             elif short_score > long_score:
-                short_score += 0.08
+                short_score += 0.10
         
-        # E. VWAPの一致チェック
+        # E. VWAPの一致チェック (0.05 -> 0.04)
         vwap_consistent = False
         if price > vwap_val:
-            long_score += 0.05
+            long_score += 0.04
             vwap_consistent = True
         elif price < vwap_val:
-            short_score += 0.05
+            short_score += 0.04
             vwap_consistent = True
         
-        # F. PPOに基づくモメンタム強度の評価
+        # F. PPOに基づくモメンタム強度の評価 (0.05 -> 0.04)
         ppo_abs_mean = df[PPO_HIST_COL].abs().mean()
         if ppo_hist_val > 0 and abs(ppo_hist_val) > ppo_abs_mean:
-            long_score += 0.05 
+            long_score += 0.04 
         elif ppo_hist_val < 0 and abs(ppo_hist_val) > ppo_abs_mean:
-            short_score += 0.05
+            short_score += 0.04
 
-        # G. Donchian Channelによるブレイクアウト/過熱感フィルター
+        # G. Donchian Channelによるブレイクアウト/過熱感フィルター (0.13 -> 0.15)
         is_breaking_high = False
         is_breaking_low = False
         if dc_cols_present: 
@@ -678,15 +677,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
 
             if is_breaking_high:
-                long_score += 0.13 
+                long_score += 0.15 # 構造的なブレイクアウトの重要性を強化
             elif is_breaking_low:
-                short_score += 0.13
+                short_score += 0.15
         
-        # H. 複合モメンタム加速ボーナス
+        # H. 複合モメンタム加速ボーナス (0.07 -> 0.05)
         if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
-             long_score += 0.07
+             long_score += 0.05
         elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
-             short_score += 0.07
+             short_score += 0.05
         
         # 最終スコア決定 (中間)
         if long_score > short_score:
@@ -697,71 +696,72 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             base_score = short_score
         else:
             side = "Neutral"
-            base_score = 0.5
+            base_score = BASE_SCORE
         
-        # スコアを最終的に 1.0 でキャップ
         score = min(1.0, base_score) 
 
         # ----------------------------------------------------------------------
-        # K. NEW: 市場センチメント (FGI Proxy) の適用 (0.05点)
+        # K. NEW: 市場センチメント (FGI Proxy) の適用 (+/-0.07点)
         # ----------------------------------------------------------------------
-        sentiment_bonus = macro_context.get('sentiment_fgi_proxy', 0.0)
-        # センチメントがポジティブな場合、ロングスコアを上げ、ネガティブな場合、ショートスコアを上げる
+        sentiment_bonus = macro_context.get('sentiment_fgi_proxy', 0.0) # 値は+/-0.07
         if side == "ロング" and sentiment_bonus > 0:
             score = min(1.0, score + sentiment_bonus)
         elif side == "ショート" and sentiment_bonus < 0:
             score = min(1.0, score + abs(sentiment_bonus))
         
         # ----------------------------------------------------------------------
-        # L. NEW: Structural/Pivot Analysis (0.05点)
+        # L. NEW: Structural/Pivot Analysis (0.07点)
         # ----------------------------------------------------------------------
         structural_pivot_bonus, structural_sl_pivot, structural_tp_pivot = analyze_structural_proximity(price, pivots, side)
         score = min(1.0, score + structural_pivot_bonus)
         
         # ----------------------------------------------------------------------
-        # J. 出来高/流動性確証 (ボーナス0.10で維持、ロジック強化)
+        # J. 出来高/流動性確証 (Max 0.12)
         # ----------------------------------------------------------------------
         volume_confirmation_bonus = 0.0
         
-        # 出来高が平均の2.0倍以上で、かつブレイクアウトまたは強力なモメンタムを伴う場合
+        # 出来高が平均の2.5倍以上 (閾値強化)
         if volume_ratio >= VOLUME_CONFIRMATION_MULTIPLIER: 
             
-            # 流動性を伴うDCブレイクアウト
+            # 流動性を伴うDCブレイクアウト (0.06点)
             if dc_cols_present and (is_breaking_high or is_breaking_low):
-                volume_confirmation_bonus += 0.05
+                volume_confirmation_bonus += 0.06
             
-            # 流動性を伴う強力なMACDモメンタム
+            # 流動性を伴う強力なMACDモメンタム (0.06点)
             if abs(macd_hist_val) > df[MACD_HIST_COL].abs().mean():
-                volume_confirmation_bonus += 0.05
+                volume_confirmation_bonus += 0.06
                 
             score = min(1.0, score + volume_confirmation_bonus)
         
         
         # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) 
+        penalty_value_lt = 0.0
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
-                score = max(0.5, score - LONG_TERM_REVERSAL_PENALTY) 
+                score = max(BASE_SCORE, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
+                penalty_value_lt = LONG_TERM_REVERSAL_PENALTY
         
         # 4. MACDクロス確認と減点 (モメンタム反転チェック)
         macd_valid = True
+        penalty_value_macd = 0.0
         if timeframe in ['15m', '1h']:
              is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
                                  (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
              
              if is_macd_reversing and score >= SIGNAL_THRESHOLD:
-                 score = max(0.5, score - MACD_CROSS_PENALTY)
+                 score = max(BASE_SCORE, score - MACD_CROSS_PENALTY)
                  macd_valid = False
+                 penalty_value_macd = MACD_CROSS_PENALTY
              
         
-        # 5. NEW: TP/SLとRRRの決定 (Dynamic RRR & Structural SL)
+        # 5. TP/SLとRRRの決定 (Dynamic RRR & Structural SL)
         
-        # 5-A. Dynamic RRR の決定 (ADXとボラティリティに基づく)
         rr_base = SHORT_TERM_MIN_RRR
         
         # RRRのスケールファクター (ADXが高いほど、または長期トレンド一致でRRRを高く設定)
-        adx_factor = min(1.0, (adx_val - ADX_TREND_THRESHOLD) / 25.0) if adx_val > ADX_TREND_THRESHOLD else 0.0
+        adx_factor = min(1.0, (adx_val - ADX_TREND_THRESHOLD) / 20.0) if adx_val > ADX_TREND_THRESHOLD else 0.0
         trend_match_factor = 0.5 if side == long_term_trend and long_term_trend != "Neutral" else 0.0
         
         # RRRを 1.5 から 3.0 の間で動的に計算
@@ -769,10 +769,10 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         rr_base = SHORT_TERM_MIN_RRR + rr_max_increase * max(adx_factor, trend_match_factor) 
         
         # 5-B. エントリー価格の決定 (Market vs Limit)
-        is_high_conviction = score >= 0.70
-        is_strong_trend = adx_val >= 30 
+        is_high_conviction = score >= 0.80 # 0.80以上を確信度が高いと見なす
+        is_strong_trend = adx_val >= 35 # 35以上を強いトレンドと見なす
         
-        use_market_entry = is_high_conviction or is_strong_trend
+        use_market_entry = is_high_conviction and is_strong_trend # 両方が揃った場合のみMarket
         entry_type = "Market" if use_market_entry else "Limit"
         
         bb_mid = df['BBM_20_2.0'].iloc[-1] if 'BBM_20_2.0' in df.columns else price
@@ -785,40 +785,30 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         structural_sl_used = False
 
         if side == "ロング":
-            # エントリー
             if use_market_entry: entry = price
-            else: entry = min(min(bb_mid, dc_mid), price) # Market Fallbackロジックは省略
+            else: entry = min(min(bb_mid, dc_mid), price) 
             
-            # SL決定: ATR SLと構造的SL (S1)を比較し、より価格から遠い（安全な）方を採用
             atr_sl = entry - sl_dist
-            
-            # S1が計算可能で、かつATR SLよりタイトではない場合、S1を採用
             if structural_sl_pivot > 0 and structural_sl_pivot < atr_sl and structural_sl_pivot < entry:
                  sl = structural_sl_pivot
                  structural_sl_used = True
             else:
                  sl = atr_sl
             
-            # TP決定
             tp_dist = abs(entry - sl) * rr_base 
             tp1 = entry + tp_dist
             
         elif side == "ショート":
-            # エントリー
             if use_market_entry: entry = price
-            else: entry = max(max(bb_mid, dc_mid), price) # Market Fallbackロジックは省略
+            else: entry = max(max(bb_mid, dc_mid), price) 
             
-            # SL決定: ATR SLと構造的SL (R1)を比較し、より価格から遠い（安全な）方を採用
             atr_sl = entry + sl_dist
-            
-            # R1が計算可能で、かつATR SLよりタイトではない場合、R1を採用
             if structural_sl_pivot > 0 and structural_sl_pivot > atr_sl and structural_sl_pivot > entry:
                  sl = structural_sl_pivot
                  structural_sl_used = True
             else:
                  sl = atr_sl
                  
-            # TP決定
             tp_dist = abs(entry - sl) * rr_base 
             tp1 = entry - tp_dist
             
@@ -828,7 +818,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         # 6. 最終的なサイドの決定
         final_side = side
-        if score < SIGNAL_THRESHOLD:
+        if score < SIGNAL_THRESHOLD: # 0.75未満はNeutral
              final_side = "Neutral"
 
         # 7. tech_dataの構築
@@ -850,14 +840,16 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "dc_low": dc_low_val,
             "stoch_k": stoch_k_val,
             "stoch_d": df[STOCHRSI_D].iloc[-1] if STOCHRSI_D in df.columns else 50.0,
-            "stoch_filter_penalty": tech_data_defaults["stoch_filter_penalty"], # ペナルティ計算は複雑なため、最終スコア計算後に更新が必要
+            "stoch_filter_penalty": tech_data_defaults["stoch_filter_penalty"], 
             "volume_confirmation_bonus": volume_confirmation_bonus,
             "current_volume": current_volume,
             "average_volume": average_volume,
             "sentiment_fgi_proxy_bonus": sentiment_bonus,
             "structural_pivot_bonus": structural_pivot_bonus,
             "volume_ratio": volume_ratio,
-            "structural_sl_used": structural_sl_used # NEW
+            "structural_sl_used": structural_sl_used, 
+            "long_term_reversal_penalty_value": penalty_value_lt,
+            "macd_cross_penalty_value": penalty_value_macd
         }
         
     except Exception as e:
@@ -928,7 +920,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     signal_15m_item = next((r for r in results if r and r.get('timeframe') == '15m'), None)
 
     if signal_1h_item and signal_15m_item:
-        is_1h_strong_signal = signal_1h_item['score'] >= 0.70
+        is_1h_strong_signal = signal_1h_item['score'] >= 0.80 # 1hの閾値を更に上げる
         is_direction_matched = signal_1h_item['side'] == signal_15m_item['side']
         if is_direction_matched and is_1h_strong_signal:
             signal_15m_item['score'] = min(1.0, signal_15m_item['score'] + 0.05)
@@ -1063,11 +1055,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v13.0.0 - Enhanced Market Structure & Risk Logic")
+app = FastAPI(title="Apex BOT API", version="v14.0.0 - Strict High-Conviction Logic")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v13.0.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v14.0.0 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1081,7 +1073,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v13.0.0 - Enhanced Market Structure & Risk Logic",
+        "bot_version": "v14.0.0 - Strict High-Conviction Logic",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1092,7 +1084,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v13.0.0, Enhanced Market Structure & Risk Logic)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v14.0.0, Strict High-Conviction Logic)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
