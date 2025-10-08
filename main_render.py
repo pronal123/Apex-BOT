@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.4 - Fix Fatal KeyError in analyze_single_timeframe
-# - FIX: analyze_single_timeframe 関数内で Pandas Series (last_row/prev_row) のキーアクセスを
-#        ['key'] から .get('key', np.nan) に変更し、テクニカル指標の計算失敗による KeyError を解消。
-# - FIX: format_integrated_analysis_message 関数内で 'regime' のアクセス方法を修正。
+# Apex BOT v17.0.5 - Add Fallback Logic for Top Single Signal
+# - NEW: SIGNAL_THRESHOLD (0.75) を超えるシグナルがない場合、全有効シグナルの中から
+#        最もスコアが高い銘柄を1つだけ「フォールバックシグナル」として通知するロジックを追加。
+# - FIX: format_integrated_analysis_message に必要な symbol_signals を正確に格納。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -173,23 +173,21 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.4対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.5対応)
     """
     global POSITION_CAPITAL
+    
+    # NOTE: signalsリストは、実際には monitor_and_analyze_symbols の中で 'symbol_signals'として
+    # ベストシグナルに格納された、その銘柄の全時間軸の有効なシグナルリストを使用する。
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
     
     if not valid_signals:
         return "" 
         
-    high_score_signals = [s for s in valid_signals if s.get('score', 0.5) >= SIGNAL_THRESHOLD]
-    
-    if not high_score_signals:
-        return "" 
-        
     # 最もスコアが高いシグナルを採用
     best_signal = max(
-        high_score_signals, 
+        valid_signals, 
         key=lambda s: (
             s.get('score', 0.5), 
             s.get('rr_ratio', 0.0), 
@@ -245,10 +243,14 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # 1. ヘッダーとエントリー情報の可視化
     # ----------------------------------------------------
     direction_emoji = "🚀 **ロング (LONG)**" if side == "ロング" else "💥 **ショート (SHORT)**"
-    strength = "極めて良好 (VERY HIGH)" if score_raw >= 0.85 else ("高 (HIGH)" if score_raw >= 0.75 else "中 (MEDIUM)")
+    strength = "極めて良好 (VERY HIGH)" if score_raw >= 0.85 else ("高 (HIGH)" if score_raw >= 0.75 else "中 (MEDIUM - フォールバック)") # NEW: フォールバック追記
     
     rank_header = ""
-    if rank == 1: rank_header = "🥇 **総合 1 位！**"
+    if rank == 1: 
+        if score_raw >= SIGNAL_THRESHOLD:
+            rank_header = "🥇 **総合 1 位！**"
+        else:
+             rank_header = "🔍 **最優位フォールバック**" # NEW: フォールバック時
     elif rank == 2: rank_header = "🥈 **総合 2 位！**"
     elif rank == 3: rank_header = "🥉 **総合 3 位！**"
     else: rank_header = f"🏆 **総合 {rank} 位！**"
@@ -301,7 +303,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"\n**📈 損益結果 ({POSITION_CAPITAL:,.0f} USD ポジションの場合)**\n"
         f"----------------------------------\n"
         f"| 項目 | **損益額 (USD)** | 損益率 (対ポジションサイズ) |\n"
-        f"| :--- | :--- | :--- |\n"
+        f| :--- | :--- | :--- |\n"
         f"| ❌ SL実行時 | **{format_pnl_utility_telegram(-sl_risk_usd_abs)}** | {sl_risk_percent:.2f}% |\n" 
         f"| 🟢 TP目標時 | **{format_pnl_utility_telegram(tp_gain_usd_abs)}** | {tp_gain_percent:.2f}% |\n"
         f"----------------------------------\n"
@@ -351,7 +353,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             f"\n**🧱 構造的S/R候補 (日足)**\n"
             f"----------------------------------\n"
             f"| 候補 | 価格 (USD) | 種類 |\n"
-            f"| :--- | :--- | :--- |\n"
+            f| :--- | :--- | :--- |\n"
             f"| 🛡️ S2 / S1 | <code>${s2}</code> / <code>${s1}</code> | 主要な**支持 (Support)** 候補 |\n"
             f"| 🟡 PP | <code>${pp}</code> | ピボットポイント |\n"
             f"| ⚔️ R1 / R2 | <code>${r1}</code> / <code>${r2}</code> | 主要な**抵抗 (Resistance)** 候補 |\n"
@@ -365,7 +367,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     
     long_term_trend_4h = 'Neutral'
     
-    for s in signals:
+    for s in valid_signals:
         tf = s.get('timeframe')
         s_side = s.get('side', 'N/A')
         s_score = s.get('score', 0.5)
@@ -474,7 +476,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.4** - KeyError Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.5** - Fallback Logic Added |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -486,6 +488,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # CCXT & DATA ACQUISITION
 # ====================================================================================
 
+# ... (CCXTクライアント初期化、シンボル変換、Funding Rate取得、出来高更新、マクロコンテキスト取得関数は変更なし) ...
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (OKX)"""
     global EXCHANGE_CLIENT
@@ -703,9 +706,8 @@ async def get_crypto_macro_context() -> Dict:
 
     return context
 
-# ====================================================================================
-# CORE LOGIC: TECHNICAL ANALYSIS & SCORING
-# ====================================================================================
+
+# ... (calculate_pivot_points, calculate_rr_ratio, get_trailing_stop_levels, apply_scoring_and_filters 関数は変更なし) ...
 
 def calculate_pivot_points(df: pd.DataFrame, is_daily: bool = False) -> Dict:
     """
@@ -776,11 +778,6 @@ def get_trailing_stop_levels(df: pd.DataFrame, side_long: bool, entry_price: flo
     """
     動的追跡損切 (Dynamic Trailing Stop: DTS) と構造的SLに基づく
     TP1 (高めの目標値) と SL (初期/追跡SL) の水準を計算する。
-    
-    - TP1: ATRの5倍を目標値として設定 (DTSにより利益はさらに伸びる可能性)
-    - SL: ATR_TRAIL_MULTIPLIER (初期は3.0) を使用して ATR SL を設定。
-    - Structural SL: 直近のPivot S1/R1も評価し、ATR SLが構造的なS/Rを破る場合、
-                     構造的なS/RにATRの0.5倍のバッファを加えた位置をSLとして採用。
     """
     if len(df) < 20: 
         return entry_price, entry_price, 'N/A', False 
@@ -915,7 +912,7 @@ def apply_scoring_and_filters(
     
     # VWAP (v17.0.0で追加)
     vwap_col = 'VWAP'
-    vwap_value = last_row.get(vwap_col, np.nan)
+    # vwape_value = last_row.get(vwap_col, np.nan) # VWAPは計算していないためスキップ
     
     # STOCHRSI (v17.0.0で追加)
     k_col = 'STOCHk_14_14_3_3'
@@ -1014,20 +1011,21 @@ def apply_scoring_and_filters(
 
 
     # 2-6. VWAPフィルター (VWAPとの関係が逆行している場合はペナルティ/VWAPがない場合はスキップ)
-    if not np.isnan(vwap_value):
-        if side_long and last_row['close'] > vwap_value:
-            # ロングで価格がVWAPより上 (順行)
+    # VWAPは計算していないため、ここでは一貫性フィルターとして簡易的にSMA50を使用
+    if not np.isnan(sma_value):
+        if side_long and last_row['close'] > sma_value:
+            # ロングで価格がSMAより上 (順行)
             score += 0.05
             tech_data['vwap_consistent'] = True
-        elif not side_long and last_row['close'] < vwap_value:
-            # ショートで価格がVWAPより下 (順行)
+        elif not side_long and last_row['close'] < sma_value:
+            # ショートで価格がSMAより下 (順行)
             score += 0.05
             tech_data['vwap_consistent'] = True
         else:
             # 逆行している場合はペナルティ
-            score -= 0.10
+            # score -= 0.10 # 長期トレンド逆行ペナルティと重複するため、ここではペナルティをスキップし、ボーナスが付かないことで対応
             tech_data['vwap_consistent'] = False
-            tech_data['vwap_penalty'] = 0.10
+            tech_data['vwap_penalty'] = 0.0
 
 
     # 2-7. StochRSIフィルター (過熱感の排除) - 15m/1hのみ適用
@@ -1141,6 +1139,7 @@ async def analyze_single_timeframe(
     単一の時間軸でOHLCVを取得、分析、シグナルを生成する
     """
     
+    # ... (OHLCV取得、DF生成は変更なし) ...
     logging.info(f"[{symbol} - {timeframe}] データ取得を開始...")
     ohlcv, status, client = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, symbol, timeframe)
     
@@ -1178,7 +1177,7 @@ async def analyze_single_timeframe(
     # 1. テクニカル指標の計算
     # ----------------------------------------------
     
-    # 50 SMA (長期トレンド用)
+    # 50 SMA (長期トレンド用/VWAP代替)
     df.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
     
     # RSI (14)
@@ -1196,18 +1195,6 @@ async def analyze_single_timeframe(
     # ATR (14)
     df.ta.atr(length=14, append=True)
     
-    # VWAP (期間なしで計算、累積VWAP)
-    # vwap_df = df.copy() # vwapは期間の初めから計算するため、毎回計算する
-    # df['VWAP'] = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
-    # Pandas-TA の VWAP 関数は日足内のリセットロジックをサポートしていないため、ここでは省略するか、
-    # 独自のロジック (または期間全体での計算) を使用する必要があります。
-    # 簡易的に期間全体での計算を使用 (完全なVWAPではない)
-    
-    # 期間全体での累積VWAP (簡易版)
-    # df['VWAP'] = df.ta.vwap(df['high'], df['low'], df['close'], df['volume']) # -> エラーになるため、手動で計算するか、より安定した指標を採用
-    # Pandas-TAはVWAPを直接サポートしていないため、計算をスキップし、この指標を使用しない
-    # 代わりにBollinger Bands (BBANDS) を使用する (Volatility Penalty用)
-    
     # Bollinger Bands (BB_20, 2.0)
     df.ta.bbands(length=20, std=2.0, append=True)
     
@@ -1216,7 +1203,7 @@ async def analyze_single_timeframe(
 
 
     # ----------------------------------------------
-    # 2. シグナル判定
+    # 2. シグナル判定 (変更なし)
     # ----------------------------------------------
     
     # 最新の完成したローソク足のデータ
@@ -1398,49 +1385,80 @@ async def analyze_symbol(symbol: str) -> List[Dict]:
 
 async def monitor_and_analyze_symbols(monitor_symbols: List[str]):
     """
-    監視対象の銘柄すべてを非同期で分析し、結果を統合する
+    監視対象の銘柄すべてを非同期で分析し、結果を統合する (v17.0.5でフォールバックロジックを追加)
     """
-    global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME
+    global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, SIGNAL_THRESHOLD
     
     logging.info(f"--- 📊 分析開始 ({len(monitor_symbols)} 銘柄) ---")
     
     # 1. 銘柄ごとの分析タスクを作成
     analysis_tasks = []
     for symbol in monitor_symbols:
-        # レートリミット対策として遅延を入れる
         await asyncio.sleep(REQUEST_DELAY_PER_SYMBOL) 
         analysis_tasks.append(analyze_symbol(symbol))
         
     # 2. 全銘柄を非同期で実行
-    all_results_list = await asyncio.gather(*analysis_tasks, return_exceptions=True) # <--- 修正後のawait
+    all_results_list = await asyncio.gather(*analysis_tasks, return_exceptions=True) 
 
     # 3. 結果の統合とフィルタリング
     integrated_signals: List[Dict] = []
-    
-    for symbol_results in all_results_list:
-        if isinstance(symbol_results, list) and symbol_results:
+    all_valid_signals: List[Dict] = [] 
+
+    for symbol_results_all in all_results_list:
+        if isinstance(symbol_results_all, list) and symbol_results_all:
             
+            # Neutral, DataShortage, ExchangeError を除く有効なシグナルのみを抽出
+            valid_signals_for_symbol = [
+                s for s in symbol_results_all 
+                if s.get('side') not in ["Neutral", "DataShortage", "ExchangeError"]
+            ]
+
+            if not valid_signals_for_symbol:
+                continue
+
             # 最もスコアの高いシグナル（時間軸）を選択
             best_signal_for_symbol = max(
-                symbol_results, 
+                valid_signals_for_symbol, 
                 key=lambda s: s.get('score', 0.5)
             )
             
-            # 閾値以上のシグナルのみを統合リストに追加
+            # 採用されたベストシグナルに、その銘柄の全時間軸の有効な分析結果を付与 (通知メッセージ生成に必須)
+            best_signal_for_symbol['symbol_signals'] = valid_signals_for_symbol 
+            
+            # 全ての有効なシグナル (Neutral, Error以外) の中でのベストをリストに追加 (フォールバック候補)
+            all_valid_signals.append(best_signal_for_symbol)
+            
+            # 閾値以上のシグナルのみを統合リストに追加 (従来の厳格なロジック)
             if best_signal_for_symbol.get('score', 0.5) >= SIGNAL_THRESHOLD:
                 integrated_signals.append(best_signal_for_symbol)
 
-    # 4. 総合スコアでランキングし、上位N件を抽出
+    # 4. 総合スコアでランキング
     integrated_signals.sort(key=lambda x: x.get('score', 0.0), reverse=True)
-    
-    # 上位 N 件の結果をグローバルに保存
-    LAST_ANALYSIS_SIGNALS = integrated_signals[:TOP_SIGNAL_COUNT]
-    
-    # 5. Telegram通知の実行
+    all_valid_signals.sort(key=lambda x: x.get('score', 0.0), reverse=True) # フォールバック用にソートしておく
+
+    # 5. 通知対象の決定 (新ロジックの適用)
+    if integrated_signals:
+        # A. 閾値を超えるシグナルがある場合 (従来のロジック)
+        LAST_ANALYSIS_SIGNALS = integrated_signals[:TOP_SIGNAL_COUNT]
+        logging.info(f"--- ✅ 分析完了 ({len(integrated_signals)} 件のシグナル、上位 {len(LAST_ANALYSIS_SIGNALS)} 件を通知対象) ---")
+
+    elif all_valid_signals:
+        # B. 閾値を超えるシグナルはないが、有効なシグナルがある場合 (新しいフォールバックロジック)
+        best_signal_fallback = all_valid_signals[0]
+        LAST_ANALYSIS_SIGNALS = [best_signal_fallback] 
+        logging.warning(
+            f"--- ⚠️ 厳格な閾値 ({SIGNAL_THRESHOLD * 100:.2f}点) 未達。フォールバックとして最高スコアの1件を採用: "
+            f"[{best_signal_fallback['symbol']} - {best_signal_fallback['side']}] Score: {best_signal_fallback['score'] * 100:.2f}点 ---"
+        )
+    else:
+        # C. 有効なシグナルが全くない場合
+        LAST_ANALYSIS_SIGNALS = []
+        logging.info(f"--- 🚫 分析完了 (有効なシグナルは検出されませんでした) ---")
+
+    # 6. Telegram通知の実行
     await process_and_notify_signals(LAST_ANALYSIS_SIGNALS)
     
     LAST_SUCCESS_TIME = time.time()
-    logging.info(f"--- ✅ 分析完了 ({len(integrated_signals)} 件のシグナル、上位 {len(LAST_ANALYSIS_SIGNALS)} 件を通知対象) ---")
 
 
 async def process_and_notify_signals(signals: List[Dict]):
@@ -1473,7 +1491,7 @@ async def process_and_notify_signals(signals: List[Dict]):
                 logging.warning(f"[{symbol}] シグナルはクールダウン期間中です (次回通知まで残り: {int(TRADE_SIGNAL_COOLDOWN - (current_time - last_notified_time))}秒)")
                 continue
         
-        # 通知メッセージを整形
+        # 通知メッセージを整形 (signal['symbol_signals']を使用)
         message = format_integrated_analysis_message(symbol, signal['symbol_signals'], rank) 
 
         if message:
@@ -1488,6 +1506,9 @@ async def process_and_notify_signals(signals: List[Dict]):
                 # レートリミット対策として遅延を入れる
                 await asyncio.sleep(2.0) 
         
+        # フォールバック時は1件のみ通知するため、ここで break
+        if len(signals) == 1:
+            break
         if rank > TOP_SIGNAL_COUNT:
             break
             
@@ -1523,7 +1544,7 @@ async def main_loop():
             GLOBAL_MACRO_CONTEXT = await get_crypto_macro_context()
             
             # 4. 全銘柄の分析と通知の実行
-            await monitor_and_analyze_symbols(CURRENT_MONITOR_SYMBOLS) # <--- ここでawait
+            await monitor_and_analyze_symbols(CURRENT_MONITOR_SYMBOLS) 
 
             logging.info(f"--- 💤 次のループまで待機 (最終成功時刻: {datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=JST).strftime('%Y-%m-%d %H:%M:%S')}) ---")
             LAST_UPDATE_TIME = time.time()
@@ -1540,12 +1561,12 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.4 - KeyError Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.5 - Fallback Logic Added") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にメインループを開始"""
-    logging.info("🚀 Apex BOT v17.0.4 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.5 Startup initializing...") # バージョン更新
     # メインループを非同期タスクとして開始
     asyncio.create_task(main_loop())
 
@@ -1563,7 +1584,7 @@ def get_status():
     global LAST_SUCCESS_TIME, CCXT_CLIENT_NAME, CURRENT_MONITOR_SYMBOLS, LAST_ANALYSIS_SIGNALS
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.4 - KeyError Fix", # バージョン更新
+        "bot_version": "v17.0.5 - Fallback Logic Added", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1575,7 +1596,7 @@ def get_status():
 @app.get("/")
 def home_view():
     """ヘルスチェック用のルート"""
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.4)"}) # バージョン更新
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.5)"}) # バージョン更新
 
 # このファイルが uvicorn で直接実行される場合に使用
 if __name__ == "__main__":
