@@ -1,10 +1,6 @@
-# main_render.py (Pivot価格表示確認済み - v16.0.3)
+# main_render.py (ValueError Fix - v16.0.4)
 # ====================================================================================
-# Apex BOT v16.0.3 - P/L Simulation & DTS & Dominance Bias Filter (Structural SL Buffer Fix)
-# - NEW: $1000固定資本でのPivotレベル到達時の概算損益をTelegram通知に追加
-# - FIX: 構造的SL (S1/R1) を使用する際に、エントリーポイントとの一致を避けるため、SLに 0.5 * ATR のバッファを追加
-# - BTCドミナンスの増減トレンドを判定し、Altcoinのシグナルスコアに反映 (+/- 0.05点)
-# - FIX: Telegram通知のP/LセクションでPivotレベルの価格が明確に表示されていることを確認。
+# Apex BOT v16.0.4 - ValueError Fix (Robust YFinance Data Handling)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -187,7 +183,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.3対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.4対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -436,7 +432,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v16.0.3** - Pivot Price Confirmed |\n" # バージョンを v16.0.3 に更新
+        f"| ⚙️ **BOT Ver** | **v16.0.4** - ValueError Fix |\n" # バージョンを v16.0.4 に更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -565,6 +561,8 @@ async def get_crypto_macro_context() -> Dict:
     eth_trend = 0
     btc_change = 0.0
     eth_change = 0.0
+    
+    # 🚨 FIX: btc_dom_changeを事前に初期化 (ValueError/UnboundLocalError対策)
     btc_dom_change = 0.0
     
     df_btc = pd.DataFrame()
@@ -602,12 +600,23 @@ async def get_crypto_macro_context() -> Dict:
     # yfinance (Yahoo Finance) を使用してBTC.Dの代理としてBTC/USDの直近のボラティリティ/モメンタムを測定
     try:
         btc_dom = yf.download(tickers="BTC-USD", period="1d", interval="1h", progress=False)
+        
+        # 🚨 FIX: NaNチェックとゼロ除算防止を追加
         if not btc_dom.empty and len(btc_dom) >= 2:
-            # 1時間の価格変化をドミナンス変化のプロキシとして使用 (非常に単純化されたFGIプロキシ)
-            btc_dom_change = (btc_dom['Close'].iloc[-1] - btc_dom['Close'].iloc[-2]) / btc_dom['Close'].iloc[-2]
+            close_latest = btc_dom['Close'].iloc[-1]
+            close_previous = btc_dom['Close'].iloc[-2]
+            
+            # NaNチェックとゼロ除算チェック
+            if pd.notna(close_latest) and pd.notna(close_previous) and close_previous != 0:
+                # 1時間の価格変化をドミナンス変化のプロキシとして使用 (非常に単純化されたFGIプロキシ)
+                btc_dom_change = (close_latest - close_previous) / close_previous
+            else:
+                 btc_dom_change = 0.0 # 計算不能な場合は0.0に設定
             
     except Exception as e:
-        logging.warning(f"Yahoo FinanceからのBTCデータ取得エラー: {e}")
+        # 🚨 FIX: エラー時にも btc_dom_change が必ず設定されるようにする
+        logging.warning(f"Yahoo FinanceからのBTCデータ取得エラー: {e}. btc_dom_changeを 0.0 に設定します。")
+        btc_dom_change = 0.0
 
     # 3. マクロコンテキストの統合
     # Fear & Greed Index (FGI) Proxy: BTCの短期的なボラティリティとトレンドの組み合わせ
@@ -1060,7 +1069,7 @@ async def main_loop():
                 for i, signal in enumerate(LAST_ANALYSIS_SIGNALS):
                     rank = i + 1
                     symbol = signal['symbol']
-                    # format_integrated_analysis_messageがv16.0.3のフォーマット（Pivot価格入り）でメッセージを生成
+                    # format_integrated_analysis_messageがv16.0.4のフォーマット（Pivot価格入り）でメッセージを生成
                     message = format_integrated_analysis_message(symbol, signal_map[symbol], rank)
                     
                     send_telegram_html(message)
@@ -1092,11 +1101,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v16.0.3 - Pivot Price Confirmed")
+app = FastAPI(title="Apex BOT API", version="v16.0.4 - ValueError Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v16.0.3 Startup initializing...") 
+    logging.info("🚀 Apex BOT v16.0.4 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1110,7 +1119,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v16.0.3 - Pivot Price Confirmed",
+        "bot_version": "v16.0.4 - ValueError Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
