@@ -3,6 +3,7 @@
 # - 資金調達率 (Funding Rate) を取得し、レバレッジの偏り（需給バイアス）をスコアに反映 (+/- 0.08点)
 # - 固定TP/RRRを廃止し、ATRに基づく動的トレーリングストップ (DTS) を採用し、利益最大化を狙う
 # - スコア条件はv14.0.0の厳格な設定 (SIGNAL_THRESHOLD=0.75, BASE_SCORE=0.40) を維持
+# - NEW: Limit Entryの優位性をEntry Advantage Score (EAS)で評価し、最も効率の良い底/天井を通知する
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -232,7 +233,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| 指標 | 価格 (USD) | 備考 |\n"
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
-        f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション ({entry_type}注文) |\n" 
+        f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (**<ins>底/天井を狙う Limit 注文</ins>**) |\n" 
         f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}) |\n"
         f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | **動的決済** (DTSにより利益最大化) |\n" 
         f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({sl_source_str} / **初期追跡ストップ**) |\n"
@@ -322,9 +323,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v15.0.0** - DTS & Funding Rate Bias Filter |\n" 
+        f"| ⚙️ **BOT Ver** | **v15.0.0** - EAS Priority Filter |\n" 
         f"==================================\n"
-        f"\n<pre>※ DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
+        f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
 
     return header + trade_plan + analysis_detail + footer
@@ -368,10 +369,6 @@ async def fetch_funding_rate(symbol: str) -> float:
     except Exception as e:
         # logging.debug(f"Error fetching funding rate for {symbol}: {e}")
         return 0.0
-
-
-# ... (update_symbols_by_volume, fetch_ohlcv_with_fallback, get_crypto_macro_context はv14.0.0から変更なし)
-# (省略なく、全ての関数を定義します)
 
 async def update_symbols_by_volume():
     """CCXTを使用してOKXの出来高トップ30のUSDTペア銘柄を動的に取得・更新する"""
@@ -577,9 +574,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "volume_ratio": 0.0, "structural_sl_used": False,
         "long_term_reversal_penalty_value": 0.0, 
         "macd_cross_penalty_value": 0.0,
-        "funding_rate_value": funding_rate_val, # NEW
-        "funding_rate_bonus_value": 0.0, # NEW
-        "dynamic_exit_strategy": "DTS" # NEW: DTSをデフォルトに設定
+        "funding_rate_value": funding_rate_val, 
+        "funding_rate_bonus_value": 0.0, 
+        "dynamic_exit_strategy": "DTS" 
     }
     
     if status != "Success":
@@ -817,6 +814,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         is_high_conviction = score >= 0.80 # 0.80以上を確信度が高いと見なす
         is_strong_trend = adx_val >= 35 # 35以上を強いトレンドと見なす
         
+        # Limit Entryは、BB Mid / DC Mid / Pivot S/R のうち、最も価格的に有利な水準を狙う
         use_market_entry = is_high_conviction and is_strong_trend # 両方が揃った場合のみMarket
         entry_type = "Market" if use_market_entry else "Limit"
         
@@ -832,8 +830,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         structural_sl_used = False
 
         if side == "ロング":
-            if use_market_entry: entry = price
-            else: entry = min(min(bb_mid, dc_mid), price) 
+            if use_market_entry: 
+                entry = price
+            else: 
+                # Limit Entry (ロング): Limit価格として、Current Price, BB Mid, DC Mid のうち「最も低い価格」をエントリーポイントとする (深い押し目を狙う)
+                entry = min(min(bb_mid, dc_mid), price) 
             
             atr_sl = entry - sl_dist_atr
             
@@ -849,8 +850,11 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             tp1 = entry + tp_dist
             
         elif side == "ショート":
-            if use_market_entry: entry = price
-            else: entry = max(max(bb_mid, dc_mid), price) 
+            if use_market_entry: 
+                entry = price
+            else: 
+                # Limit Entry (ショート): Limit価格として、Current Price, BB Mid, DC Mid のうち「最も高い価格」をエントリーポイントとする (深い戻り売りを狙う)
+                entry = max(max(bb_mid, dc_mid), price) 
             
             atr_sl = entry + sl_dist_atr
             
@@ -1029,6 +1033,21 @@ async def main_loop():
                 
                 if signal.get('side') == 'Neutral' or signal.get('side') in ["DataShortage", "ExchangeError"]:
                     continue
+                
+                # Limit Entry の優位性スコアを計算 (EAS)
+                entry_advantage_score = 0.0
+                atr_val = signal.get('tech_data', {}).get('atr_value', 1.0)
+                price = signal.get('price', 0.0)
+                entry_price = signal.get('entry', 0.0)
+                
+                if signal.get('entry_type', 'N/A') == 'Limit' and atr_val > 0 and price > 0 and entry_price > 0:
+                    if signal.get('side') == 'ロング':
+                        # ロング (底を取る): 現在価格(price) - Limit価格(entry_price) / ATR
+                        entry_advantage_score = (price - entry_price) / atr_val
+                    elif signal.get('side') == 'ショート':
+                        # ショート (天井を取る): Limit価格(entry_price) - 現在価格(price) / ATR
+                        entry_advantage_score = (entry_price - price) / atr_val
+
 
                 if symbol not in best_signals_per_symbol or score > best_signals_per_symbol[symbol]['score']:
                     all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
@@ -1038,22 +1057,31 @@ async def main_loop():
                         'all_signals': all_symbol_signals,
                         'rr_ratio': signal.get('rr_ratio', 0.0), 
                         'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
-                        'atr_val': signal.get('tech_data', {}).get('atr_value', 1.0),
-                        'symbol': symbol 
+                        'atr_val': atr_val,
+                        'symbol': symbol,
+                        'entry_type': signal.get('entry_type', 'N/A'),
+                        'entry_advantage_score': entry_advantage_score # <--- ★ EASを追加
                     }
             
-            # スコア、RRR、ADX、ボラティリティの順でソート（勝率と利益率を重視）
+            # --- Limit Entry ポジションのみをフィルタリングし、ソート基準を優位性スコアに変更 ---
+            limit_entry_signals = [
+                item for item in best_signals_per_symbol.values() 
+                if item['entry_type'] == 'Limit' 
+            ]
+
+            # ソート: Entry Advantage Score (EAS, 優位性) を最優先、次にスコア、RRRの順
             sorted_best_signals = sorted(
-                best_signals_per_symbol.values(), 
+                limit_entry_signals, 
                 key=lambda x: (
+                    x['entry_advantage_score'], # EASを最優先 (降順)
                     x['score'],     
                     x['rr_ratio'],  
-                    x['adx_val'],   
-                    -x['atr_val'],  
+                    x['adx_val'],   # ADXは低い方を優先し、調整局面を狙う
                     x['symbol']     
                 ), 
                 reverse=True
             )
+            # --------------------------------------------------------------------------
             
             top_signals_to_notify = [
                 item for item in sorted_best_signals 
@@ -1063,7 +1091,7 @@ async def main_loop():
             notify_tasks = [] 
             
             if top_signals_to_notify:
-                logging.info(f"🔔 高スコアシグナル {len(top_signals_to_notify)} 銘柄をチェックします。")
+                logging.info(f"🔔 高スコア/高優位性シグナル {len(top_signals_to_notify)} 銘柄をチェックします。")
                 
                 for i, item in enumerate(top_signals_to_notify):
                     symbol = item['all_signals'][0]['symbol']
@@ -1075,7 +1103,7 @@ async def main_loop():
                         
                         if msg:
                             log_symbol = symbol.replace('-', '/')
-                            logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (順位: {i+1}位, スコア: {item['score'] * 100:.2f}点)")
+                            logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (順位: {i+1}位, スコア: {item['score'] * 100:.2f}点, EAS: {item['entry_advantage_score']:.2f})")
                             TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                             
                             task = asyncio.create_task(asyncio.to_thread(lambda m=msg: send_telegram_html(m)))
@@ -1111,7 +1139,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v15.0.0 - DTS & Funding Rate Bias Filter")
+app = FastAPI(title="Apex BOT API", version="v15.0.0 - EAS Priority Filter")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1129,7 +1157,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v15.0.0 - DTS & Funding Rate Bias Filter",
+        "bot_version": "v15.0.0 - EAS Priority Filter",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1140,7 +1168,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v15.0.0, DTS & Funding Rate Bias Filter)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v15.0.0, EAS Priority Filter)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
