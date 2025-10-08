@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.2 - Pivot P&L Feature & KeyError Fix Base
-# - NEW: Telegram通知に $1000 ポジションでの Pivot S/R 到達時の概算損益ブロックを追加。
-# - FIX: analyze_single_timeframe 内で Pandas Series のキーに直接アクセスしていた箇所を .get() に変更し、KeyError を解消。(v17.0.1 Base)
+# Apex BOT v17.0.3 - Fix SyntaxError: 'await' outside async function
+# - FIX: analyze_top_symbols 関数を def から async def に修正し、await 構文エラーを解消。
+# - FIX: main_loop 内の analyze_top_symbols 呼び出しに await を追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -172,7 +172,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.2対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.3対応)
     """
     global POSITION_CAPITAL
     
@@ -464,13 +464,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     # 3. リスク管理とフッター
     regime = best_signal.get('regime', 'N/A')
-
+    
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.2** - Pivot P&L Feature |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.3** - Syntax Error Fix |\n" # バージョン更新
         f"==================================\n"
-        f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
+            f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
 
     return header + trade_plan + pnl_block + pivot_pnl_block + sr_info + analysis_detail + footer
@@ -1011,7 +1011,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     }
 
 
-def analyze_top_symbols(monitor_symbols: List[str], macro_context: Dict) -> List[Dict]:
+async def analyze_top_symbols(monitor_symbols: List[str], macro_context: Dict) -> List[Dict]:
     """
     トップ銘柄の各時間足のシグナルを並行して分析し、統合スコアの高いものを返す
     """
@@ -1074,7 +1074,6 @@ def analyze_top_symbols(monitor_symbols: List[str], macro_context: Dict) -> List
 # ====================================================================================
 # MAIN LOOP
 # ====================================================================================
-
 async def main_loop():
     """メインループ: 定期的に市場データを取得し、分析と通知を実行する"""
     global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT
@@ -1096,7 +1095,8 @@ async def main_loop():
             
             # 3. 監視対象のトップ銘柄を分析
             logging.info(f"🔎 監視対象銘柄 ({len(CURRENT_MONITOR_SYMBOLS)}) の分析を開始します...")
-            top_signals = await analyze_top_symbols(CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT)
+            # 修正箇所: analyze_top_symbols は async 関数になったため、await が必要
+            top_signals = await analyze_top_symbols(CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT) 
             LAST_ANALYSIS_SIGNALS = top_signals
             
             # 4. シグナルの通知とログ出力
@@ -1137,11 +1137,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.2 - Pivot P&L Feature") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.3 - Syntax Error Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.2 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.3 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1155,7 +1155,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.2 - Pivot P&L Feature", # バージョン更新
+        "bot_version": "v17.0.3 - Syntax Error Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1166,7 +1166,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.2)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.3)"})
 
 
 if __name__ == "__main__":
