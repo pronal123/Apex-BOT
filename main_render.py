@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.3 - Fix SyntaxError: 'await' outside async function
-# - FIX: analyze_top_symbols 関数を def から async def に修正し、await 構文エラーを解消。
-# - FIX: main_loop 内の analyze_top_symbols 呼び出しに await を追加。
+# Apex BOT v17.0.4 - Fix Fatal KeyError in analyze_single_timeframe
+# - FIX: analyze_single_timeframe 関数内で Pandas Series (last_row/prev_row) のキーアクセスを
+#        ['key'] から .get('key', np.nan) に変更し、テクニカル指標の計算失敗による KeyError を解消。
+# - FIX: format_integrated_analysis_message 関数内で 'regime' のアクセス方法を修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -172,7 +173,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.3対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.4対応)
     """
     global POSITION_CAPITAL
     
@@ -267,7 +268,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     header = (
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
-        f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}{market_sentiment_str}\n" 
+        f"{rank_header} 🔥 {strength} 発生！ - {direction_emoji}{market_sentiment_str}\n" 
         f"==================================\n"
         f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件極めて良好** |\n"
         f"| 💯 **分析スコア** | <b>{score_100:.2f} / 100.00 点</b> (ベース: {timeframe}足) |\n" 
@@ -410,7 +411,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             
             # 採用された時間軸の技術指標を詳細に表示
             if tf == timeframe:
-                regime = best_signal.get('regime', 'N/A')
+                # FIX: regimeをtech_dataから取得
+                regime = best_signal.get('tech_data', {}).get('regime', 'N/A')
+                
                 # ADX/Regime
                 analysis_detail += f"   └ **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({regime})\n"
                 # RSI/MACDH/CCI/STOCH
@@ -463,14 +466,15 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 
     # 3. リスク管理とフッター
-    regime = best_signal.get('regime', 'N/A')
+    # FIX: regimeをtech_dataから取得
+    regime = best_signal.get('tech_data', {}).get('regime', 'N/A')
     
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.3** - Syntax Error Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.4** - KeyError Fix |\n" # バージョン更新
         f"==================================\n"
-            f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
+        f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
 
     return header + trade_plan + pnl_block + pivot_pnl_block + sr_info + analysis_detail + footer
@@ -734,24 +738,26 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     last_row = df.iloc[-1]
     prev_row = df.iloc[-2] if len(df) >= 2 else last_row
     
-    current_price = last_row['close']
-    current_rsi = last_row['RSI_14']
-    current_macd_hist = last_row['MACDh_12_26_9']
-    current_adx = last_row['ADX_14']
-    current_atr = last_row['ATR_14']
-    current_sma = last_row[f'SMA_{LONG_TERM_SMA_LENGTH}']
-    current_stoch_k = last_row['STOCHk_14_3_3']
-    current_stoch_d = last_row['STOCHd_14_3_3']
+    current_price = last_row.get('close', np.nan) # close, high, low, volumeはohlcvの基本データなので通常は存在するが、念のため.get()
     
-    # NEW: KeyError対策 (.get()を使用)
+    # FIX: KeyError対策のため、直接アクセス (['key']) を .get('key', np.nan) に変更
+    current_rsi = last_row.get('RSI_14', np.nan)
+    current_macd_hist = last_row.get('MACDh_12_26_9', np.nan)
+    current_adx = last_row.get('ADX_14', np.nan)
+    current_atr = last_row.get('ATR_14', np.nan)
+    current_sma = last_row.get(f'SMA_{LONG_TERM_SMA_LENGTH}', np.nan)
+    current_stoch_k = last_row.get('STOCHk_14_3_3', np.nan)
+    current_stoch_d = last_row.get('STOCHd_14_3_3', np.nan)
+    
     bb_lower = last_row.get('BBL_20_2.0', np.nan) 
     bb_upper = last_row.get('BBU_20_2.0', np.nan)
     bb_mid = last_row.get('BBM_20_2.0', np.nan)
     
-    prev_rsi = prev_row['RSI_14']
-    prev_macd_hist = prev_row['MACDh_12_26_9']
-    prev_stoch_k = prev_row['STOCHk_14_3_3']
-    prev_stoch_d = prev_row['STOCHd_14_3_3']
+    # FIX: KeyError対策のため、直接アクセス (['key']) を .get('key', np.nan) に変更
+    prev_rsi = prev_row.get('RSI_14', np.nan)
+    prev_macd_hist = prev_row.get('MACDh_12_26_9', np.nan)
+    prev_stoch_k = prev_row.get('STOCHk_14_3_3', np.nan)
+    prev_stoch_d = prev_row.get('STOCHd_14_3_3', np.nan)
 
     base_score = BASE_SCORE # 0.40
     side = 'Neutral'
@@ -790,6 +796,10 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     
     # 5. シグナル方向の決定とベーススコアの加算（4h足以外）
     
+    # NaNチェックを導入 (計算に失敗した場合はシグナル生成不可)
+    if np.isnan(current_macd_hist) or np.isnan(prev_macd_hist) or np.isnan(current_rsi) or np.isnan(prev_rsi) or np.isnan(current_atr):
+         return {'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage', 'score': 0.0}
+
     # MACDヒストグラムのクロスオーバー (最も強いシグナル)
     if current_macd_hist > 0 and prev_macd_hist <= 0:
         side = 'Long'
@@ -918,7 +928,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     if len(df) >= 30:
         volume_avg = df['volume'].iloc[-30:-1].mean()
         if not np.isnan(volume_avg) and volume_avg > 0:
-            volume_ratio = last_row['volume'] / volume_avg
+            volume_ratio = last_row.get('volume', 0.0) / volume_avg
             if volume_ratio >= VOLUME_CONFIRMATION_MULTIPLIER: # 2.5倍以上
                 base_score += 0.12 # 出来高ボーナス
                 volume_confirmation_bonus = 0.12
@@ -1074,6 +1084,7 @@ async def analyze_top_symbols(monitor_symbols: List[str], macro_context: Dict) -
 # ====================================================================================
 # MAIN LOOP
 # ====================================================================================
+
 async def main_loop():
     """メインループ: 定期的に市場データを取得し、分析と通知を実行する"""
     global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT
@@ -1095,7 +1106,6 @@ async def main_loop():
             
             # 3. 監視対象のトップ銘柄を分析
             logging.info(f"🔎 監視対象銘柄 ({len(CURRENT_MONITOR_SYMBOLS)}) の分析を開始します...")
-            # 修正箇所: analyze_top_symbols は async 関数になったため、await が必要
             top_signals = await analyze_top_symbols(CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT) 
             LAST_ANALYSIS_SIGNALS = top_signals
             
@@ -1137,11 +1147,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.3 - Syntax Error Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.4 - KeyError Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.3 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.4 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1155,7 +1165,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.3 - Syntax Error Fix", # バージョン更新
+        "bot_version": "v17.0.4 - KeyError Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1166,11 +1176,10 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.3)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.4)"})
 
 
 if __name__ == "__main__":
-    # uvicorn.run(app, host="0.0.0.0", port=8000)
     # 環境変数からポートを取得し、デフォルトは8000
     port = int(os.environ.get("PORT", 8000))
     # ローカル開発やHerokuのGunicorn実行時のために非同期でmain_loopを起動
