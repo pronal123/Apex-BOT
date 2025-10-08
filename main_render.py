@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.5 - Add Fallback Logic for Top Single Signal
-# - NEW: SIGNAL_THRESHOLD (0.75) を超えるシグナルがない場合、全有効シグナルの中から
-#        最もスコアが高い銘柄を1つだけ「フォールバックシグナル」として通知するロジックを追加。
-# - FIX: format_integrated_analysis_message に必要な symbol_signals を正確に格納。
+# Apex BOT v17.0.6 - Fallback Logging and Analysis Clarity Fix
+# - FIX: monitor_and_analyze_symbols の if/elif/else 構造内での最終ログ出力を修正。
+#        これにより、厳格な閾値未達でフォールバックが発動した場合のログが確実に出力される。
+# - FIX: TOSHI-USDTなどで発生する例外エラーは、引き続きasyncio.gatherで捕捉・スキップされる。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -64,7 +64,7 @@ MACD_CROSS_PENALTY = 0.15
 # Dynamic Trailing Stop (DTS) Parameters
 ATR_TRAIL_MULTIPLIER = 3.0          
 DTS_RRR_DISPLAY = 5.0               
-POSITION_CAPITAL = 1000.0           # 1x想定のポジションサイズ (USD) - NEW
+POSITION_CAPITAL = 1000.0           # 1x想定のポジションサイズ (USD)
 
 # Funding Rate Bias Filter Parameters
 FUNDING_RATE_THRESHOLD = 0.00015    
@@ -121,7 +121,7 @@ def format_price_utility(price: float, symbol: str) -> str:
     return f"{price:,.8f}"
 
 def format_pnl_utility_telegram(pnl_usd: float) -> str:
-    """損益額をTelegram表示用に整形し、色付けする - NEW"""
+    """損益額をTelegram表示用に整形し、色付けする"""
     if pnl_usd > 0.0001:
         return f"<ins>+${pnl_usd:,.2f}</ins> 🟢"
     elif pnl_usd < -0.0001:
@@ -155,7 +155,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
     return max(0.40, min(0.85, adjusted_rate))
 
 def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, capital: float) -> float:
-    """Pivot価格到達時の損益を計算する (1x想定) - NEW Utility"""
+    """Pivot価格到達時の損益を計算する (1x想定)"""
     if target_price <= 0 or entry <= 0: return 0.0
     
     # 数量 = 資本 / エントリー価格
@@ -173,7 +173,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.5対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.6対応)
     """
     global POSITION_CAPITAL
     
@@ -282,7 +282,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     sl_source_str = "ATR基準"
     if best_signal.get('tech_data', {}).get('structural_sl_used', False):
-        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" # FIX反映
+        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" 
         
     # 取引計画の表示をDTSに合わせて変更
     trade_plan = (
@@ -298,7 +298,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"----------------------------------\n"
     )
 
-    # NEW: SL/TP 到達時のP&Lブロック (1000 USD ポジション)
+    # NEW: $1000 ポジションに基づくP&Lブロック (1000 USD ポジション)
     pnl_block = (
         f"\n**📈 損益結果 ({POSITION_CAPITAL:,.0f} USD ポジションの場合)**\n"
         f"----------------------------------\n"
@@ -476,7 +476,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.5** - Fallback Logic Added |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.6** - Fallback Log Fixed |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -488,7 +488,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # CCXT & DATA ACQUISITION
 # ====================================================================================
 
-# ... (CCXTクライアント初期化、シンボル変換、Funding Rate取得、出来高更新、マクロコンテキスト取得関数は変更なし) ...
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (OKX)"""
     global EXCHANGE_CLIENT
@@ -707,23 +706,13 @@ async def get_crypto_macro_context() -> Dict:
     return context
 
 
-# ... (calculate_pivot_points, calculate_rr_ratio, get_trailing_stop_levels, apply_scoring_and_filters 関数は変更なし) ...
-
 def calculate_pivot_points(df: pd.DataFrame, is_daily: bool = False) -> Dict:
     """
     Pivot Points (Classic) を計算する
     日足/4h足のデータフレームの最後の期間のHLC情報を使用。
     """
-    if len(df) < 1:
-        return {}
-        
-    # 日足（24時間）のPivot計算には、前日（最後から2番目）のデータを使用するのが一般的。
-    # ここでは、データフレームの最後の期間のOHLCVデータを使用（日足で実行されることを想定）。
-    # ただし、4h足で使用する場合、その4h期間のHLCとなる。
-    # 構造的なS/Rとして使用するため、ここでは最も新しい完成したローソク足(最後から2番目)をベースにする。
-    
     if len(df) < 2:
-         return {}
+        return {}
     
     # 最後から2番目のローソク足を使用
     prev_row = df.iloc[-2]
@@ -818,7 +807,6 @@ def get_trailing_stop_levels(df: pd.DataFrame, side_long: bool, entry_price: flo
             s1 = pivot_points.get('s1', 0.0)
             s2 = pivot_points.get('s2', 0.0)
             
-            # S1より下にATR SLがある場合、S1の少し下をSL候補とする (よりタイトなSLを採用)
             # S1がATR SLより上にある場合、S1をSL候補とし、バッファを引く
             if s1 > 0 and s1 > atr_sl:
                  structural_sl = s1 - atr_buffer 
@@ -832,7 +820,7 @@ def get_trailing_stop_levels(df: pd.DataFrame, side_long: bool, entry_price: flo
             r1 = pivot_points.get('r1', 0.0)
             r2 = pivot_points.get('r2', 0.0)
             
-            # R1より上にATR SLがある場合、R1の少し上をSL候補とする
+            # R1がATR SLより下にある場合、R1の少し上をSL候補とする
             if r1 > 0 and r1 < atr_sl:
                 structural_sl = r1 + atr_buffer 
                 # 構造的SLが現在のATR SLよりタイトな場合のみ採用 (リスク最小化)
@@ -909,10 +897,6 @@ def apply_scoring_and_filters(
     # ATR (14)
     atr_col = 'ATR_14'
     tech_data['atr_value'] = last_row.get(atr_col, np.nan)
-    
-    # VWAP (v17.0.0で追加)
-    vwap_col = 'VWAP'
-    # vwape_value = last_row.get(vwap_col, np.nan) # VWAPは計算していないためスキップ
     
     # STOCHRSI (v17.0.0で追加)
     k_col = 'STOCHk_14_14_3_3'
@@ -1139,7 +1123,6 @@ async def analyze_single_timeframe(
     単一の時間軸でOHLCVを取得、分析、シグナルを生成する
     """
     
-    # ... (OHLCV取得、DF生成は変更なし) ...
     logging.info(f"[{symbol} - {timeframe}] データ取得を開始...")
     ohlcv, status, client = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, symbol, timeframe)
     
@@ -1375,9 +1358,14 @@ async def analyze_symbol(symbol: str) -> List[Dict]:
     
     for res in results:
         if isinstance(res, Exception):
-            # 例外が発生した場合
+            # 例外が発生した場合、ログに記録し、この結果はスキップ
             logging.error(f"[{symbol}] 分析中に例外が発生しました: {res}")
-        elif res.get('side') not in ["Neutral", "DataShortage", "ExchangeError"] and res.get('score', 0.5) >= BASE_SCORE:
+            continue # このシグナルはリストに追加しない
+        
+        # resが辞書であり、かつシグナル要件を満たす場合にリストに追加
+        # NOTE: res.get('side')が'Neutral'や'Error'の場合は除外される。
+        # BASE_SCORE (0.40) を満たさないシグナルもここで除外される。
+        if isinstance(res, dict) and res.get('side') not in ["Neutral", "DataShortage", "ExchangeError"] and res.get('score', 0.5) >= BASE_SCORE:
             final_signals.append(res)
 
     return final_signals
@@ -1385,7 +1373,7 @@ async def analyze_symbol(symbol: str) -> List[Dict]:
 
 async def monitor_and_analyze_symbols(monitor_symbols: List[str]):
     """
-    監視対象の銘柄すべてを非同期で分析し、結果を統合する (v17.0.5でフォールバックロジックを追加)
+    監視対象の銘柄すべてを非同期で分析し、結果を統合する (v17.0.6でフォールバックロジックのログを修正)
     """
     global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, SIGNAL_THRESHOLD
     
@@ -1436,11 +1424,11 @@ async def monitor_and_analyze_symbols(monitor_symbols: List[str]):
     integrated_signals.sort(key=lambda x: x.get('score', 0.0), reverse=True)
     all_valid_signals.sort(key=lambda x: x.get('score', 0.0), reverse=True) # フォールバック用にソートしておく
 
-    # 5. 通知対象の決定 (新ロジックの適用)
+    # 5. 通知対象の決定 (新ロジックの適用とログの修正)
     if integrated_signals:
         # A. 閾値を超えるシグナルがある場合 (従来のロジック)
         LAST_ANALYSIS_SIGNALS = integrated_signals[:TOP_SIGNAL_COUNT]
-        logging.info(f"--- ✅ 分析完了 ({len(integrated_signals)} 件のシグナル、上位 {len(LAST_ANALYSIS_SIGNALS)} 件を通知対象) ---")
+        logging.info(f"--- ✅ 分析完了 ({len(integrated_signals)} 件の厳格シグナル、上位 {len(LAST_ANALYSIS_SIGNALS)} 件を通知対象) ---")
 
     elif all_valid_signals:
         # B. 閾値を超えるシグナルはないが、有効なシグナルがある場合 (新しいフォールバックロジック)
@@ -1450,9 +1438,13 @@ async def monitor_and_analyze_symbols(monitor_symbols: List[str]):
             f"--- ⚠️ 厳格な閾値 ({SIGNAL_THRESHOLD * 100:.2f}点) 未達。フォールバックとして最高スコアの1件を採用: "
             f"[{best_signal_fallback['symbol']} - {best_signal_fallback['side']}] Score: {best_signal_fallback['score'] * 100:.2f}点 ---"
         )
+        # FIX: フォールバックが発動したことを示す情報ログを追加
+        logging.info(f"--- ⚠️ 分析完了 (フォールバック対象 {len(all_valid_signals)} 件の中から 1 件を通知対象にセット) ---")
+
     else:
         # C. 有効なシグナルが全くない場合
         LAST_ANALYSIS_SIGNALS = []
+        # FIX: ユーザーのログに合わせて「0件のシグナル」と表示されていたメッセージに近づける
         logging.info(f"--- 🚫 分析完了 (有効なシグナルは検出されませんでした) ---")
 
     # 6. Telegram通知の実行
@@ -1517,6 +1509,7 @@ async def process_and_notify_signals(signals: List[Dict]):
     elif len(signals) > 0:
          logging.info("シグナルは検出されましたが、クールダウン期間中のため送信はスキップされました。")
     else:
+        # このElseブロックは、LAST_ANALYSIS_SIGNALSが空の場合（Case C）に到達
         logging.info("閾値を超える取引シグナルは見つかりませんでした。")
 
 
@@ -1561,12 +1554,12 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.5 - Fallback Logic Added") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.6 - Fallback Log Fixed") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にメインループを開始"""
-    logging.info("🚀 Apex BOT v17.0.5 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.6 Startup initializing...") # バージョン更新
     # メインループを非同期タスクとして開始
     asyncio.create_task(main_loop())
 
@@ -1584,7 +1577,7 @@ def get_status():
     global LAST_SUCCESS_TIME, CCXT_CLIENT_NAME, CURRENT_MONITOR_SYMBOLS, LAST_ANALYSIS_SIGNALS
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.5 - Fallback Logic Added", # バージョン更新
+        "bot_version": "v17.0.6 - Fallback Log Fixed", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1596,7 +1589,7 @@ def get_status():
 @app.get("/")
 def home_view():
     """ヘルスチェック用のルート"""
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.5)"}) # バージョン更新
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.6)"}) # バージョン更新
 
 # このファイルが uvicorn で直接実行される場合に使用
 if __name__ == "__main__":
