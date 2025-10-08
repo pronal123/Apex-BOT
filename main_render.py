@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.1 - KeyError Fix (v17.0.0 Base)
-# - FIX: analyze_single_timeframe 内で Pandas Series のキーに直接アクセスしていた箇所を .get() に変更し、KeyError を解消。
-# - FIX: テクニカル指標の値に np.nan が含まれる場合のロジックを修正。
+# Apex BOT v17.0.2 - Realistic TP/SL P&L (v17.0.1 Base)
+# - UPDATE: DTSの表示TPを、現実的な初期目標 (RRR: 1.5) に変更し、ポジションサイズ$1000での損益額を具体的に表示。
+# - UPDATE: P&Lの計算を、現実的なTP目標RRRに基づいて行うように変更。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -62,7 +62,8 @@ MACD_CROSS_PENALTY = 0.15
 
 # Dynamic Trailing Stop (DTS) Parameters
 ATR_TRAIL_MULTIPLIER = 3.0          
-DTS_RRR_DISPLAY = 5.0               
+# DTS_RRR_DISPLAY = 5.0             # 利益最大化の目標値 (v17.0.1まで使用)
+REALISTIC_TP_RRR = 1.5              # NEW: 現実的な初期TP目標RRR (表示用TPとして使用)
 
 # Funding Rate Bias Filter Parameters
 FUNDING_RATE_THRESHOLD = 0.00015    
@@ -146,7 +147,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.0対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.2対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -176,11 +177,11 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     timeframe = best_signal.get('timeframe', 'N/A')
     side = best_signal.get('side', 'N/A').upper()
     score_raw = best_signal.get('score', 0.5)
-    rr_ratio = best_signal.get('rr_ratio', 0.0)
-    
+    rr_ratio = best_signal.get('rr_ratio', 0.0) # REALISTIC_TP_RRR (1.5) が入る
+
     entry_price = best_signal.get('entry', 0.0)
-    tp_price = best_signal.get('tp1', 0.0) # DTS採用のため、これはあくまで遠い目標値
-    sl_price = best_signal.get('sl', 0.0) # 初期の追跡ストップ/損切位置
+    tp_price = best_signal.get('tp1', 0.0) 
+    sl_price = best_signal.get('sl', 0.0) 
     entry_type = best_signal.get('entry_type', 'N/A') 
 
     score_100 = score_raw * 100
@@ -190,11 +191,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # リスク幅を計算 (初期のストップ位置との差)
     sl_width = abs(entry_price - sl_price)
     
-    # NEW: $1000 リスクに基づいたP&L計算
-    sl_loss_usd = 1000.0
-    # TPの予想利益は、リスクのRRR倍
-    tp_gain_usd = sl_loss_usd * rr_ratio 
-
+    # NEW: $1000 リスクに基づいたP&L計算 (TP/SLでの損益額を具体的に表示)
+    sl_loss_usd = 1000.0 # 許容損失額 (ポジションサイズではない)
+    tp_gain_usd = sl_loss_usd * rr_ratio # TPの予想利益は、リスクのRRR倍
+    
+    # SL幅に基づく利益額を$1000リスクベースで計算
+    # 損失: $1000 (SL到達時)
+    # 利益: $1000 * rr_ratio (TP到達時)
 
     # ----------------------------------------------------
     # 1. ヘッダーとエントリー情報の可視化
@@ -216,7 +219,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
          market_sentiment_str = " (リスクオフ傾向)"
     
     # 決済戦略の表示をDTSに変更
-    exit_type_str = "DTS (動的追跡損切)" 
+    exit_type_str = f"DTS (動的追跡損切) + 初期TP ({rr_ratio:.1f}:1)" 
     
     # TP到達目安を追加
     time_to_tp = get_tp_reach_time(timeframe)
@@ -227,15 +230,15 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"==================================\n"
         f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件極めて良好** |\n"
         f"| 💯 **分析スコア** | <b>{score_100:.2f} / 100.00 点</b> (ベース: {timeframe}足) |\n" 
-        f"| 💰 **予想損益** | **<ins>損益比 1:{rr_ratio:.2f}</ins>** (損失: ${sl_loss_usd:,.0f} / 利益: ${tp_gain_usd:,.0f}+) |\n" # NEW: P&L Display
-        f"| ⏰ **決済戦略** | **{exit_type_str}** (目標RRR: 1:{rr_ratio:.2f}+) |\n" 
+        f"| 💰 **予想損益** | **<ins>損益比 1:{rr_ratio:.2f}</ins>** (損失: ${sl_loss_usd:,.0f} / 利益: **${tp_gain_usd:,.0f}**) |\n" # 損益を具体的に表示
+        f"| ⏰ **決済戦略** | **{exit_type_str}** |\n" 
         f"| ⏳ **TP到達目安** | **{time_to_tp}** | (変動する可能性があります) |\n"
         f"==================================\n"
     )
 
     sl_source_str = "ATR基準"
     if best_signal.get('tech_data', {}).get('structural_sl_used', False):
-        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" # FIX反映
+        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" 
         
     # 取引計画の表示をDTSに合わせて変更
     trade_plan = (
@@ -245,9 +248,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
         f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (**<ins>底/天井を狙う Limit 注文</ins>**) |\n" 
-        f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}) |\n"
-        f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | **動的決済** (DTSにより利益最大化) |\n" 
-        f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({sl_source_str} / **初期追跡ストップ**) |\n"
+        f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}基準) |\n"
+        f"| 🟢 **TP目標** | <code>${format_price_utility(tp_price, symbol)}</code> | **現実的な初期目標** (RRR: 1:{rr_ratio:.2f}) |\n" # TP説明を修正
+        f"| ❌ **SL 位置** | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({sl_source_str} / **初動SL** / DTS追跡開始点) |\n" # SL説明を修正
         f"----------------------------------\n"
     )
 
@@ -385,9 +388,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.1** - KeyError Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.2** - Realistic TP/SL P&L |\n" # バージョン更新
         f"==================================\n"
-        f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
+        f"\n<pre>※ 表示されたTPはDTSによる追跡決済の**初期目標値**です。DTSが有効な場合、利益は自動的に最大化されます。</pre>"
     )
 
     return header + trade_plan + sr_info + analysis_detail + footer
@@ -665,6 +668,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     
     # VWAP (20期間)
     df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
+    # 最新のVWAP値を Seriesの要素として追加 (直接アクセスを避けるため)
     df['vwap_mid'] = df['vwap'].iloc[-1]
     
     # SMA (長期トレンド判定用)
@@ -680,7 +684,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
         return {'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage', 'score': 0.0}
         
     last = df.iloc[-1]
-    last_prev = df.iloc[-2] if len(df) >= 2 else None # FIX: 前の行を安全に取得
+    last_prev = df.iloc[-2] if len(df) >= 2 else None 
     
     # 3. スコアリングの初期設定
     score: float = BASE_SCORE # 初期スコア 0.40
@@ -793,7 +797,8 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     if len(df) > 100:
         # 直近の出来高と過去100期間の平均出来高を比較
         avg_volume = df['volume'].iloc[-100:-1].mean()
-        current_volume = last['volume']
+        # Seriesから直接取得するのを避け、.get()の代替としてlast['volume']を使用 (この値はNaNでないことを確認済み)
+        current_volume = last['volume'] 
         
         if avg_volume > 0:
             volume_ratio = current_volume / avg_volume
@@ -837,7 +842,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     atr_val_raw = last.get('ATR_14', 1.0) 
     atr_val = atr_val_raw if atr_val_raw > 0.0 else 1.0 # ゼロ割を防ぐための安全措置
 
-    rr_ratio = DTS_RRR_DISPLAY # 表示用
+    # rr_ratio は REALISTIC_TP_RRR (1.5) が入る
     
     entry_price = current_price
     sl_price = 0.0
@@ -850,7 +855,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     # 構造的SL (S1/R1) の探索と適用
     if pivot_points and side != 'Neutral':
         if side == 'ロング':
-            # Long: S1/S2/PPがエントリー価格より下で、ATRの 2.0倍 以内にあるか
+            # Long: S1/S2/PPがエントリー価格より下で、ATRの 3.0倍 以内にあるか
             close_s1 = pivot_points.get('s1', 0.0)
             close_s2 = pivot_points.get('s2', 0.0)
             close_pp = pivot_points.get('pp', 0.0)
@@ -860,7 +865,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
                                     reverse=True) # 近いものから優先
             
             if potential_sls:
-                # S/Rに一致するSLを採用し、0.5 ATRのバッファを追加 (FIX v16.0.1)
+                # S/Rに一致するSLを採用し、0.5 ATRのバッファを追加 
                 structural_sl_used = True
                 sl_price_raw = potential_sls[0]
                 sl_price = sl_price_raw - (0.5 * atr_val) 
@@ -874,10 +879,6 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
                 entry_price = entry_point_raw
                 entry_type = 'Limit'
                 
-                # Limit注文が約定しないリスクを考慮し、ここではエントリーポイントをLimit価格として表示
-
-                # 構造的SL (S1/R1) が有効な場合、RRRは高くなると想定
-                rr_ratio = max(rr_ratio, 3.0) 
             else:
                 # 構造的SLが見つからなければATRベースSL
                 sl_price = current_price - (atr_val * ATR_TRAIL_MULTIPLIER)
@@ -885,7 +886,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
                 entry_price = current_price # SL計算のため、いったん現在価格で計算
         
         elif side == 'ショート':
-            # Short: R1/R2/PPがエントリー価格より上で、ATRの 2.0倍 以内にあるか
+            # Short: R1/R2/PPがエントリー価格より上で、ATRの 3.0倍 以内にあるか
             close_r1 = pivot_points.get('r1', 0.0)
             close_r2 = pivot_points.get('r2', 0.0)
             close_pp = pivot_points.get('pp', 0.0)
@@ -894,7 +895,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
                                     if sl > current_price and sl - current_price <= atr_val * ATR_TRAIL_MULTIPLIER]) # 近いものから優先
             
             if potential_sls:
-                # S/Rに一致するSLを採用し、0.5 ATRのバッファを追加 (FIX v16.0.1)
+                # S/Rに一致するSLを採用し、0.5 ATRのバッファを追加 
                 structural_sl_used = True
                 sl_price_raw = potential_sls[0]
                 sl_price = sl_price_raw + (0.5 * atr_val)
@@ -908,8 +909,6 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
                 entry_price = entry_point_raw
                 entry_type = 'Limit'
                 
-                # 構造的SL (S1/R1) が有効な場合、RRRは高くなると想定
-                rr_ratio = max(rr_ratio, 3.0) 
             else:
                 # 構造的SLが見つからなければATRベースSL
                 sl_price = current_price + (atr_val * ATR_TRAIL_MULTIPLIER)
@@ -926,23 +925,21 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
         entry_price = current_price
 
 
-    # TP1 (目標値: ATRベースSL幅のDTS_RRR_DISPLAY倍。これは動的決済の目安としてのみ使用)
+    # TP1 (目標値: ATRベースSL幅のREALISTIC_TP_RRR倍。これが表示上の初期TPとなる)
     risk_width = abs(entry_price - sl_price)
     if side == 'ロング':
-        tp1_price = entry_price + (risk_width * DTS_RRR_DISPLAY) 
+        tp1_price = entry_price + (risk_width * REALISTIC_TP_RRR) 
     elif side == 'ショート':
-        tp1_price = entry_price - (risk_width * DTS_RRR_DISPLAY) 
+        tp1_price = entry_price - (risk_width * REALISTIC_TP_RRR) 
         
     # SL/TPが有効でない場合はNeutralにする
     if sl_price <= 0 or (side == 'ロング' and sl_price >= entry_price) or (side == 'ショート' and sl_price <= entry_price):
          side = 'Neutral'
          score = BASE_SCORE # リセット
          
-    # リスクリワード計算
-    # 構造的SLの場合、SL幅は狭くなり、実質RRRは高くなるが、表示は固定RRRを上限とする
+    # リスクリワード計算 (REALISTIC_TP_RRRを初期TPとして使用)
     if side != 'Neutral' and risk_width > 0:
-        # DTSのため、RRRは固定値ではなく目標値として表示
-        pass 
+        rr_ratio = REALISTIC_TP_RRR
     else:
         rr_ratio = 0.0
 
@@ -1006,18 +1003,10 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     # 8. 最終スコア調整とクリッピング
     score = max(0.0, min(1.0, score)) # 0.0から1.0にクリップ
     
-    if score < BASE_SCORE:
+    if score < SIGNAL_THRESHOLD: # スコアが閾値未満ならNeutralにする
          side = 'Neutral'
-         score = BASE_SCORE # ベーススコア未満なら無効なシグナルとしてリセット
-         
-    # 最終的なLong/Short判定
-    if score >= SIGNAL_THRESHOLD and side == 'ロング':
-        pass
-    elif score >= SIGNAL_THRESHOLD and side == 'ショート':
-        pass
-    else:
-        side = 'Neutral'
-        
+         score = max(BASE_SCORE, score) # ベーススコアを下回らないようにする
+
     
     # 9. 結果の格納
     result = {
@@ -1034,13 +1023,13 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
         'entry_type': entry_type,
         'macro_context': macro_context,
         'tech_data': {
-            'rsi': rsi_val, # FIX: 安全な値を使用
-            'adx': adx_val, # FIX: 安全な値を使用
-            'macd_hist': macd_hist, # FIX: 安全な値を使用
-            'cci': cci_val, # FIX: 安全な値を使用
-            'atr_value': atr_val, # FIX: 安全な値を使用
-            'stoch_k': stoch_k, # FIX: 安全な値を使用
-            'stoch_d': stoch_d, # FIX: 安全な値を使用
+            'rsi': rsi_val, 
+            'adx': adx_val, 
+            'macd_hist': macd_hist, 
+            'cci': cci_val, 
+            'atr_value': atr_val, 
+            'stoch_k': stoch_k, 
+            'stoch_d': stoch_d, 
             'stoch_filter_penalty': stoch_penalty,
             'long_term_trend': long_term_trend,
             'long_term_reversal_penalty': long_term_reversal_penalty,
@@ -1218,11 +1207,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.1 - KeyError Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.2 - Realistic TP/SL P&L") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.1 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.2 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1236,7 +1225,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.1 - KeyError Fix", # バージョン更新
+        "bot_version": "v17.0.2 - Realistic TP/SL P&L", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1247,4 +1236,10 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.1)", "status_endpoint": "/status"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.2)", "status_endpoint": "/status"})
+
+if __name__ == "__main__":
+    # 環境変数からポートを取得。未設定の場合は8000
+    PORT = int(os.environ.get("PORT", 8000))
+    # uvicorn.run()を実行し、FastAPIアプリケーションを起動
+    uvicorn.run("main_render:app", host="0.0.0.0", port=PORT, log_level="info")
