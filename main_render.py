@@ -1,9 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.0 - DTS & Dominance Bias Filter & SPB (Structural Price Barrier)
-# - NEW: 構造的価格バリア (SPB: Structural Price Barrier)として、DCU/DCLを「蓋価格/底価格」として通知に表示
+# Apex BOT v16.0.1 - DTS & Dominance Bias Filter (Structural SL Buffer Fix)
+# - FIX: 構造的SL (S1/R1) を使用する際に、エントリーポイントとの一致を避けるため、SLに 0.5 * ATR のバッファを追加
 # - BTCドミナンスの増減トレンドを判定し、Altcoinのシグナルスコアに反映 (+/- 0.05点)
-# - 資金調達率 (Funding Rate) を取得し、レバレッジの偏り（需給バイアス）をスコアに反映 (+/- 0.08点)
-# - ATRに基づく動的トレーリングストップ (DTS) を採用し、利益最大化を狙う
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -148,7 +146,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.0対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.1対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -230,21 +228,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     sl_source_str = "ATR基準"
     if best_signal.get('tech_data', {}).get('structural_sl_used', False):
-        sl_source_str = "構造的 (DC/Pivot)"
-
-    # NEW: Structural Price Barrier (SPB) の抽出
-    dc_high = best_signal.get('tech_data', {}).get('dc_high', 0.0)
-    dc_low = best_signal.get('tech_data', {}).get('dc_low', 0.0)
-
-    barrier_label = ""
-    barrier_price = 0.0
-    
-    if side == "ロング":
-        barrier_label = "⏫ 蓋価格 (レジスタンス)"
-        barrier_price = dc_high # Donchian Channel Upper
-    elif side == "ショート":
-        barrier_label = "⏬ 底価格 (サポート)"
-        barrier_price = dc_low # Donchian Channel Lower
+        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" # FIX反映
         
     # 取引計画の表示をDTSに合わせて変更
     trade_plan = (
@@ -254,10 +238,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
         f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (**<ins>底/天井を狙う Limit 注文</ins>**) |\n" 
-        f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({sl_source_str} / **初期追跡ストップ**) |\n"
-        f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | **動的決済** (DTSにより利益最大化) |\n" 
-        f"| {barrier_label} | <code>${format_price_utility(barrier_price, symbol)}</code> | **構造的バリア** (利確ターゲット候補/反転ポイント) |\n" # v17.0.0 追加
         f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}) |\n"
+        f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | **動的決済** (DTSにより利益最大化) |\n" 
+        f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({sl_source_str} / **初期追跡ストップ**) |\n"
         f"----------------------------------\n"
     )
     
@@ -337,7 +320,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 
                 analysis_detail += f"   └ **資金調達率 (FR)**: {funding_rate_val * 100:.4f}% (8h) - {funding_rate_status}\n"
 
-                # BTC Dominance Analysis (v16.0.0)
+                # Dominance Analysis
                 dominance_trend = tech_data.get('dominance_trend', 'Neutral')
                 dominance_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
                 
@@ -362,7 +345,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.0** - DTS & Dominance Bias & SPB |\n" # Version Update
+        f"| ⚙️ **BOT Ver** | **v16.0.1** - Structural SL Buffer Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -587,29 +570,33 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str) -> Tuple
     # 構造的なSL/TPの採用
     if side == "ロング":
         if price > S1 and (price - S1) / (R1 - S1) < 0.5:
+            # Current price is between S1 and the midpoint (closer to S1). Idea: Target R1, SL S1.
             bonus = BONUS_POINT 
             structural_sl = S1
             structural_tp = R1 * 1.01 
         elif price > R1:
+            # Price is above R1 (Breakout scenario). Idea: Target R1 extension, SL R1.
             bonus = BONUS_POINT
             structural_sl = R1 
             structural_tp = R1 * 1.05 
             
     elif side == "ショート":
         if price < R1 and (R1 - price) / (R1 - S1) < 0.5:
+            # Current price is between R1 and the midpoint (closer to R1). Idea: Target S1, SL R1.
             bonus = BONUS_POINT 
-            structural_sl = R1
+            structural_sl = R1 # R1 is the resistance used as SL
             structural_tp = S1 * 0.99 
         elif price < S1:
+            # Price is below S1 (Breakout scenario). Idea: Target S1 extension, SL S1.
             bonus = BONUS_POINT
-            structural_sl = S1 
+            structural_sl = S1 # S1 is the support used as SL/resistance
             structural_tp = S1 * 0.95 
 
     return bonus, structural_sl, structural_tp
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v17.0.0 - SPB)
+    単一の時間軸で分析とシグナル生成を行う関数 (v16.0.1 - Structural SL Buffer Fix)
     """
     
     # 1. データ取得とFunding Rate取得
@@ -794,28 +781,24 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         score = min(1.0, base_score) 
 
-        # ----------------------------------------------------------------------
         # I. 資金調達率 (Funding Rate) バイアスフィルター (+/- 0.08点)
-        # ----------------------------------------------------------------------
         funding_rate_bonus = 0.0
         
-        if timeframe == '1h': # 1h足のシグナルにのみ適用
+        if timeframe == '1h': 
             if side == "ロング":
-                if funding_rate_val > FUNDING_RATE_THRESHOLD: # ロング過密: ペナルティ
+                if funding_rate_val > FUNDING_RATE_THRESHOLD: 
                     funding_rate_bonus = -FUNDING_RATE_BONUS_PENALTY
-                elif funding_rate_val < -FUNDING_RATE_THRESHOLD: # ショート過密: ボーナス
+                elif funding_rate_val < -FUNDING_RATE_THRESHOLD: 
                     funding_rate_bonus = FUNDING_RATE_BONUS_PENALTY
             elif side == "ショート":
-                if funding_rate_val < -FUNDING_RATE_THRESHOLD: # ショート過密: ペナルティ
+                if funding_rate_val < -FUNDING_RATE_THRESHOLD: 
                     funding_rate_bonus = -FUNDING_RATE_BONUS_PENALTY
-                elif funding_rate_val > FUNDING_RATE_THRESHOLD: # ロング過密: ボーナス
+                elif funding_rate_val > FUNDING_RATE_THRESHOLD: 
                     funding_rate_bonus = FUNDING_RATE_BONUS_PENALTY
 
         score = max(BASE_SCORE, min(1.0, score + funding_rate_bonus))
 
-        # ----------------------------------------------------------------------
         # J. BTCドミナンスバイアスフィルター (Altcoinのみ) (+/- 0.05点)
-        # ----------------------------------------------------------------------
         dominance_bonus = 0.0
         dominance_trend = macro_context.get('dominance_trend', 'Neutral')
         dominance_bias_score_val = macro_context.get('dominance_bias_score', 0.0)
@@ -823,39 +806,33 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # BTCシンボル自体にはドミナンスバイアスは適用しない
         if symbol != "BTC-USDT" and dominance_trend != "Neutral":
             
-            if dominance_trend == "Increasing": # BTC強 -> Alt Longにペナルティ, Alt Shortにボーナス
+            if dominance_trend == "Increasing": 
                 if side == "ロング":
-                    dominance_bonus = dominance_bias_score_val # マイナス値
+                    dominance_bonus = dominance_bias_score_val 
                 elif side == "ショート":
-                    dominance_bonus = abs(dominance_bias_score_val) # プラス値
+                    dominance_bonus = abs(dominance_bias_score_val) 
             
-            elif dominance_trend == "Decreasing": # Alt強 -> Alt Longにボーナス, Alt Shortにペナルティ
+            elif dominance_trend == "Decreasing": 
                 if side == "ロング":
-                    dominance_bonus = abs(dominance_bias_score_val) # プラス値
+                    dominance_bonus = abs(dominance_bias_score_val) 
                 elif side == "ショート":
-                    dominance_bonus = dominance_bias_score_val # マイナス値
+                    dominance_bonus = dominance_bias_score_val 
                     
             score = max(BASE_SCORE, min(1.0, score + dominance_bonus))
 
 
-        # ----------------------------------------------------------------------
         # K. 市場センチメント (FGI Proxy) の適用 (+/-0.07点)
-        # ----------------------------------------------------------------------
         sentiment_bonus = macro_context.get('sentiment_fgi_proxy', 0.0)
         if side == "ロング" and sentiment_bonus > 0:
             score = min(1.0, score + sentiment_bonus)
         elif side == "ショート" and sentiment_bonus < 0:
             score = min(1.0, score + abs(sentiment_bonus))
         
-        # ----------------------------------------------------------------------
         # L. Structural/Pivot Analysis (0.07点)
-        # ----------------------------------------------------------------------
         structural_pivot_bonus, structural_sl_pivot, structural_tp_pivot = analyze_structural_proximity(price, pivots, side)
         score = min(1.0, score + structural_pivot_bonus)
         
-        # ----------------------------------------------------------------------
         # M. 出来高/流動性確証 (Max 0.12)
-        # ----------------------------------------------------------------------
         volume_confirmation_bonus = 0.0
         
         if volume_ratio >= VOLUME_CONFIRMATION_MULTIPLIER: 
@@ -913,15 +890,21 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             if use_market_entry: 
                 entry = price
             else: 
+                # Limit Entry (Targeting a low price)
                 entry = min(min(bb_mid, dc_mid), price) 
             
             atr_sl = entry - sl_dist_atr
             
+            # Check if structural_sl_pivot (S1) is a tighter SL than ATR SL and less than entry
             if structural_sl_pivot > 0 and structural_sl_pivot > atr_sl and structural_sl_pivot < entry:
-                 sl = structural_sl_pivot
+                 # FIX v16.0.1: SLをS1から0.5*ATRだけ下にずらす (バッファ)
+                 sl = structural_sl_pivot - atr_val * 0.5 
                  structural_sl_used = True
             else:
                  sl = atr_sl
+            
+            # 負の値にならないように保護
+            if sl <= 0: sl = entry * 0.99 
             
             tp_dist = abs(entry - sl) * rr_base 
             tp1 = entry + tp_dist
@@ -930,12 +913,15 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             if use_market_entry: 
                 entry = price
             else: 
+                # Limit Entry (Targeting a high price)
                 entry = max(max(bb_mid, dc_mid), price) 
             
             atr_sl = entry + sl_dist_atr
             
+            # Check if structural_sl_pivot (R1) is a tighter SL than ATR SL and greater than entry
             if structural_sl_pivot > 0 and structural_sl_pivot < atr_sl and structural_sl_pivot > entry:
-                 sl = structural_sl_pivot
+                 # FIX v16.0.1: SLをR1から0.5*ATRだけ上にずらす (バッファ)
+                 sl = structural_sl_pivot + atr_val * 0.5 
                  structural_sl_used = True
             else:
                  sl = atr_sl
@@ -967,8 +953,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "cci": cci_val, 
             "vwap_consistent": vwap_consistent,
             "ppo_hist": ppo_hist_val, 
-            "dc_high": dc_high_val, # DC Upper (蓋価格)
-            "dc_low": dc_low_val,   # DC Lower (底価格)
+            "dc_high": dc_high_val,
+            "dc_low": dc_low_val,
             "stoch_k": stoch_k_val,
             "stoch_d": df[STOCHRSI_D].iloc[-1] if STOCHRSI_D in df.columns else 50.0,
             "stoch_filter_penalty": tech_data_defaults["stoch_filter_penalty"], 
@@ -1213,11 +1199,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.0 - SPB") # Version Update
+app = FastAPI(title="Apex BOT API", version="v16.0.1 - Structural SL Buffer Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.0 Startup initializing...") # Version Update
+    logging.info("🚀 Apex BOT v16.0.1 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1231,7 +1217,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.0 - DTS & Dominance Bias & SPB", # Version Update
+        "bot_version": "v16.0.1 - Structural SL Buffer Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1242,4 +1228,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.0, DTS & Dominance Bias & SPB)."}, status_code=200) #
+    return JSONResponse(content={"message": "Apex BOT is running (v16.0.1, Structural SL Buffer Fix)."}, status_code=200)
+
+if __name__ == '__main__':
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
