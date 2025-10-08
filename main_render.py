@@ -1,11 +1,8 @@
 # ====================================================================================
-# Apex BOT v16.0.0 - Adaptive EAS & Dynamic Risk Adjustment
-# - 資金調達率 (Funding Rate) を取得し、レバレッジの偏り（需給バイアス）をスコアに反映 (+/- 0.08点)
-# - 固定TP/RRRを廃止し、ATRに基づく動的トレーリングストップ (DTS) を採用し、利益最大化を狙う
-# - スコア条件はv14.0.0の厳格な設定 (SIGNAL_THRESHOLD=0.75, BASE_SCORE=0.40) を維持
-# - NEW: Limit Entryの優位性をEntry Advantage Score (EAS)で評価し、最も効率の良い底/天井を通知する
-# - IMPROVED: ボラティリティに応じてATR乗数を動的に調整 (ATR_TRAIL_MULTIPLIER)
-# - IMPROVED: EAS優位性が低い場合、Limit EntryからMarket Entryへ自動フォールバック (約定率向上)
+# Apex BOT v16.2.0 - OKX Fixed Client 🔒
+# - 致命的なHTTP 451エラー回避のため、デフォルトの取引所をユーザー指定の 'okx' に固定
+# - v16.0.0のAdaptive EAS & Dynamic Riskロジックを維持
+# - NEW: OKXの先物 (Swap) API接続設定を最適化
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -33,7 +30,7 @@ import random
 load_dotenv()
 
 # ====================================================================================
-# CONFIG & CONSTANTS (v16.0.0 改良)
+# CONFIG & CONSTANTS (v16.2.0 改良: デフォルトクライアントをOKXに固定)
 # ====================================================================================
 
 JST = timezone(timedelta(hours=9))
@@ -44,9 +41,12 @@ ADDITIONAL_SYMBOLS_FOR_VOLUME_CHECK = ["BTC/USDT", "ETH/USDT"] # FGI Proxy用
 CURRENT_MONITOR_SYMBOLS = [] # 実行時に設定
 
 # CCXT設定
-CCXT_CLIENT_NAME = os.environ.get("CCXT_CLIENT_NAME", "binance") # binance, bybit, etc.
+# 💡 FIX: 監視取引所をユーザー指定の 'okx' に固定
+CCXT_CLIENT_NAME = os.environ.get("CCXT_CLIENT_NAME", "okx") # okx, binance, bybit, etc.
 CCXT_API_KEY = os.environ.get("CCXT_API_KEY")
 CCXT_SECRET = os.environ.get("CCXT_SECRET")
+# OKXではパスフレーズが必要です。環境変数に設定してください。
+CCXT_PASSWORD = os.environ.get("CCXT_PASSWORD", "") 
 # 実行環境設定
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -82,16 +82,13 @@ MACD_CROSS_PENALTY = 0.15 # モメンタムが反転する場合
 # Dynamic Trailing Stop (DTS) Parameters
 DTS_RRR_DISPLAY = 5.0 # 動的決済採用時、メッセージで表示する目標RRR
 
-# NEW: Volatility Adaptive Risk Parameters
-# ATR乗数（SL幅）の最小/最大値を設定
+# Volatility Adaptive Risk Parameters (v16.0.0より維持)
 ATR_MULTIPLIER_MIN = 2.5
 ATR_MULTIPLIER_MAX = 4.0
-# ボラティリティ調整の基準 (BB Width %)。5.0%以上で乗数を下げ、2.0%以下で乗数を上げる
 VOLATILITY_HIGH_THRESHOLD = 5.0 
 VOLATILITY_LOW_THRESHOLD = 2.0  
 
-# NEW: Adaptive Entry Advantage Score (EAS) Parameters
-# Limit Entryが採用されるEASの最低基準 (ATR 0.5倍の優位性)
+# Adaptive Entry Advantage Score (EAS) Parameters (v16.0.0より維持)
 EAS_MIN_ADVANTAGE_THRESHOLD = 0.5 
 
 # グローバル変数
@@ -116,14 +113,32 @@ def get_ccxt_client(client_name: str):
     
     if client_name in ccxt.exchanges:
         exchange_class = getattr(ccxt_async, client_name)
-        EXCHANGE_CLIENT = exchange_class({
-            'apiKey': CCXT_API_KEY,
-            'secret': CCXT_SECRET,
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'future', # 先物取引をデフォルトとする
-            },
-        })
+        
+        options = {
+            'defaultType': 'future', # 先物取引をデフォルトとする
+            'adjustForTimeDifference': True, 
+        }
+        
+        # OKX特有の設定
+        if client_name == 'okx':
+            options['defaultType'] = 'swap' # OKXの無期限先物は 'swap'
+            options['warnOnFetchOHLCVLimit'] = False # OKXではOHLCVの制限について警告を無効化
+            
+            EXCHANGE_CLIENT = exchange_class({
+                'apiKey': CCXT_API_KEY,
+                'secret': CCXT_SECRET,
+                'password': CCXT_PASSWORD, # OKXにはパスフレーズが必要
+                'enableRateLimit': True,
+                'options': options,
+            })
+        else:
+             EXCHANGE_CLIENT = exchange_class({
+                'apiKey': CCXT_API_KEY,
+                'secret': CCXT_SECRET,
+                'enableRateLimit': True,
+                'options': options,
+            })
+             
         logging.info(f"{client_name.upper()} クライアントを初期化しました。")
         return EXCHANGE_CLIENT
     else:
@@ -141,11 +156,22 @@ async def fetch_markets():
         futures_markets = [
             m['symbol'] for m in markets 
             if '/USDT' in m['symbol'] and m['active'] and m.get('contract', True) and m.get('spot', False) is False
+            # OKXの場合、シンボル末尾が '-SWAP' であることを確認する
+            and (client.id != 'okx' or m['symbol'].endswith('/USDT:USDT'))
         ]
         
+        # OKX形式のシンボルを標準形式に戻す (例: BTC/USDT:USDT -> BTC/USDT)
+        normalized_markets = []
+        for s in futures_markets:
+            if client.id == 'okx' and s.endswith('/USDT:USDT'):
+                normalized_markets.append(s.replace('/USDT:USDT', '/USDT'))
+            else:
+                normalized_markets.append(s)
+
         # トップ取引量のシンボルを取得 (ここでは静的リストに頼る)
         global CURRENT_MONITOR_SYMBOLS
-        CURRENT_MONITOR_SYMBOLS = list(set(DEFAULT_MONITOR_SYMBOLS) & set(futures_markets))
+        # DEFAULT_MONITOR_SYMBOLSとfutures_marketsの共通部分を取得
+        CURRENT_MONITOR_SYMBOLS = list(set(DEFAULT_MONITOR_SYMBOLS) & set(normalized_markets))
         logging.info(f"監視シンボル: {CURRENT_MONITOR_SYMBOLS}")
         
     except Exception as e:
@@ -203,8 +229,15 @@ def send_telegram_message(message: str):
 async def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     """OHLCVデータを取得する"""
     client = get_ccxt_client(CCXT_CLIENT_NAME)
+    
+    # CCXTのOHLCVは標準形式のシンボル（例: BTC/USDT）を受け取る
     try:
-        ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=300)
+        # fetch_ohlcvのoptionsでOKXの永続スワップを明示的に指定
+        params = {}
+        if client.id == 'okx':
+            params['instType'] = 'SWAP' 
+            
+        ohlcv = await client.fetch_ohlcv(symbol, timeframe, limit=300, params=params)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         return df
@@ -216,9 +249,14 @@ async def fetch_funding_rate(symbol: str) -> float:
     """最新の資金調達率を取得する"""
     client = get_ccxt_client(CCXT_CLIENT_NAME)
     try:
-        # ccxtのFunding Rate取得は取引所によって異なる
+        # fetch_funding_rateのoptionsでOKXの永続スワップを明示的に指定
+        params = {}
+        if client.id == 'okx':
+            # OKXではシンボルを内部で 'BTC-USDT-SWAP' のような形式に変換する必要があるため、CCXTに任せる
+            pass 
+            
         if hasattr(client, 'fetch_funding_rate'):
-            funding_rate_data = await client.fetch_funding_rate(symbol)
+            funding_rate_data = await client.fetch_funding_rate(symbol, params=params)
             return funding_rate_data['fundingRate']
         else:
             return 0.0 # サポートされていない場合は0として処理
@@ -227,7 +265,7 @@ async def fetch_funding_rate(symbol: str) -> float:
         return 0.0
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """主要なテクニカル指標を計算する"""
+    """主要なテクニカル指標を計算する (v16.0.0より維持)"""
     
     # 出来高 (ATR計算に必要)
     df['tr'] = ta.true_range(df['high'], df['low'], df['close'])
@@ -279,7 +317,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna()
 
 # ====================================================================================
-# CORE ANALYSIS LOGIC
+# CORE ANALYSIS LOGIC (v16.0.0より維持)
 # ====================================================================================
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
@@ -408,7 +446,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
     # 5. TP/SLとRRRの決定 (Dynamic Trailing Stop & Structural SL)
     
-    # 💡 弱点解消 1: ATR乗数の動的調整
+    # ATR乗数の動的調整
     bb_width_pct_val = (current_data['BBU_20_2.0'] - current_data['BBL_20_2.0']) / price * 100
     current_atr_multiplier = 3.0 # 中間値
     
@@ -417,7 +455,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     elif bb_width_pct_val <= VOLATILITY_LOW_THRESHOLD:
         current_atr_multiplier = ATR_MULTIPLIER_MAX
     else:
-        # 中間ボラティリティの場合は線形補間（ここではシンプルに3.0を維持）
         pass
 
     # SL Dist (ATRに基づく初期追跡ストップの距離)
@@ -577,7 +614,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     return signal_candidate
 
 # ====================================================================================
-# MAIN LOOP
+# MAIN LOOP (v16.0.0より維持)
 # ====================================================================================
 
 async def main_loop():
@@ -681,8 +718,7 @@ async def main_loop():
                 entry_type = item['entry_type']
                 eas = item['entry_advantage_score']
 
-                # 💡 弱点解消 2: EAS閾値の動的化とMarket Entryへのフォールバック
-                # EASが設定閾値未満の場合、Market Entryに強制フォールバック
+                # EAS閾値の動的化とMarket Entryへのフォールバック
                 if entry_type == 'Limit' and eas < EAS_MIN_ADVANTAGE_THRESHOLD:
                      entry_type = 'Market'
                      item['entry_type'] = 'Market' # Itemを更新
@@ -737,7 +773,7 @@ async def main_loop():
                     logging.info("📝 シグナルは前回から変化がありません。通知をスキップします。")
             else:
                 if time.time() - LAST_SUCCESS_TIME > 3600 * 4: # 4時間何も通知がない場合
-                    no_signal_message = f"🚨 {datetime.now(JST).strftime('%H:%M')} 現在、エントリー閾値 ({SIGNAL_THRESHOLD}) を超えるシグナルはありません。市場はレンジまたは優位性の低い状況です。\n⚙️ BOT Ver: v16.0.0"
+                    no_signal_message = f"🚨 {datetime.now(JST).strftime('%H:%M')} 現在、エントリー閾値 ({SIGNAL_THRESHOLD}) を超えるシグナルはありません。市場はレンジまたは優位性の低い状況です。\n⚙️ BOT Ver: v16.2.0"
                     if LAST_SIGNAL_MESSAGE != no_signal_message:
                         send_telegram_message(no_signal_message)
                         LAST_SIGNAL_MESSAGE = no_signal_message
@@ -765,7 +801,7 @@ async def main_loop():
 
 
 # ====================================================================================
-# NOTIFICATION MESSAGE FORMATTING
+# NOTIFICATION MESSAGE FORMATTING (v16.0.0より維持)
 # ====================================================================================
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
@@ -840,7 +876,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {tech_data.get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v16.0.0** - Adaptive EAS & Dynamic Risk |\n" 
+        f"| ⚙️ **BOT Ver** | **v16.2.0** - OKX Fixed Client |\n" 
         f"==================================\n"
         f"\n<pre>※ Market Entryは即時約定、Limit Entryは指値で約定を待ちます。DTSでは、約定後、{side}方向に価格が動いた場合、SLが自動的に追跡され利益を最大化します。初期の追跡幅はATRの{dynamic_atr_multiplier:.1f}倍です。</pre>"
     )
@@ -852,11 +888,11 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v16.0.0 - Adaptive EAS & Dynamic Risk")
+app = FastAPI(title="Apex BOT API", version="v16.2.0 - OKX Fixed Client")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v16.0.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v16.2.0 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -870,7 +906,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v16.0.0 - Adaptive EAS & Dynamic Risk",
+        "bot_version": "v16.2.0 - OKX Fixed Client",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -881,7 +917,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v16.0.0)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v16.2.0)"})
 
 
 if __name__ == "__main__":
