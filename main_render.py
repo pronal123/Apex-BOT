@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v19.0.0 - Structural P&L Display
-# - UPDATE: 構造的な支持線/抵抗線 (S/R) で利確/損切した場合の損益額を計算し、通知に追加表示。
-# - FIX: メッセージ生成ロジックをv18.0.0の最新形式に統合。
+# Apex BOT v19.0.2 - Robust Symbol Filter Fix
+# - FIX: OKXなどの取引所でのBadSymbolエラーを解決するため、シンボルフィルタリングのロジックをCCXTの市場情報(base/quote)に基づき強化。
+# - 機能: 構造的な支持線/抵抗線 (S/R) で利確/損切した場合の損益額を計算し、通知に追加表示。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -152,7 +152,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v19.0.0対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v19.0.2対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -423,13 +423,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
                 # NEW: Dominance Biasボーナス/ペナルティのハイライト
                 dominance_trend = tech_data.get('dominance_trend', 'Neutral')
-                dominance_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
+                dominance_bias_value = tech_data.get('dominance_bias_bonus_value', 0.0)
                 
                 dominance_status = ""
-                if dominance_bonus > 0:
-                    dominance_status = f"✅ **優位性あり** (<ins>**+{dominance_bonus * 100:.2f}点**</ins>)"
-                elif dominance_bonus < 0:
-                    dominance_status = f"⚠️ **バイアスにより減点適用** (<ins>**-{abs(dominance_bonus) * 100:.2f}点**</ins>)"
+                if dominance_bias_value > 0:
+                    dominance_status = f"✅ **優位性あり** (<ins>**+{dominance_bias_value * 100:.2f}点**</ins>)"
+                elif dominance_bias_value < 0:
+                    dominance_status = f"⚠️ **バイアスにより減点適用** (<ins>**-{abs(dominance_bias_value) * 100:.2f}点**</ins>)"
                 else:
                     dominance_status = "❌ フィルター範囲外/非該当"
                 
@@ -446,7 +446,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v19.0.0** - Structural P&L Display |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v19.0.2** - Robust Symbol Filter Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ 表示されたTPはDTSによる追跡決済の**初期目標値**です。DTSが有効な場合、利益は自動的に最大化されます。</pre>"
     )
@@ -485,9 +485,9 @@ async def initialize_exchange() -> Optional[ccxt_async.Exchange]:
         }
         
         client = exchange_class(config)
-        await client.load_markets()
+        await client.load_markets() # 市場情報をロード
         EXCHANGE_CLIENT = client
-        logging.info(f"CCXTクライアント ({CCXT_CLIENT_NAME}) を初期化しました。")
+        logging.info(f"CCXTクライアント ({CCXT_CLIENT_NAME}) を初期化しました。市場情報 ({len(client.markets)}件) をロードしました。")
         return client
         
     except Exception as e:
@@ -506,11 +506,68 @@ async def fetch_ohlcv_with_fallback(exchange: ccxt_async.Exchange, symbol: str, 
         ohlcv = await exchange.fetch_ohlcv(formatted_symbol, timeframe, limit=limit)
         return ohlcv
     except (ccxt.ExchangeError, ccxt.NetworkError, ccxt.RequestTimeout) as e:
+        # フィルタリング済みのため、ここでは主にレート制限やネットワークエラーを処理
         logging.warning(f"データ取得エラー ({symbol} - {timeframe}): {type(e).__name__}: {e}")
         return []
     except Exception as e:
         logging.error(f"予期せぬデータ取得エラー ({symbol} - {timeframe}): {e}")
         return []
+
+# ------------------------------------------------------------------------------------
+# NEW/FIX: シンボルフィルタリング機能 (v19.0.2)
+# ------------------------------------------------------------------------------------
+async def filter_monitoring_symbols(exchange: ccxt_async.Exchange):
+    """
+    ロードされた市場情報に基づき、DEFAULT_SYMBOLSから実際に存在する先物/スワップシンボルに絞り込む。
+    
+    v19.0.2: CCXTのmarket情報にある'base'と'quote'キーを利用し、フィルタリングの正確性を向上。
+    """
+    global CURRENT_MONITOR_SYMBOLS
+    
+    if not exchange.markets:
+        logging.warning("市場情報がロードされていません。シンボルフィルタリングをスキップします。")
+        return
+
+    # フィルタリングするシンボルリスト
+    initial_symbols = [s.replace('/', '-') for s in DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]]
+    
+    # 実際に存在する先物/スワップシンボルのベース通貨 (例: 'MATIC') を収集
+    available_base_pairs = set()
+    for symbol, market in exchange.markets.items():
+        # 'future'または'swap'であること、かつUSDT建てであることを確認
+        is_contract = market.get('contract', False)
+        is_swap = market.get('swap', False)
+        
+        if (is_contract or is_swap) and market.get('quote') == 'USDT':
+            base_symbol = market.get('base') 
+            if base_symbol:
+                available_base_pairs.add(base_symbol)
+    
+    # 監視リストを更新
+    new_monitoring_symbols = []
+    removed_symbols = []
+    
+    for symbol_hyphen in initial_symbols:
+        # ベース通貨を抽出 (例: 'MATIC-USDT' -> 'MATIC')
+        base_symbol_check = symbol_hyphen.split('-')[0]
+        
+        # 実際に利用可能なベース通貨のセットに存在するかを確認
+        if base_symbol_check in available_base_pairs:
+            new_monitoring_symbols.append(symbol_hyphen)
+        else:
+            removed_symbols.append(symbol_hyphen)
+
+    if removed_symbols:
+        logging.warning(f"以下のシンボルはOKXの先物/スワップ市場で見つかりませんでした (BadSymbolエラー対策): {', '.join(removed_symbols)}")
+    
+    if not new_monitoring_symbols:
+         logging.error("有効な先物/スワップシンボルが見つかりませんでした。デフォルトのシンボルリストを確認してください。")
+         new_monitoring_symbols = initial_symbols # エラー時に続行するためにフォールバック
+         
+    CURRENT_MONITOR_SYMBOLS = new_monitoring_symbols
+    logging.info(f"監視対象のシンボルリストを更新しました。有効なシンボル数: {len(CURRENT_MONITOR_SYMBOLS)}/{len(initial_symbols)}")
+
+# ------------------------------------------------------------------------------------
 
 
 def calculate_pivot_points(df: pd.DataFrame) -> Dict[str, float]:
@@ -1036,6 +1093,9 @@ async def main_loop():
         logging.error("初期化に失敗しました。BOTを終了します。")
         return
 
+    # NEW: ロードされた市場情報に基づき、監視対象シンボルをフィルタリング
+    await filter_monitoring_symbols(EXCHANGE_CLIENT)
+
     while True:
         try:
             current_time = time.time()
@@ -1143,7 +1203,7 @@ async def main_loop():
             # 6. 成功時の状態更新
             LAST_UPDATE_TIME = current_time
             LAST_SUCCESS_TIME = current_time
-            logging.info(f"--- ✅ 分析サイクルを完了しました (通知数: {notified_count}件) ---")
+            logging.info(f"--- ✅ 分析サイクルを完了しました (通知数: {notified_count}件 / 監視シンボル数: {len(CURRENT_MONITOR_SYMBOLS)}件) ---")
             
         except Exception as e:
             error_name = type(e).__name__
@@ -1160,11 +1220,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.0 - Structural P&L Display")
+app = FastAPI(title="Apex BOT API", version="v19.0.2 - Robust Symbol Filter Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v19.0.2 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1178,7 +1238,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.0 - Structural P&L Display",
+        "bot_version": "v19.0.2 - Robust Symbol Filter Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1189,7 +1249,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v19.0.0)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v19.0.2)"})
 
 
 # 以下をターミナルで実行してBOTを起動します:
