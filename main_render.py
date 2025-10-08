@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.0 - Structural Analysis & PnL Estimate (v16.0.1 Base)
-# - NEW: 抵抗候補・支持候補 (R1/S1など) の明記
-# - NEW: $1000 リスクに基づいた SL/TP 損益額の表示
-# - NEW: 加点/減点要素のハイライト表示
+# Apex BOT v17.0.1 - KeyError Fix (v17.0.0 Base)
+# - FIX: analyze_single_timeframe 内で Pandas Series のキーに直接アクセスしていた箇所を .get() に変更し、KeyError を解消。
+# - FIX: テクニカル指標の値に np.nan が含まれる場合のロジックを修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -270,7 +269,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             f"| :--- | :--- | :--- |\n"
             f"| 🛡️ S2 / S1 | <code>${s2}</code> / <code>${s1}</code> | 主要な**支持 (Support)** 候補 |\n"
             f"| 🟡 PP | <code>${pp}</code> | ピボットポイント |\n"
-            f"| ⚔️ R1 / R2 | <code>${r1}</code> / <code>${r2}</code> | 主要な**抵抗 (Resistance)** 候補 |\n"
+            f"| ⚔️ R1 / R2 | <code>${r2}</code> / <code>${r2}</code> | 主要な**抵抗 (Resistance)** 候補 |\n"
             f"----------------------------------\n"
         )
     
@@ -339,7 +338,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 pivot_status = "❌ 構造確証なし"
                 if pivot_bonus > 0:
                      pivot_status = f"✅ **構造的S/R確証**"
-                analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} (<ins>**+{pivot_bonus * 100:.2f}点 ボーナス**</ins>)\n"
+                analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} (<ins>**+{pivot_bonus * 100:.2f}点 ボーナス追加**</ins>)\n"
 
                 # NEW: 出来高確証ボーナスのハイライト
                 volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
@@ -386,7 +385,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.0** - Structural Analysis & PnL Estimate |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.1** - KeyError Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -675,11 +674,13 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     pivot_points = calculate_pivot_points(df)
 
     # NaN除去と最終行の取得
+    # DataFrameからNaNを含む行を削除し、最新の行と前の行を取得する
     df.dropna(inplace=True)
     if df.empty:
         return {'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage', 'score': 0.0}
         
     last = df.iloc[-1]
+    last_prev = df.iloc[-2] if len(df) >= 2 else None # FIX: 前の行を安全に取得
     
     # 3. スコアリングの初期設定
     score: float = BASE_SCORE # 初期スコア 0.40
@@ -690,55 +691,63 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     # 4. ベースシグナル判定 (RSI, ADX, MACD, CCI)
     # ----------------------------------------------
     
-    # RSI
-    rsi_val = last['RSI_14']
+    # RSI/CCI値の安全な取得 (KeyError回避)
+    rsi_val = last.get('RSI_14', np.nan) 
+    cci_val = last.get('CCI_20', np.nan)
     
     # Long/Buy Signal
-    if rsi_val <= RSI_OVERSOLD and last['CCI_20'] < -100:
+    # FIX: NaNチェックを追加
+    if not np.isnan(rsi_val) and not np.isnan(cci_val) and rsi_val <= RSI_OVERSOLD and cci_val < -100:
         score += 0.20
         reversal_signal = True
         side = 'ロング'
-    elif rsi_val <= RSI_MOMENTUM_LOW:
+    elif not np.isnan(rsi_val) and rsi_val <= RSI_MOMENTUM_LOW:
         score += 0.10
         side = 'ロング'
 
     # Short/Sell Signal
-    if rsi_val >= RSI_OVERBOUGHT and last['CCI_20'] > 100:
+    # FIX: NaNチェックを追加
+    if not np.isnan(rsi_val) and not np.isnan(cci_val) and rsi_val >= RSI_OVERBOUGHT and cci_val > 100:
         score += 0.20
         reversal_signal = True
         side = 'ショート'
-    elif rsi_val >= RSI_MOMENTUM_HIGH:
+    elif not np.isnan(rsi_val) and rsi_val >= RSI_MOMENTUM_HIGH:
         score += 0.10
         side = 'ショート'
         
     # ADX (トレンドの強さ)
-    adx_val = last['ADX_14']
+    adx_val = last.get('ADX_14', np.nan) # FIX: Use .get()
     regime = 'レンジ/もみ合い (Range)'
-    if adx_val >= ADX_TREND_THRESHOLD:
+    if not np.isnan(adx_val) and adx_val >= ADX_TREND_THRESHOLD: # FIX: Check NaN
         score += 0.15 
         regime = 'トレンド (Trend)'
-    elif adx_val >= 20:
+    elif not np.isnan(adx_val) and adx_val >= 20:
         score += 0.05
         regime = '初期トレンド (Emerging Trend)'
     
     # MACD Cross Confirmation (モメンタム)
-    macd_hist = last['MACDH_12_26_9']
+    macd_hist = last.get('MACDH_12_26_9', np.nan) # FIX: Use .get()
     macd_cross_valid = True
     macd_cross_penalty_value = 0.0
     
-    if side == 'ロング':
-        # ロングシグナルだがMACDヒストグラムが下降中（マイナスだが減少傾向ではない）
-        if macd_hist < 0 and (last['MACDH_12_26_9'] < df['MACDH_12_26_9'].iloc[-2]):
-            score -= MACD_CROSS_PENALTY 
-            macd_cross_valid = False
-            macd_cross_penalty_value = MACD_CROSS_PENALTY
-            
-    elif side == 'ショート':
-        # ショートシグナルだがMACDヒストグラムが上昇中（プラスだが減少傾向ではない）
-        if macd_hist > 0 and (last['MACDH_12_26_9'] > df['MACDH_12_26_9'].iloc[-2]):
-            score -= MACD_CROSS_PENALTY
-            macd_cross_valid = False
-            macd_cross_penalty_value = MACD_CROSS_PENALTY
+    # FIX: 過去データが存在し、かつMACDHがNaNでない場合にモメンタムチェックを行う
+    if side != 'Neutral' and last_prev is not None and not np.isnan(macd_hist):
+        macd_hist_prev = last_prev.get('MACDH_12_26_9', np.nan) # FIX: Use .get()
+        if not np.isnan(macd_hist_prev):
+
+            if side == 'ロング':
+                # ロングシグナルだがMACDヒストグラムが下降中（マイナスだが減少傾向ではない）
+                if macd_hist < 0 and (macd_hist < macd_hist_prev):
+                    score -= MACD_CROSS_PENALTY 
+                    macd_cross_valid = False
+                    macd_cross_penalty_value = MACD_CROSS_PENALTY
+                    
+            elif side == 'ショート':
+                # ショートシグナルだがMACDヒストグラムが上昇中（プラスだが減少傾向ではない）
+                if macd_hist > 0 and (macd_hist > macd_hist_prev):
+                    score -= MACD_CROSS_PENALTY
+                    macd_cross_valid = False
+                    macd_cross_penalty_value = MACD_CROSS_PENALTY
 
     # ----------------------------------------------
     # 5. 価格アクション・長期トレンド・ボラティリティフィルター
@@ -749,10 +758,12 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     long_term_reversal_penalty = False
     long_term_reversal_penalty_value = 0.0
 
-    if not last.get('sma_long', np.nan) is np.nan:
-        if current_price > last['sma_long']:
+    sma_long_val = last.get('SMA_50', np.nan) # FIX: Use .get()
+    
+    if not np.isnan(sma_long_val):
+        if current_price > sma_long_val:
             long_term_trend = 'Long'
-        elif current_price < last['sma_long']:
+        elif current_price < sma_long_val:
             long_term_trend = 'Short'
             
     # Long-Term Reversal Penalty (15m/1hで長期トレンドに逆行するシグナルの場合)
@@ -767,9 +778,10 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
             long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY
             
     # Volatility Filter (ボリンジャーバンド幅のチェック) - 15m/1hでのみ適用
-    bb_width = last['BBP_20_2.0'] * 100 # BBPは0-100なので*100
+    bbp_val = last.get('BBP_20_2.0', np.nan) # FIX: Use .get()
     volatility_penalty = 0.0
-    if timeframe in ['15m', '1h']:
+    if timeframe in ['15m', '1h'] and not np.isnan(bbp_val):
+        bb_width = bbp_val * 100 
         if bb_width >= VOLATILITY_BB_PENALTY_THRESHOLD: # BB幅が広すぎる場合（急騰/急落後）
             score -= 0.10
             volatility_penalty = 0.10
@@ -791,19 +803,20 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     
     # VWAP Consistency (VWAPから離れすぎていないか)
     vwap_consistent = True
-    if side == 'ロング' and current_price < last['vwap_mid']:
-         # ロングシグナルなのに価格がVWAPより下にある -> スコア減点なし、VWAP不一致フラグのみ
-         vwap_consistent = False
-    elif side == 'ショート' and current_price > last['vwap_mid']:
-         # ショートシグナルなのに価格がVWAPより上にある -> スコア減点なし、VWAP不一致フラグのみ
-         vwap_consistent = False
+    vwap_mid_val = last.get('vwap_mid', np.nan)
+    if not np.isnan(vwap_mid_val):
+        if side == 'ロング' and current_price < vwap_mid_val:
+            vwap_consistent = False
+        elif side == 'ショート' and current_price > vwap_mid_val:
+            vwap_consistent = False
 
     # StochRSI Filter (過熱感のチェック) - 15m/1hでのみ適用
     stoch_penalty = 0.0
-    stoch_k = last['STOCHk_14_3_3']
-    stoch_d = last['STOCHd_14_3_3']
+    stoch_k = last.get('STOCHk_14_3_3', np.nan) # FIX: Use .get()
+    stoch_d = last.get('STOCHd_14_3_3', np.nan) # FIX: Use .get()
     
-    if timeframe in ['15m', '1h'] and side != 'Neutral':
+    # FIX: NaNチェックを追加
+    if timeframe in ['15m', '1h'] and side != 'Neutral' and not np.isnan(stoch_k) and not np.isnan(stoch_d):
         if side == 'ロング':
             # ロングシグナルだがStochRSIが買われすぎ水準 (80以上)
             if stoch_k > 80 or stoch_d > 80:
@@ -820,7 +833,10 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
     # 6. SL/TP/RRRの決定 (DTS戦略ベース)
     # ----------------------------------------------
     
-    atr_val = last['ATR_14']
+    # FIX: ATR値の取得を安全に行う。ATRが0以下の場合に備えてデフォルト値1.0を設ける
+    atr_val_raw = last.get('ATR_14', 1.0) 
+    atr_val = atr_val_raw if atr_val_raw > 0.0 else 1.0 # ゼロ割を防ぐための安全措置
+
     rr_ratio = DTS_RRR_DISPLAY # 表示用
     
     entry_price = current_price
@@ -1018,13 +1034,13 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
         'entry_type': entry_type,
         'macro_context': macro_context,
         'tech_data': {
-            'rsi': rsi_val,
-            'adx': adx_val,
-            'macd_hist': macd_hist,
-            'cci': last['CCI_20'],
-            'atr_value': atr_val,
-            'stoch_k': stoch_k,
-            'stoch_d': stoch_d,
+            'rsi': rsi_val, # FIX: 安全な値を使用
+            'adx': adx_val, # FIX: 安全な値を使用
+            'macd_hist': macd_hist, # FIX: 安全な値を使用
+            'cci': cci_val, # FIX: 安全な値を使用
+            'atr_value': atr_val, # FIX: 安全な値を使用
+            'stoch_k': stoch_k, # FIX: 安全な値を使用
+            'stoch_d': stoch_d, # FIX: 安全な値を使用
             'stoch_filter_penalty': stoch_penalty,
             'long_term_trend': long_term_trend,
             'long_term_reversal_penalty': long_term_reversal_penalty,
@@ -1041,7 +1057,7 @@ def analyze_single_timeframe(symbol: str, timeframe: str, ohlcv: List[List[float
             'dominance_bias_bonus_value': dominance_bias_bonus_value,
             'structural_sl_used': structural_sl_used,
             'structural_pivot_bonus': structural_pivot_bonus,
-            'pivot_points': pivot_points # NEW: Pivot Pointsを含める
+            'pivot_points': pivot_points 
         }
     }
     
@@ -1202,11 +1218,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.0 - Structural Analysis & PnL Estimate") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.1 - KeyError Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.0 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.1 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1220,7 +1236,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.0 - Structural Analysis & PnL Estimate", # バージョン更新
+        "bot_version": "v17.0.1 - KeyError Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1231,4 +1247,4 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.0)", "status_endpoint": "/status"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.1)", "status_endpoint": "/status"})
