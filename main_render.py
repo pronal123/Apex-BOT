@@ -1,6 +1,6 @@
 # ====================================================================================
 # Apex BOT v21.0.6 - Elliott/TSI/Ichimoku/OrderBook/FixedRRR Strategy (15m追加, OKX固定)
-# - 追加: 分析時間軸に15分足 ('15m') を追加。
+# - 機能追加: 固定30銘柄に加え、OKXの出来高上位30銘柄を動的に取得し、マージして監視する。
 # - 固定: 取引所をOKXに固定。APIキー/シークレットは引き続き環境変数から取得。
 # - 修正: Python global変数宣言のSyntaxErrorを解消済み。
 # ====================================================================================
@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Callable
+from typing import Dict, List, Optional, Tuple, Any, Callable, Set
 import yfinance as yf
 import asyncio
 from fastapi import FastAPI
@@ -36,21 +36,23 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 # BOTバージョン情報
-BOT_VERSION = "v21.0.6 - Elliott/TSI/Ichimoku/OrderBook/FixedRRR (15m追加)"
+BOT_VERSION = "v21.0.6 - Dynamic Top 30 Volume"
 
 # 取引所設定 (OKXに固定)
 CCXT_CLIENT_NAME = "okx" 
-API_KEY = os.getenv("OKX_API_KEY") # OKX専用の環境変数名を使用
+API_KEY = os.getenv("OKX_API_KEY") 
 SECRET = os.getenv("OKX_SECRET")
-PASSWORD = os.getenv("OKX_PASSWORD") # OKXなどpassphraseが必要な場合
+PASSWORD = os.getenv("OKX_PASSWORD") 
 
-# 監視銘柄リスト
-DEFAULT_SYMBOLS = [
+# 固定監視銘柄リスト (OKXで一般的なUSDT無期限スワップ30銘柄)
+FIXED_SYMBOLS: Set[str] = {
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT", "DOT/USDT", 
-    "DOGE/USDT", "AVAX/USDT", "MATIC/USDT", "LINK/USDT", "BCH/USDT", "LTC/USDT"
-]
-# 修正: 15分足を追加
-TIME_FRAMES = ['15m', '1h', '4h'] # 短期(15m)、メイン分析(1h)、トレンド確認(4h)
+    "DOGE/USDT", "AVAX/USDT", "MATIC/USDT", "LINK/USDT", "BCH/USDT", "LTC/USDT", 
+    "BNB/USDT", "ATOM/USDT", "NEAR/USDT", "FTM/USDT", "SAND/USDT", "MANA/USDT", 
+    "APE/USDT", "SHIB/USDT", "UNI/USDT", "AAVE/USDT", "SUI/USDT", "ARB/USDT", 
+    "OP/USDT", "XLM/USDT", "ICP/USDT", "FIL/USDT", "EGLD/USDT", "XMR/USDT"
+}
+TIME_FRAMES = ['15m', '1h', '4h'] 
 
 # リスク管理と戦略の定数 (v21.0.6 Fixed RRR)
 SL_ATR_MULTIPLIER = 2.5             
@@ -76,7 +78,7 @@ FR_PENALTY = -0.05
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 EXCHANGE_CLIENT = None
-CURRENT_MONITOR_SYMBOLS = set(DEFAULT_SYMBOLS)
+CURRENT_MONITOR_SYMBOLS: Set[str] = FIXED_SYMBOLS.copy() # 初期監視リストは固定銘柄
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_SUCCESS_TIME = 0.0
 BTC_DOMINANCE_CONTEXT = {'trend': 'Neutral', 'value': 0.0}
@@ -86,9 +88,8 @@ BTC_DOMINANCE_CONTEXT = {'trend': 'Neutral', 'value': 0.0}
 # ====================================================================================
 
 def initialize_ccxt_client(client_name: str) -> Optional[ccxt_async.Exchange]:
-    """CCXTクライアントを初期化する"""
+    """CCXTクライアントを初期化する (OKX固定)"""
     try:
-        # OKXに固定
         client_class = getattr(ccxt_async, 'okx')
         client = client_class({
             'apiKey': API_KEY,
@@ -104,8 +105,7 @@ def initialize_ccxt_client(client_name: str) -> Optional[ccxt_async.Exchange]:
         return None
 
 async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], str, str]:
-    """OHLCVデータを取得し、DataFrameに変換する。失敗した場合はフォールバックを試みる。"""
-    # 修正: global宣言を関数の冒頭に移動
+    """OHLCVデータを取得し、DataFrameに変換する。"""
     global EXCHANGE_CLIENT
     
     if not EXCHANGE_CLIENT:
@@ -114,7 +114,6 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
             return None, "ExchangeError", client_name
 
     try:
-        # OHLCVの取得
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=300)
         
         if not ohlcv or len(ohlcv) < 100:
@@ -138,12 +137,10 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
 async def fetch_funding_rate(symbol: str) -> float:
     """現在の資金調達率を取得する"""
-    # 修正: global宣言を関数の冒頭に移動
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0
     try:
-        # OKXは'swap'、Binanceは'future'
         ticker = await EXCHANGE_CLIENT.fetch_ticker(symbol)
         funding_rate = ticker.get('fundingRate', 0.0)
         return funding_rate if funding_rate is not None else 0.0
@@ -152,16 +149,12 @@ async def fetch_funding_rate(symbol: str) -> float:
 
 async def fetch_order_book_bias(symbol: str) -> Tuple[float, str]:
     """OKXから板情報を取得し、Bid/Askの厚さの偏りを計算する"""
-    # 修正: global宣言を関数の冒頭に移動
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0, "Neutral"
     
     try:
-        # スワップ市場のOrder Bookを取得 (OKX: instType='SWAP')
         orderbook = await EXCHANGE_CLIENT.fetch_order_book(symbol, limit=20, params={'instType': 'SWAP'})
-        
-        # トップN層のBid/Askのボリュームを比較
         limit = 5 
         
         bid_volume = sum(bid[1] for bid in orderbook['bids'][:limit])
@@ -172,7 +165,6 @@ async def fetch_order_book_bias(symbol: str) -> Tuple[float, str]:
         if total_volume == 0:
             return 0.0, "Neutral"
             
-        # 偏り率を計算: (Bid - Ask) / Total
         bias_ratio = (bid_volume - ask_volume) / total_volume
         
         bias_status = "Neutral"
@@ -186,6 +178,40 @@ async def fetch_order_book_bias(symbol: str) -> Tuple[float, str]:
     except Exception as e:
         logging.warning(f"板情報取得エラー {symbol}: {e}")
         return 0.0, "Neutral"
+
+async def fetch_dynamic_symbols() -> Set[str]:
+    """OKXから出来高上位30銘柄のUSDT無期限スワップを取得する"""
+    global EXCHANGE_CLIENT
+    if not EXCHANGE_CLIENT:
+        logging.error("CCXTクライアントが未初期化です。")
+        return set()
+
+    try:
+        # すべてのティッカーを取得
+        # OKXの場合、instType='SWAP'を指定することで無期限スワップのみに絞り込む
+        tickers = await EXCHANGE_CLIENT.fetch_tickers(params={'instType': 'SWAP'})
+        
+        # フィルタリングとソーティング
+        usdt_swap_tickers = {}
+        for symbol, ticker in tickers.items():
+            # USDTペアかつ、24h出来高(quoteVolume)情報があるもの
+            # quoteVolumeは通常、USD/USDT換算の出来高を示す
+            volume = ticker.get('quoteVolume', 0)
+            if symbol.endswith('/USDT') and volume > 0:
+                usdt_swap_tickers[symbol] = volume
+
+        # 出来高降順でソートし、上位30銘柄を取得
+        sorted_tickers = sorted(usdt_swap_tickers.items(), key=lambda item: item[1], reverse=True)
+        # 上位30銘柄のシンボルのみをセットとして抽出
+        top_symbols = {symbol for symbol, volume in sorted_tickers[:30]}
+
+        logging.info(f"出来高上位30銘柄を動的に取得しました。総数: {len(top_symbols)}")
+        return top_symbols
+
+    except Exception as e:
+        logging.error(f"動的銘柄リスト取得エラー: {e}")
+        return set()
+
 
 async def get_crypto_macro_context() -> Dict:
     """BTCドミナンスの動向を取得する"""
@@ -237,11 +263,11 @@ async def analyze_single_timeframe(
     df = ohlcv
     price = df['close'].iloc[-1]
     
-    # Funding RateとOrder Bookはメインの1h足でのみ取得し、スコアリングに利用
     funding_rate_val = 0.0
     order_book_bias_ratio = 0.0
     order_book_status = "Neutral"
 
+    # 1h足でのみFRと板情報を取得
     if timeframe == '1h': 
         funding_rate_val = await fetch_funding_rate(symbol)
         order_book_bias_ratio, order_book_status = await fetch_order_book_bias(symbol)
@@ -254,7 +280,6 @@ async def analyze_single_timeframe(
     df.ta.bbands(append=True)
     df.ta.donchian(append=True)
     df.ta.vwap(append=True)
-    
     df.ta.tsi(append=True) 
     df.ta.ichimoku(append=True)
     df.ta.ppo(append=True) 
@@ -303,22 +328,15 @@ async def analyze_single_timeframe(
         'tsi_val': tsi_val, 'ichi_k': ichi_k_val, 'ichi_t': ichi_t_val, 
         'macd_hist_val': macd_hist_val, 'macd_hist_val_prev': macd_hist_val_prev,
         'long_term_trend': long_term_trend,
-        # 15分足の場合は、エントリー・TP/SL計算を行わない
         'is_main_tf': (timeframe == '1h') 
     }
     
-    # メイン分析軸(1h)以外では、スコアリングとTP/SL計算をスキップし、トレンド情報のみを返す
+    # 1h足 (メイン分析) 以外では、スコアリングとTP/SL計算をスキップ
     if timeframe != '1h':
         return {
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'side': side, # トレンド方向のみを使用
-            'score': 0.0,
-            'price': price,
-            'entry': 0.0, 'sl': 0.0, 'tp1': 0.0,
-            'entry_type': "N/A",
-            'regime': "N/A",
-            'tech_data': tech_data
+            'symbol': symbol, 'timeframe': timeframe, 'side': side, 'score': 0.0,
+            'price': price, 'entry': 0.0, 'sl': 0.0, 'tp1': 0.0,
+            'entry_type': "N/A", 'regime': "N/A", 'tech_data': tech_data
         }
 
     # === 1h足 (メイン分析) のみのスコアリングとTP/SL計算 ===
@@ -528,7 +546,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         
     best_signal = sorted(high_score_signals, key=lambda x: x.get('score', 0.0), reverse=True)[0]
 
-    # 2. 主要な取引情報を抽出
     display_symbol = symbol.replace('/USDT', '')
     side = best_signal.get('side', 'N/A')
     score = best_signal.get('score', 0.0)
@@ -650,8 +667,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 async def main_loop():
     """ボットのメインループ"""
-    # 修正: すべてのglobal宣言を関数の冒頭に統合
-    global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, BTC_DOMINANCE_CONTEXT, EXCHANGE_CLIENT
+    global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, BTC_DOMINANCE_CONTEXT, EXCHANGE_CLIENT, CURRENT_MONITOR_SYMBOLS
     
     # CCXTクライアントの初期化
     if not EXCHANGE_CLIENT:
@@ -659,16 +675,26 @@ async def main_loop():
         if not EXCHANGE_CLIENT:
             logging.error("CCXTクライアントの初期化に失敗しました。ボットを停止します。")
             return
+    
+    loop_count = 0
 
     while True:
         try:
-            logging.info(f"--- 🔄 Apex BOT {BOT_VERSION} 処理開始 ---")
+            loop_count += 1
+            logging.info(f"--- 🔄 Apex BOT {BOT_VERSION} 処理開始 (Loop: {loop_count}) ---")
             
-            # 1. マクロコンテキストの取得
+            # 1. 監視銘柄リストの更新 (5分ごと、5ループに1回)
+            if loop_count % 5 == 1: # 初回と5ループごとに実行
+                dynamic_symbols = await fetch_dynamic_symbols()
+                # 固定銘柄と動的銘柄を統合
+                CURRENT_MONITOR_SYMBOLS = FIXED_SYMBOLS.union(dynamic_symbols)
+                logging.info(f"監視銘柄リストを更新しました。固定:{len(FIXED_SYMBOLS)}, 動的:{len(dynamic_symbols)}, 総監視数: {len(CURRENT_MONITOR_SYMBOLS)}")
+
+            # 2. マクロコンテキストの取得
             BTC_DOMINANCE_CONTEXT = await get_crypto_macro_context()
             logging.info(f"マクロコンテキスト (BTCトレンド): {BTC_DOMINANCE_CONTEXT['trend']}")
 
-            # 2. 監視銘柄の分析
+            # 3. 監視銘柄の分析
             all_signals: List[Dict] = []
             tasks = []
             
@@ -676,7 +702,6 @@ async def main_loop():
             random.shuffle(symbols_to_monitor)
 
             for symbol in symbols_to_monitor:
-                # generate_integrated_signal内で15m, 1h, 4hの3つの時間軸を処理
                 tasks.append(generate_integrated_signal(symbol, BTC_DOMINANCE_CONTEXT, CCXT_CLIENT_NAME))
 
             results = await asyncio.gather(*tasks)
@@ -685,7 +710,7 @@ async def main_loop():
                 if result_list:
                     all_signals.extend(result_list)
             
-            # 3. シグナルのフィルタリングとランキング (スコア 85点以上)
+            # 4. シグナルのフィルタリングとランキング (スコア 85点以上)
             high_conviction_signals = [
                 s for s in all_signals 
                 if s.get('score', 0.0) >= CONVICTION_SCORE_THRESHOLD
@@ -695,7 +720,7 @@ async def main_loop():
             
             LAST_ANALYSIS_SIGNALS = ranked_signals
             
-            # 4. メッセージ生成
+            # 5. メッセージ生成
             messages = []
             for rank, signal in enumerate(ranked_signals[:5]): 
                 message = format_integrated_analysis_message(signal['symbol'], [signal], rank + 1)
@@ -716,7 +741,6 @@ async def main_loop():
             
             if "Connection reset by peer" in str(e):
                 logging.warning("接続リセットエラー。CCXTクライアントを再初期化します。")
-                global EXCHANGE_CLIENT
                 if EXCHANGE_CLIENT:
                     await EXCHANGE_CLIENT.close()
                 EXCHANGE_CLIENT = initialize_ccxt_client(CCXT_CLIENT_NAME)
@@ -762,4 +786,5 @@ def home_view():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000)) 
-    uvicorn.run(f"{__file__.replace('.py', '')}:app", host="0.0.0.0", port=port)
+    # uvicornの実行時にFastAPIアプリのインスタンスを渡す
+    uvicorn.run(app, host="0.0.0.0", port=port)
