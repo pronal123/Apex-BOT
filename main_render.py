@@ -301,8 +301,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"----------------------------------\n"
         f"| 項目 | **損益額 (USD)** | 損益率 (対ポジションサイズ) |\n"
         f"| :--- | :--- | :--- |\n"
-        f"| ❌ SL実行時 | **{format_pnl_utility_telegram(-sl_risk_usd_abs)}** | {sl_risk_percent:.2f}% |\n" 
-        f"| 🟢 TP目標時 | **{format_pnl_utility_telegram(tp_gain_usd_abs)}** | {tp_gain_percent:.2f}% |\n"
+        f"| ❌ SL実行時 | **{format_pnl_utility_telegram(-sl_loss_usd)}** | {sl_risk_percent:.2f}% |\n" 
+        f"| 🟢 TP目標時 | **{format_pnl_utility_telegram(tp_gain_usd)}** | {tp_gain_percent:.2f}% |\n"
         f"----------------------------------\n"
     ) 
     
@@ -1084,6 +1084,9 @@ async def fetch_macro_context(monitor_symbols: List[str]) -> Dict:
     # ドミナンスの簡易トレンド (BTC-USDTとALTのパフォーマンス差から暫定的に決定)
     if context['sentiment_fgi_proxy'] > 0.1:
          context['dominance_trend'] = 'Bullish'
+    elif context['long_term_trend_4h'] == 'Bullish' and context['sentiment_fgi_proxy'] < 0.1:
+         # BTCが上昇トレンドだがFGI代理スコアが伸びていない = アルトの相対的な強さ (暫定ロジック)
+         context['dominance_trend'] = 'Bearish'
     elif context['sentiment_fgi_proxy'] < -0.1:
          context['dominance_trend'] = 'Bearish'
     else:
