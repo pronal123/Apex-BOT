@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.11 - FIX: BTC Dominance MultiIndex Error
-# - FIX: yfinanceから取得したデータがMultiIndexを返し、その後の処理でエラーとなる問題を解決。
-#        データフレームのインデックスと列を明示的に平坦化するロジックを追加。
-# - v17.0.10: 通知不成立時の通知ロジックを維持。
+# Apex BOT v17.0.12 - FIX: OKX Symbol Suffix Issue
+# - FIX: fetch_ohlcv_data内のOKX向け手動サフィックス (':USDT-SWAP') の追加ロジックを削除。
+#        CCXTの'defaultType': 'future'設定に依存することで、正しい市場名を解決させる。
+# - v17.0.11: BTC Dominance MultiIndex Error修正ロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -397,7 +397,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     return message
 
-# --- NEW: スコア不成立時の通知メッセージ整形関数 ---
+# --- スコア不成立時の通知メッセージ整形関数 (変更なし) ---
 def format_insufficient_analysis_message(signal: Dict, threshold: float) -> str:
     """
     スコアが閾値に満たなかった場合に送信するメッセージを整形する。(v17.0.10)
@@ -462,7 +462,7 @@ async def initialize_ccxt_client() -> None:
             'secret': os.environ.get(f'{CCXT_CLIENT_NAME}_SECRET', 'YOUR_SECRET'),
             'password': os.environ.get(f'{CCXT_CLIENT_NAME}_PASSWORD'), 
             'options': {
-                'defaultType': 'future', 
+                'defaultType': 'future', # この設定がOKXのパーペチュアルスワップに自動的にマップされます
             },
             'enableRateLimit': True,
         })
@@ -485,9 +485,10 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int = 500) -> Tup
     ccxt_symbol = symbol.replace('-', '/') 
     
     try:
-        # OKXの場合、パーペチュアルスワップを指定
-        if EXCHANGE_CLIENT.id == 'okx':
-            ccxt_symbol += ':USDT-SWAP'
+        # OKXの場合、パーペチュアルスワップを指定するための手動サフィックスは削除 (v17.0.12 FIX)
+        # CCXTのクライアント設定 (defaultType: 'future') がシンボルマッピングを処理します。
+        # if EXCHANGE_CLIENT.id == 'okx':
+        #     ccxt_symbol += ':USDT-SWAP' 
             
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(ccxt_symbol, timeframe, limit=limit)
         
@@ -571,12 +572,11 @@ async def fetch_global_macro_context() -> Dict:
         dom_df = yf.download("BTC-USD", period="7d", interval="4h", progress=False, auto_adjust=False)
         
         # --- v17.0.11 FIX: yfinanceのDataFrameがMultiIndexで返される場合の対策 ---
-        # 1. 列のMultiIndexを平坦化 (通常は複数ティッカー時だが、環境依存で発生するため)
+        # 1. 列のMultiIndexを平坦化
         if isinstance(dom_df.columns, pd.MultiIndex):
             dom_df.columns = [col[0] for col in dom_df.columns.values]
             
-        # 2. 行のMultiIndexを平坦化 (エラーメッセージ "not MultiIndex" の直接的な原因対策)
-        # droplevel(axis=0) は MultiIndexの場合のみ適用可能
+        # 2. 行のMultiIndexを平坦化
         if isinstance(dom_df.index, pd.MultiIndex):
             # 最初のレベルのみを残す
             dom_df = dom_df.droplevel(level=0, axis=0)
@@ -615,7 +615,7 @@ async def fetch_global_macro_context() -> Dict:
     return context
 
 # ====================================================================================
-# ANALYTICS & CORE LOGIC
+# ANALYTICS & CORE LOGIC (変更なし)
 # ====================================================================================
 
 def calculate_pivot_points(df: pd.DataFrame) -> Dict[str, float]:
@@ -629,9 +629,9 @@ def calculate_pivot_points(df: pd.DataFrame) -> Dict[str, float]:
     prev_row = df.iloc[-2]
 
     # 前日の高値・安値・終値
-    h = prev_row['High'] # yfinanceの列名に合わせる
-    l = prev_row['Low']
-    c = prev_row['Close']
+    h = prev_row['high']
+    l = prev_row['low']
+    c = prev_row['close']
     
     # Pivot Point (PP)
     pp = (h + l + c) / 3
@@ -888,6 +888,7 @@ async def run_technical_analysis(symbol: str) -> Tuple[List[Dict], bool]:
         df, is_market_missing_tf = await fetch_ohlcv_data(symbol, tf, REQUIRED_OHLCV_LIMITS[tf]) 
         
         if is_market_missing_tf:
+            # 15m/1h/4hのいずれかで市場が見つからなかった場合、そのシンボルは全体として無効と判断
             is_market_missing = True 
             break 
             
@@ -960,7 +961,12 @@ async def main_loop():
     while True:
         try:
             current_time_j = datetime.now(JST)
-            logging.info(f"🔄 Apex BOT v17.0.11 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
+            logging.info(f"🔄 Apex BOT v17.0.12 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
+
+            # 致命的エラーでシンボルが空になった場合は、デフォルトリストを再ロード
+            if not CURRENT_MONITOR_SYMBOLS:
+                CURRENT_MONITOR_SYMBOLS = [s.replace('/', '-') for s in DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]]
+                logging.warning("監視リストが空になったため、デフォルトリストを再ロードしました。")
 
             logging.info(f"監視対象シンボル: {len(CURRENT_MONITOR_SYMBOLS)} 種類を決定しました。")
 
@@ -1076,7 +1082,7 @@ async def main_loop():
             LAST_SUCCESS_TIME = now
             LAST_SUCCESSFUL_MONITOR_SYMBOLS = CURRENT_MONITOR_SYMBOLS.copy()
             logging.info("====================================")
-            logging.info(f"✅ Apex BOT v17.0.11 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
+            logging.info(f"✅ Apex BOT v17.0.12 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
             logging.info(f"通知クールダウン中のシンボル: {list(TRADE_NOTIFIED_SYMBOLS.keys())}")
             
             await asyncio.sleep(LOOP_INTERVAL)
@@ -1098,11 +1104,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.11 - FIX: BTC Dominance MultiIndex Error") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.12 - FIX: OKX Symbol Suffix Issue") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.11 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.12 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1116,7 +1122,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.11 - FIX: BTC Dominance MultiIndex Error", # バージョン更新
+        "bot_version": "v17.0.12 - FIX: OKX Symbol Suffix Issue", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1127,7 +1133,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.11)"}) # バージョン更新
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.12)"}) # バージョン更新
 
 # ====================================================================================
 # EXECUTION (If run directly)
