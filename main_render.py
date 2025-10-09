@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.5 - Fix Fatal AttributeError in Main Loop (Client Stability Fix)
-# - FIX: initialize_ccxt_client 関数内で、クライアントの再初期化時に既存のクライアントを安全に閉じるロジックを追加。
-# - FIX: main_loop の Exception ハンドラに、AttributeError発生時にクライアントを再初期化し、ループを回復するロジックを追加。
+# Apex BOT v17.0.6 - Fix Persistent CCXT AttributeError
+# - FIX: initialize_ccxt_client 関数内で、既存クライアントを閉じた後に明示的に EXCHANGE_CLIENT = None を設定し、グローバル参照を確実にクリア。
+# - FIX: main_loop のエラー回復ロジック内で、CCXTクライアント再初期化後に asyncio.sleep(3) を追加し、新しい aiohttp セッションが安定する時間を確保。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -120,7 +120,7 @@ def format_price_utility(price: float, symbol: str) -> str:
     return f"{price:,.8f}"
 
 def format_pnl_utility_telegram(pnl_usd: float) -> str:
-    """損益額をTelegram表示用に整形し、色付けする - NEW"""
+    """損益額をTelegram表示用に整形し、色付けする"""
     if pnl_usd > 0.0001:
         return f"<ins>+${pnl_usd:,.2f}</ins> 🟢"
     elif pnl_usd < -0.0001:
@@ -154,7 +154,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
     return max(0.40, min(0.85, adjusted_rate))
 
 def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, capital: float) -> float:
-    """Pivot価格到達時の損益を計算する (1x想定) - NEW Utility"""
+    """Pivot価格到達時の損益を計算する (1x想定)"""
     if target_price <= 0 or entry <= 0: return 0.0
     
     # 数量 = 資本 / エントリー価格
@@ -172,7 +172,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.4対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.6対応)
     """
     global POSITION_CAPITAL
     
@@ -279,7 +279,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     sl_source_str = "ATR基準"
     if best_signal.get('tech_data', {}).get('structural_sl_used', False):
-        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" # FIX反映
+        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" 
         
     # 取引計画の表示をDTSに合わせて変更
     trade_plan = (
@@ -318,6 +318,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     if pivot_r1 > 0 and entry_price > 0 and side in ["ロング", "ショート"]:
         
         # Long/Shortに応じてP&Lを計算
+        is_long = (side == "ロング")
         pnl_r1 = calculate_pnl_at_pivot(pivot_r1, entry_price, is_long, POSITION_CAPITAL)
         pnl_r2 = calculate_pnl_at_pivot(pivot_r2, entry_price, is_long, POSITION_CAPITAL)
         pnl_s1 = calculate_pnl_at_pivot(pivot_s1, entry_price, is_long, POSITION_CAPITAL)
@@ -450,9 +451,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 dominance_bias_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
                 
                 dominance_status = ""
-                if dominance_bonus > 0:
+                if dominance_bias_bonus > 0:
                     dominance_status = f"✅ **優位性あり** (<ins>**+{dominance_bias_bonus * 100:.2f}点**</ins>)"
-                elif dominance_bonus < 0:
+                elif dominance_bias_bonus < 0:
                     dominance_status = f"⚠️ **バイアスにより減点適用** (<ins>**-{abs(dominance_bias_bonus) * 100:.2f}点**</ins>)"
                 else:
                     dominance_status = "❌ フィルター範囲外/非該当"
@@ -471,7 +472,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.5** - Stability Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.6** - CCXT Stability Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -484,17 +485,20 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # ====================================================================================
 
 async def initialize_ccxt_client():
-    """CCXTクライアントを初期化 (OKX) - Stability Fix適用"""
+    """CCXTクライアントを初期化 (OKX) - Stability Fix (v17.0.6)適用"""
     global EXCHANGE_CLIENT
     
-    # NEW: 既存のクライアントがあれば、安全のために閉じる
+    # NEW FIX 1: 既存のクライアントがあれば、安全に閉じ、明示的にNoneに設定する
     if EXCHANGE_CLIENT:
         try:
             # CCXTクライアントの非同期セッションを閉じる
             await EXCHANGE_CLIENT.close() 
         except Exception:
-            # 既に閉じているか、閉じられない場合も無視し、処理を続行
+            # 既に閉じているか、閉じられない場合も無視
             pass 
+        finally:
+            # 明示的にNoneに設定し、参照をクリアする (AttributeErrorの再発防止)
+            EXCHANGE_CLIENT = None 
 
     EXCHANGE_CLIENT = ccxt_async.okx({
         'timeout': 30000,
@@ -588,11 +592,10 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
 async def fetch_ohlcv_for_macro(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     """マクロコンテキスト (BTCドミナンスなど) 用のOHLCVデータを取得する"""
-    # yfinanceまたはccxtを使用してデータを取得（ここではyfinanceの例を使用）
+    
     if symbol == 'BTC-DOMINANCE':
         # TradingViewのティッカーに依存するため、CCXTではなく直接データプロバイダを使用することが多い
-        # 今回は簡易的にダミーデータを返すか、外部APIのロジックを挿入する
-        # ここでは、外部依存性を減らすため、一旦データ取得ロジックは省略し、呼び出し側でエラーハンドリングする
+        # 現状は外部依存性を減らすため、一旦データ取得ロジックは省略
         return None 
     
     # 通常の取引所クライアントで取得
@@ -631,14 +634,13 @@ def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataF
     df.ta.bbands(append=True)
     
     # 3. 構造的なS/R (Pivot Points)
-    # 日足でなければ、日足データを取得して計算するのが望ましいが、ここでは簡略化のため現在のTFで計算する
     df.ta.pivot_fibonacci(append=True) # フィボナッチピボットを使用
 
     return df
 
 def get_last_row_data(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    DataFrameの最後の行から必要なテクニカル指標を抽出する (v17.0.4対応)
+    DataFrameの最後の行から必要なテクニカル指標を抽出する 
     """
     if df.empty:
         return {}
@@ -676,7 +678,7 @@ def get_last_row_data(df: pd.DataFrame) -> Dict[str, Any]:
 
 def get_prev_row_data(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    DataFrameの最後の行から2番目の行から必要なテクニカル指標を抽出する (v17.0.4対応)
+    DataFrameの最後の行から2番目の行から必要なテクニカル指標を抽出する 
     """
     if df.shape[0] < 2:
         return {}
@@ -702,7 +704,7 @@ def analyze_single_timeframe(
     macro_context: Dict
 ) -> Dict[str, Any]:
     """
-    単一の時間軸でシグナルを分析し、スコアと取引パラメータを計算する (v17.0.4対応)
+    単一の時間軸でシグナルを分析し、スコアと取引パラメータを計算する 
     """
     
     analysis_result = {
@@ -1071,12 +1073,6 @@ async def fetch_macro_context(monitor_symbols: List[str]) -> Dict:
                 context['long_term_trend_4h'] = 'Bearish'
 
     # 2. BTC Dominanceのトレンドを取得
-    # BTC DominanceのデータはCCXTでは直接取得できないため、ここでは外部APIのモックを使用する
-    # 例: TradingViewのTVC:BTC_Dインデックスの価格変動を簡易的に模倣する
-    # 簡易的に、BTC/USDTの価格変動と連動すると仮定し、過去N期間の方向性をトレンドとする
-    
-    # 実際のトレードではここに外部APIのロジックを挿入してください。
-    
     # 現時点では、簡易的なFGIの代理スコア (-1.0 to 1.0) のみを返す（BTCトレンドから仮定）
     if context['long_term_trend_4h'] == 'Bullish':
         context['sentiment_fgi_proxy'] = 0.30 # 楽観
@@ -1086,7 +1082,6 @@ async def fetch_macro_context(monitor_symbols: List[str]) -> Dict:
         context['sentiment_fgi_proxy'] = 0.0
         
     # ドミナンスの簡易トレンド (BTC-USDTとALTのパフォーマンス差から暫定的に決定)
-    # ここでは、FGI ProxyがプラスならDominanceは上昇傾向と仮定
     if context['sentiment_fgi_proxy'] > 0.1:
          context['dominance_trend'] = 'Bullish'
     elif context['sentiment_fgi_proxy'] < -0.1:
@@ -1216,7 +1211,7 @@ async def process_signals(all_signals: List[Dict]) -> List[Dict]:
 
 async def main_loop():
     """
-    メインの監視ループ - Stability Fix適用
+    メインの監視ループ - Stability Fix (v17.0.6)適用
     """
     global LAST_UPDATE_TIME, LAST_SUCCESS_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT
     
@@ -1228,7 +1223,7 @@ async def main_loop():
 
     while True:
         try:
-            logging.info(f"\n--- 🚀 Apex BOT v17.0.5 - 監視ループ開始 (時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST) ---") # バージョン更新
+            logging.info(f"\n--- 🚀 Apex BOT v17.0.6 - 監視ループ開始 (時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST) ---") # バージョン更新
             
             # 1. 銘柄リストの動的更新 (低頻度)
             if time.time() - LAST_UPDATE_TIME > 60 * 60 * 4: # 4時間に1回
@@ -1273,6 +1268,8 @@ async def main_loop():
             if error_name in ['AttributeError', 'ConnectionError', 'TimeoutError']:
                 logging.warning("⚠️ クライアントの不安定性を検知しました。再初期化を試行します...")
                 await initialize_ccxt_client() 
+                # NEW FIX 2: クライアント再初期化後、短い待機時間を挿入して、新しい aiohttp セッションが完全に安定するのを待つ
+                await asyncio.sleep(3) 
             # --------------------------------------------------------------------------------------------------------
 
             await asyncio.sleep(60)
@@ -1282,11 +1279,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.5 - Stability Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.6 - CCXT Stability Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.5 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.6 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1305,7 +1302,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.5 - Stability Fix", # バージョン更新
+        "bot_version": "v17.0.6 - CCXT Stability Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1316,7 +1313,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.5)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.6)"})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得し、uvicornを起動
