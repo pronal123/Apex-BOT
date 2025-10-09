@@ -1,10 +1,9 @@
 # ====================================================================================
-# Apex BOT v17.0.6 - Debug & Rate Limit Fix
+# Apex BOT v17.0.7 - Dynamic Symbol Removal
+# - NEW: fetch_ohlcv_data 関数内で「market symbol does not exist」エラーを検知した場合、
+#        そのシンボルを次回以降の監視リスト (CURRENT_MONITOR_SYMBOLS) から自動的に除外するロジックを追加。
 # - FIX: main_loopでasyncio.gatherの使用を停止し、シンボルごとの逐次処理 + 1秒遅延を導入 (OKX Rate Limit回避)
 # - FIX: fetch_global_macro_context内でyfinanceのデータ処理にdropnaと明示的なスカラー比較を導入 (AmbiguousValueError解消)
-# - NEW: 1000 USD Trade PnL notification. (v17.0.5からの継承)
-# - NEW: Dynamic TP based on Timeframe-specific ATR Multipliers. (v17.0.5からの継承)
-# - NEW: Trend Consistency Bonus (+0.10) for stricter scoring. (v17.0.5からの継承)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -186,7 +185,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.6)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.7)
     """
     global POSITION_CAPITAL
     
@@ -444,12 +443,17 @@ async def initialize_ccxt_client():
         logging.error(f"CCXTクライアントの初期化に失敗: {e}")
         EXCHANGE_CLIENT = None
 
-async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-    """指定されたシンボルと時間足のOHLCVデータを取得する"""
+async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Tuple[pd.DataFrame, bool]: # 戻り値にboolを追加
+    """
+    指定されたシンボルと時間足のOHLCVデータを取得する。
+    
+    戻り値: (OHLCV DataFrame, is_market_missing: bool)
+    """
     global EXCHANGE_CLIENT
     
+    # is_market_missing: CCXTで「市場シンボルが存在しない」エラーを検出した場合にTrue
     if not EXCHANGE_CLIENT:
-        return pd.DataFrame()
+        return pd.DataFrame(), False
 
     # CCXTは 'BTC/USDT' 形式を期待
     ccxt_symbol = symbol.replace('-', '/')
@@ -460,26 +464,34 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> pd.DataFr
         
         if not ohlcv:
             logging.warning(f"分析スキップ: {symbol} {timeframe} のデータが不足しています。")
-            return pd.DataFrame()
+            return pd.DataFrame(), False # データ不足は致命的エラーではない
             
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True).dt.tz_convert(JST)
         df.set_index('datetime', inplace=True)
-        return df.drop('timestamp', axis=1)
+        return df.drop('timestamp', axis=1), False # 正常終了
 
     except ccxt.NetworkError as e:
         logging.error(f"OHLCV取得エラー {symbol} {timeframe}: ネットワークエラー {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), False
     except ccxt.ExchangeError as e:
-        # OKX {"msg":"Too Many Requests","code":"50011"} のようなレート制限エラーをキャッチ
-        error_name = type(e).__name__
-        logging.error(f"OHLCV取得エラー {symbol} {timeframe}: {EXCHANGE_CLIENT.id} {e}")
-        return pd.DataFrame()
+        error_text = str(e)
+        logging.error(f"OHLCV取得エラー {symbol} {timeframe}: {EXCHANGE_CLIENT.id} {error_text}")
+        
+        # NEW: 市場シンボルが存在しないエラーをチェック
+        if 'does not have market symbol' in error_text:
+            # OKXでは 'okx does not have market symbol' がログに出る
+            logging.error(f"⚠️ 致命的エラー: {symbol} は取引所に存在しないため、次回から監視対象から除外されます。")
+            return pd.DataFrame(), True # 致命的エラーフラグを立てる
+            
+        return pd.DataFrame(), False # その他のCCXTエラーは一時的なものとして扱う
+
     except Exception as e:
         error_name = type(e).__name__
         logging.error(f"OHLCV取得中に予期せぬエラー {symbol} {timeframe}: {error_name} {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), False
 
+        
 async def fetch_latest_funding_rate(symbol: str) -> float:
     """指定されたシンボルの最新の資金調達率を取得する"""
     global EXCHANGE_CLIENT
@@ -564,7 +576,6 @@ async def fetch_global_macro_context() -> Dict[str, Any]:
     # 2. BTCドミナンス (BTC Dominance - proxy by BTC-USD trend)
     try:
         # yfinance (Yahoo Finance) から BTC-USD の過去7日間、4時間足データを取得
-        # NOTE: yfinanceのバグにより、一部環境でエラーが出ることがあるため、df.columnsを修正
         # v17.0.6 FIX: FutureWarningとAmbiguousValueError対策として、dropna()と.item()/.all()を使用
         dom_df = yf.download("BTC-USD", period="7d", interval="4h", progress=False)
         
@@ -925,7 +936,7 @@ def calculate_regime(last_row: pd.Series) -> str:
 
 
 def analyze_single_timeframe(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Dict:
-    """単一の時間足データに対して分析とスコアリングを実行する (v17.0.6)"""
+    """単一の時間足データに対して分析とスコアリングを実行する (v17.0.7)"""
     
     result = {
         'symbol': symbol,
@@ -1040,15 +1051,26 @@ def analyze_single_timeframe(df: pd.DataFrame, symbol: str, timeframe: str, macr
 
     return result
 
-async def run_technical_analysis(symbol: str) -> List[Dict]:
-    """指定されたシンボルに対して複数の時間足で分析を実行し、結果を統合する (v17.0.6)"""
+async def run_technical_analysis(symbol: str) -> Tuple[List[Dict], bool]: # 戻り値にboolを追加
+    """
+    指定されたシンボルに対して複数の時間足で分析を実行し、結果を統合する。
+    
+    戻り値: (分析結果リスト, is_market_missing: bool)
+    """
     timeframes = ['15m', '1h', '4h']
     all_results = []
     
+    is_market_missing = False # NEW: 市場シンボル欠損フラグ
+    
     for tf in timeframes:
         # NOTE: fetch_ohlcv_dataでレート制限エラーが発生するため、ここで逐次実行
-        df = await fetch_ohlcv_data(symbol, tf, REQUIRED_OHLCV_LIMITS[tf])
+        df, is_market_missing_tf = await fetch_ohlcv_data(symbol, tf, REQUIRED_OHLCV_LIMITS[tf]) # 致命的エラーフラグを受け取る
         
+        if is_market_missing_tf:
+            is_market_missing = True # 一つでも致命的なエラーがあればフラグを立てる
+            # このシンボルの他の時間足の取得はスキップ
+            break 
+            
         if not df.empty and len(df) >= REQUIRED_OHLCV_LIMITS[tf]:
             try:
                 result = analyze_single_timeframe(df, symbol, tf, GLOBAL_MACRO_CONTEXT)
@@ -1071,41 +1093,42 @@ async def run_technical_analysis(symbol: str) -> List[Dict]:
 
     
     # 複数時間軸の結果を統合し、トレンドの一貫性を評価 (v17.0.5)
-    valid_signals = [r for r in all_results if r['side'] in ['ロング', 'ショート']]
-    
-    if valid_signals:
-        long_count = sum(1 for r in valid_signals if r['side'] == 'ロング')
-        short_count = sum(1 for r in valid_signals if r['side'] == 'ショート')
+    if not is_market_missing: # 致命的なエラーがない場合のみ評価
+        valid_signals = [r for r in all_results if r['side'] in ['ロング', 'ショート']]
         
-        is_consistent = (long_count == 3 or short_count == 3)
-        match_count = max(long_count, short_count)
-        
-        consistency_data = {
-            'is_consistent': is_consistent,
-            'match_count': match_count,
-            'long_count': long_count,
-            'short_count': short_count
-        }
+        if valid_signals:
+            long_count = sum(1 for r in valid_signals if r['side'] == 'ロング')
+            short_count = sum(1 for r in valid_signals if r['side'] == 'ショート')
+            
+            is_consistent = (long_count == 3 or short_count == 3)
+            match_count = max(long_count, short_count)
+            
+            consistency_data = {
+                'is_consistent': is_consistent,
+                'match_count': match_count,
+                'long_count': long_count,
+                'short_count': short_count
+            }
 
-        # 最もスコアの高いシグナルに一貫性ボーナスを適用
-        best_signal_index = -1
-        best_score = -1.0
-        
-        for i, r in enumerate(all_results):
-            if r['side'] in ['ロング', 'ショート']:
-                if r['score'] > best_score:
-                    best_score = r['score']
-                    best_signal_index = i
-                
-                # トレンドの一貫性情報を追加
-                r['trend_consistency'] = consistency_data
-                
-        if is_consistent and best_signal_index != -1:
-            # 3つ全てで一致した場合、最高スコアのシグナルにボーナスを追加
-            all_results[best_signal_index]['score'] = min(1.0, all_results[best_signal_index]['score'] + TREND_CONSISTENCY_BONUS)
+            # 最もスコアの高いシグナルに一貫性ボーナスを適用
+            best_signal_index = -1
+            best_score = -1.0
+            
+            for i, r in enumerate(all_results):
+                if r['side'] in ['ロング', 'ショート']:
+                    if r['score'] > best_score:
+                        best_score = r['score']
+                        best_signal_index = i
+                    
+                    # トレンドの一貫性情報を追加
+                    r['trend_consistency'] = consistency_data
+                    
+            if is_consistent and best_signal_index != -1:
+                # 3つ全てで一致した場合、最高スコアのシグナルにボーナスを追加
+                all_results[best_signal_index]['score'] = min(1.0, all_results[best_signal_index]['score'] + TREND_CONSISTENCY_BONUS)
             
 
-    return all_results
+    return all_results, is_market_missing # 致命的エラーフラグを返す
 
 # ====================================================================================
 # MAIN EXECUTION LOOP
@@ -1120,7 +1143,7 @@ async def main_loop():
     while True:
         try:
             current_time_j = datetime.now(JST)
-            logging.info(f"🔄 Apex BOT v17.0.6 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}")
+            logging.info(f"🔄 Apex BOT v17.0.7 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
 
             # 1. シンボルリストの更新 (省略: 固定リストを使用)
             # CURRENT_MONITOR_SYMBOLS = await fetch_all_available_symbols(TOP_SYMBOL_LIMIT)
@@ -1131,18 +1154,38 @@ async def main_loop():
 
             # 3. テクニカル分析の実行 (レート制限回避のため、逐次実行に変更)
             all_analysis_results = []
+            symbols_to_remove = set() # NEW: 削除対象シンボルのセット
             
             # --- 修正: Rate Limit回避のため、シンボル分析を逐次実行に変更 ---
             for symbol in CURRENT_MONITOR_SYMBOLS:
-                results = await run_technical_analysis(symbol)
+                results, is_market_missing = await run_technical_analysis(symbol) # 致命的エラーフラグを受け取る
+                
+                if is_market_missing: # NEW: 市場シンボル欠損の場合
+                    symbols_to_remove.add(symbol)
+                    
                 all_analysis_results.extend(results)
+                
                 # シンボル間の遅延を挿入 (0.5s * 2 = 1.0秒間隔)
                 await asyncio.sleep(REQUEST_DELAY_PER_SYMBOL * 2.0) 
             # -------------------------------------------------------------
                 
             LAST_ANALYSIS_SIGNALS = all_analysis_results
             
-            # 4. シグナルのフィルタリングと統合
+            # 4. 監視対象シンボルの更新 (NEW: 致命的エラーが発生したシンボルを除外)
+            if symbols_to_remove:
+                CURRENT_MONITOR_SYMBOLS = [
+                    s for s in CURRENT_MONITOR_SYMBOLS 
+                    if s not in symbols_to_remove
+                ]
+                logging.warning(f"以下のシンボルは取引所に存在しないため、監視リストから除外しました: {list(symbols_to_remove)}")
+                # 通知クールダウン中のシンボルからも削除
+                TRADE_NOTIFIED_SYMBOLS = {
+                    k: v for k, v in TRADE_NOTIFIED_SYMBOLS.items() 
+                    if k not in symbols_to_remove
+                }
+
+            
+            # 5. シグナルのフィルタリングと統合
             
             # 有効なシグナル (ロング/ショート) を抽出し、スコア降順、RRR降順でソート
             trade_signals = [
@@ -1179,7 +1222,7 @@ async def main_loop():
                 reverse=True
             )
             
-            # 5. 通知ロジック
+            # 6. 通知ロジック
             
             # クールダウン期間の経過チェック
             now = time.time()
@@ -1217,7 +1260,7 @@ async def main_loop():
             LAST_SUCCESS_TIME = now
             LAST_SUCCESSFUL_MONITOR_SYMBOLS = CURRENT_MONITOR_SYMBOLS.copy()
             logging.info("====================================")
-            logging.info(f"✅ Apex BOT v17.0.6 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。")
+            logging.info(f"✅ Apex BOT v17.0.7 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
             logging.info(f"通知クールダウン中のシンボル: {list(TRADE_NOTIFIED_SYMBOLS.keys())}")
             
             await asyncio.sleep(LOOP_INTERVAL)
@@ -1240,11 +1283,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.6 - Debug & Rate Limit Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.7 - Dynamic Symbol Removal") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.6 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.7 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1258,7 +1301,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.6 - Debug & Rate Limit Fix", # バージョン更新
+        "bot_version": "v17.0.7 - Dynamic Symbol Removal", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1269,16 +1312,12 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.6)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.7)"}) # バージョン更新
 
 # ====================================================================================
 # EXECUTION (If run directly)
 # ====================================================================================
 
 if __name__ == "__main__":
-    # uvicorn.run(app, host="0.0.0.0", port=10000) # Fast API を通さない場合 
-    # v17.0.6 では Render デプロイ用の main_render.py を想定し、FastAPI 経由で実行します。
-    # Render の標準設定では、main_render.py がエントリポイントとなるため、直接 Uvicorn を実行
-    # main_render.py をエントリポイントとした場合:
     # uvicorn.run("main_render:app", host="0.0.0.0", port=10000)
     pass
