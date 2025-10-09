@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.4 - Fix Fatal KeyError in analyze_single_timeframe
-# - FIX: analyze_single_timeframe 関数内で Pandas Series (last_row/prev_row) のキーアクセスを
-#        ['key'] から .get('key', np.nan) に変更し、テクニカル指標の計算失敗による KeyError を解消。
-# - FIX: format_integrated_analysis_message 関数内で 'regime' のアクセス方法を修正。
+# Apex BOT v17.0.5 - Fix Fatal AttributeError in Main Loop (Client Stability Fix)
+# - FIX: initialize_ccxt_client 関数内で、クライアントの再初期化時に既存のクライアントを安全に閉じるロジックを追加。
+# - FIX: main_loop の Exception ハンドラに、AttributeError発生時にクライアントを再初期化し、ループを回復するロジックを追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -297,7 +296,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     )
 
     # NEW: SL/TP 到達時のP&Lブロック (1000 USD ポジション)
-    # --- 修正箇所: ここに閉じ括弧を追加 ---
     pnl_block = (
         f"\n**📈 損益結果 ({POSITION_CAPITAL:,.0f} USD ポジションの場合)**\n"
         f"----------------------------------\n"
@@ -306,7 +304,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| ❌ SL実行時 | **{format_pnl_utility_telegram(-sl_risk_usd_abs)}** | {sl_risk_percent:.2f}% |\n" 
         f"| 🟢 TP目標時 | **{format_pnl_utility_telegram(tp_gain_usd_abs)}** | {tp_gain_percent:.2f}% |\n"
         f"----------------------------------\n"
-    ) # <--- この閉じ括弧が不足していました。
+    ) 
     
     # NEW: Pivot S/R 到達時のP&Lブロック (1000 USD ポジション)
     pivot_points = best_signal.get('tech_data', {}).get('pivot_points', {})
@@ -449,13 +447,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
                 # NEW: Dominance Biasボーナス/ペナルティのハイライト
                 dominance_trend = tech_data.get('dominance_trend', 'Neutral')
-                dominance_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
+                dominance_bias_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
                 
                 dominance_status = ""
                 if dominance_bonus > 0:
-                    dominance_status = f"✅ **優位性あり** (<ins>**+{dominance_bonus * 100:.2f}点**</ins>)"
+                    dominance_status = f"✅ **優位性あり** (<ins>**+{dominance_bias_bonus * 100:.2f}点**</ins>)"
                 elif dominance_bonus < 0:
-                    dominance_status = f"⚠️ **バイアスにより減点適用** (<ins>**-{abs(dominance_bonus) * 100:.2f}点**</ins>)"
+                    dominance_status = f"⚠️ **バイアスにより減点適用** (<ins>**-{abs(dominance_bias_bonus) * 100:.2f}点**</ins>)"
                 else:
                     dominance_status = "❌ フィルター範囲外/非該当"
                 
@@ -473,7 +471,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.4** - KeyError Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v17.0.5** - Stability Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -486,8 +484,18 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # ====================================================================================
 
 async def initialize_ccxt_client():
-    """CCXTクライアントを初期化 (OKX)"""
+    """CCXTクライアントを初期化 (OKX) - Stability Fix適用"""
     global EXCHANGE_CLIENT
+    
+    # NEW: 既存のクライアントがあれば、安全のために閉じる
+    if EXCHANGE_CLIENT:
+        try:
+            # CCXTクライアントの非同期セッションを閉じる
+            await EXCHANGE_CLIENT.close() 
+        except Exception:
+            # 既に閉じているか、閉じられない場合も無視し、処理を続行
+            pass 
+
     EXCHANGE_CLIENT = ccxt_async.okx({
         'timeout': 30000,
         'enableRateLimit': True,
@@ -1208,7 +1216,7 @@ async def process_signals(all_signals: List[Dict]) -> List[Dict]:
 
 async def main_loop():
     """
-    メインの監視ループ
+    メインの監視ループ - Stability Fix適用
     """
     global LAST_UPDATE_TIME, LAST_SUCCESS_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT
     
@@ -1220,7 +1228,7 @@ async def main_loop():
 
     while True:
         try:
-            logging.info(f"\n--- 🚀 Apex BOT v17.0.4 - 監視ループ開始 (時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST) ---")
+            logging.info(f"\n--- 🚀 Apex BOT v17.0.5 - 監視ループ開始 (時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST) ---") # バージョン更新
             
             # 1. 銘柄リストの動的更新 (低頻度)
             if time.time() - LAST_UPDATE_TIME > 60 * 60 * 4: # 4時間に1回
@@ -1260,6 +1268,13 @@ async def main_loop():
         except Exception as e:
             error_name = type(e).__name__
             logging.error(f"メインループで致命的なエラー: {error_name}")
+            
+            # --- FIX: Attribute Error または接続関連の致命的なエラーが発生した場合、クライアントを再初期化して回復を試みる ---
+            if error_name in ['AttributeError', 'ConnectionError', 'TimeoutError']:
+                logging.warning("⚠️ クライアントの不安定性を検知しました。再初期化を試行します...")
+                await initialize_ccxt_client() 
+            # --------------------------------------------------------------------------------------------------------
+
             await asyncio.sleep(60)
 
 
@@ -1267,25 +1282,30 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.4 - KeyError Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.5 - Stability Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.4 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.5 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global EXCHANGE_CLIENT
     if EXCHANGE_CLIENT:
-        await EXCHANGE_CLIENT.close()
-        logging.info("CCXTクライアントをシャットダウンしました。")
+        # シャットダウン時にも安全にセッションを閉じる
+        try:
+            await EXCHANGE_CLIENT.close()
+            logging.info("CCXTクライアントをシャットダウンしました。")
+        except Exception:
+            logging.warning("CCXTクライアントのシャットダウン中にエラーが発生しました。")
+
 
 @app.get("/status")
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.4 - KeyError Fix", # バージョン更新
+        "bot_version": "v17.0.5 - Stability Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1296,7 +1316,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.4)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.5)"})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得し、uvicornを起動
