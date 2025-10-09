@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v21.0.6 - Elliott/TSI/Ichimoku/OrderBook/FixedRRR Strategy (SyntaxError修正)
-# - 修正: Python 3.13環境での 'name is used prior to global declaration' エラーを解消するため、
-#         global宣言を関数の絶対的な一行目に移動しました。
+# Apex BOT v21.0.6 - Elliott/TSI/Ichimoku/OrderBook/FixedRRR Strategy (マーケットロードFIX)
+# - 修正1: OKXシンボルエラー (okx does not have market symbol) に対処するため、
+#          main_loopの開始時にマーケットリストを非同期でロードする処理を追加。
+# - 修正2: yfinance (BTCマクロ) のインデックスエラーに対処するため、データ処理を堅牢化。
 # - 機能: 固定30銘柄 + OKXの出来高上位30銘柄を動的に監視。
 # ====================================================================================
 
@@ -36,7 +37,7 @@ load_dotenv()
 JST = timezone(timedelta(hours=9))
 
 # BOTバージョン情報
-BOT_VERSION = "v21.0.6 - Dynamic Top 30 Volume (Fixed Syntax)"
+BOT_VERSION = "v21.0.6 - Dynamic Top 30 Volume (Market Load Fixed)"
 
 # 取引所設定 (OKXに固定)
 CCXT_CLIENT_NAME = "okx" 
@@ -88,7 +89,7 @@ BTC_DOMINANCE_CONTEXT = {'trend': 'Neutral', 'value': 0.0}
 # ====================================================================================
 
 def initialize_ccxt_client(client_name: str) -> Optional[ccxt_async.Exchange]:
-    """CCXTクライアントを初期化する (OKX固定)"""
+    """CCXTクライアントを初期化する (OKX固定) - マーケットロードはmain_loopで行う"""
     try:
         client_class = getattr(ccxt_async, 'okx')
         client = client_class({
@@ -96,7 +97,7 @@ def initialize_ccxt_client(client_name: str) -> Optional[ccxt_async.Exchange]:
             'secret': SECRET,
             'password': PASSWORD,
             'enableRateLimit': True,
-            'options': {'defaultType': 'future'}
+            'options': {'defaultType': 'future'} # OKXでは'future'がSWAP/Futuresに対応
         })
         logging.info(f"{client_name.upper()} クライアントを初期化しました。")
         return client
@@ -106,14 +107,16 @@ def initialize_ccxt_client(client_name: str) -> Optional[ccxt_async.Exchange]:
 
 async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: str) -> Tuple[Optional[pd.DataFrame], str, str]:
     """OHLCVデータを取得し、DataFrameに変換する。"""
-    global EXCHANGE_CLIENT # シンタックスエラー修正: 実行文の一行目に配置
+    global EXCHANGE_CLIENT
     
     if not EXCHANGE_CLIENT:
+        # このパスはmain_loopが起動している限り基本的に通らない
         EXCHANGE_CLIENT = initialize_ccxt_client(client_name)
         if not EXCHANGE_CLIENT:
             return None, "ExchangeError", client_name
 
     try:
+        # await client.load_markets() が main_loopで実行されている前提
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=300)
         
         if not ohlcv or len(ohlcv) < 100:
@@ -129,6 +132,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         logging.warning(f"DDoS保護発動: {symbol} {timeframe}. スキップします。")
         return None, "DDoSProtection", client_name
     except ccxt.ExchangeError as e:
+        # マーケットロードの失敗を示すことが多いため、エラーログレベルを維持
         logging.error(f"取引所エラー {symbol} {timeframe}: {e}")
         return None, "ExchangeError", client_name
     except Exception as e:
@@ -137,7 +141,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
 async def fetch_funding_rate(symbol: str) -> float:
     """現在の資金調達率を取得する"""
-    global EXCHANGE_CLIENT # シンタックスエラー修正: 実行文の一行目に配置
+    global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0
     try:
@@ -149,11 +153,12 @@ async def fetch_funding_rate(symbol: str) -> float:
 
 async def fetch_order_book_bias(symbol: str) -> Tuple[float, str]:
     """OKXから板情報を取得し、Bid/Askの厚さの偏りを計算する"""
-    global EXCHANGE_CLIENT # シンタックスエラー修正: 実行文の一行目に配置
+    global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0, "Neutral"
     
     try:
+        # OKXの無期限スワップを指定
         orderbook = await EXCHANGE_CLIENT.fetch_order_book(symbol, limit=20, params={'instType': 'SWAP'})
         limit = 5 
         
@@ -181,21 +186,27 @@ async def fetch_order_book_bias(symbol: str) -> Tuple[float, str]:
 
 async def fetch_dynamic_symbols() -> Set[str]:
     """OKXから出来高上位30銘柄のUSDT無期限スワップを取得する"""
-    global EXCHANGE_CLIENT # シンタックスエラー修正: 実行文の一行目に配置
-    if not EXCHANGE_CLIENT:
-        logging.error("CCXTクライアントが未初期化です。")
+    global EXCHANGE_CLIENT
+    if not EXCHANGE_CLIENT or not EXCHANGE_CLIENT.markets: # マーケットがロードされていることを確認
+        logging.error("CCXTクライアントが未初期化またはマーケット未ロードです。")
         return set()
 
     try:
+        # すべてのティッカーを取得
+        # OKXの場合、instType='SWAP'を指定することで無期限スワップのみに絞り込む
         tickers = await EXCHANGE_CLIENT.fetch_tickers(params={'instType': 'SWAP'})
         
+        # フィルタリングとソーティング
         usdt_swap_tickers = {}
         for symbol, ticker in tickers.items():
+            # CCXTの標準シンボル形式で、かつ24h出来高情報があるもの
             volume = ticker.get('quoteVolume', 0)
-            if symbol.endswith('/USDT') and volume > 0:
+            if symbol.endswith('/USDT') and volume > 0 and 'swap' in ticker.get('info', {}).get('instType', '').lower():
                 usdt_swap_tickers[symbol] = volume
 
+        # 出来高降順でソートし、上位30銘柄を取得
         sorted_tickers = sorted(usdt_swap_tickers.items(), key=lambda item: item[1], reverse=True)
+        # 上位30銘柄のシンボルのみをセットとして抽出
         top_symbols = {symbol for symbol, volume in sorted_tickers[:30]}
 
         logging.info(f"出来高上位30銘柄を動的に取得しました。総数: {len(top_symbols)}")
@@ -209,11 +220,22 @@ async def fetch_dynamic_symbols() -> Set[str]:
 async def get_crypto_macro_context() -> Dict:
     """BTCドミナンスの動向を取得する"""
     try:
+        # yfinanceのFutureWarningを無視し、データ取得
         btc_data = yf.download('BTC-USD', period='5d', interval='1h', progress=False)
+        
+        # --- 修正: DataFrameの構造をシンプルにする (MultiIndexエラー対策) ---
+        if btc_data.empty:
+             return {'trend': 'Neutral', 'value': 0.0}
+             
+        # 'Close'列のみを抽出し、コピーを作成（念のため）
+        btc_data = btc_data[['Close']].copy()
+        btc_data.columns = ['Close']
+        # ------------------------------------------------------------------
+
         btc_data = btc_data.tail(100)
         btc_data.ta.ema(length=20, append=True)
         
-        if len(btc_data) < 20:
+        if len(btc_data) < 20 or 'EMA_20' not in btc_data.columns:
             return {'trend': 'Neutral', 'value': 0.0}
             
         ema_now = btc_data['EMA_20'].iloc[-1]
@@ -230,7 +252,8 @@ async def get_crypto_macro_context() -> Dict:
         
         return {'trend': trend, 'value': current_price}
     except Exception as e:
-        logging.error(f"マクロコンテキスト取得エラー: {e}")
+        # インデックスエラー、ネットワークエラーなどに備える
+        logging.error(f"マクロコンテキスト取得エラー: {type(e).__name__} - {e}")
         return {'trend': 'Neutral', 'value': 0.0}
 
 # ====================================================================================
@@ -660,15 +683,23 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 async def main_loop():
     """ボットのメインループ"""
-    # シンタックスエラー修正: 実行文の一行目に配置
     global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, BTC_DOMINANCE_CONTEXT, EXCHANGE_CLIENT, CURRENT_MONITOR_SYMBOLS
     
-    # CCXTクライアントの初期化
+    # 1. CCXTクライアントの初期化 (同期部分)
     if not EXCHANGE_CLIENT:
         EXCHANGE_CLIENT = initialize_ccxt_client(CCXT_CLIENT_NAME)
         if not EXCHANGE_CLIENT:
             logging.error("CCXTクライアントの初期化に失敗しました。ボットを停止します。")
             return
+
+    # 2. マーケットリストの非同期ロード (OKXシンボルエラー対策)
+    # これにより、CCXTが 'BTC/USDT' を 'BTC-USDT-SWAP' に正しくマッピングできるようになる
+    try:
+        await EXCHANGE_CLIENT.load_markets()
+        logging.info(f"{CCXT_CLIENT_NAME.upper()} マーケットを正常にロードしました。")
+    except Exception as e:
+        logging.error(f"致命的: マーケットロードエラー ({CCXT_CLIENT_NAME}): {e}")
+        return # マーケットロード失敗は致命的なので停止
     
     loop_count = 0
 
@@ -677,18 +708,18 @@ async def main_loop():
             loop_count += 1
             logging.info(f"--- 🔄 Apex BOT {BOT_VERSION} 処理開始 (Loop: {loop_count}) ---")
             
-            # 1. 監視銘柄リストの更新 (5分ごと、5ループに1回)
+            # 3. 監視銘柄リストの更新 (5分ごと、5ループに1回)
             if loop_count % 5 == 1: 
                 dynamic_symbols = await fetch_dynamic_symbols()
                 # 固定銘柄と動的銘柄を統合
                 CURRENT_MONITOR_SYMBOLS = FIXED_SYMBOLS.union(dynamic_symbols)
                 logging.info(f"監視銘柄リストを更新しました。固定:{len(FIXED_SYMBOLS)}, 動的:{len(dynamic_symbols)}, 総監視数: {len(CURRENT_MONITOR_SYMBOLS)}")
 
-            # 2. マクロコンテキストの取得
+            # 4. マクロコンテキストの取得
             BTC_DOMINANCE_CONTEXT = await get_crypto_macro_context()
             logging.info(f"マクロコンテキスト (BTCトレンド): {BTC_DOMINANCE_CONTEXT['trend']}")
 
-            # 3. 監視銘柄の分析
+            # 5. 監視銘柄の分析
             all_signals: List[Dict] = []
             tasks = []
             
@@ -704,7 +735,7 @@ async def main_loop():
                 if result_list:
                     all_signals.extend(result_list)
             
-            # 4. シグナルのフィルタリングとランキング (スコア 85点以上)
+            # 6. シグナルのフィルタリングとランキング (スコア 85点以上)
             high_conviction_signals = [
                 s for s in all_signals 
                 if s.get('score', 0.0) >= CONVICTION_SCORE_THRESHOLD
@@ -714,7 +745,7 @@ async def main_loop():
             
             LAST_ANALYSIS_SIGNALS = ranked_signals
             
-            # 5. メッセージ生成
+            # 7. メッセージ生成とロギング
             messages = []
             for rank, signal in enumerate(ranked_signals[:5]): 
                 message = format_integrated_analysis_message(signal['symbol'], [signal], rank + 1)
@@ -738,7 +769,14 @@ async def main_loop():
                 if EXCHANGE_CLIENT:
                     await EXCHANGE_CLIENT.close()
                 EXCHANGE_CLIENT = initialize_ccxt_client(CCXT_CLIENT_NAME)
-            
+                # 再初期化後、マーケットロードを再度試みる
+                try:
+                    if EXCHANGE_CLIENT:
+                        await EXCHANGE_CLIENT.load_markets()
+                        logging.info("CCXTクライアントとマーケットを再ロードしました。")
+                except Exception as load_e:
+                    logging.error(f"再ロードエラー: {load_e}")
+
             logging.error(f"メインループで致命的なエラー: {error_name}")
             await asyncio.sleep(60)
 
@@ -752,12 +790,11 @@ app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 @app.on_event("startup")
 async def startup_event():
     logging.info(f"🚀 Apex BOT {BOT_VERSION} Startup initializing...") 
-    # main_loopを起動
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global EXCHANGE_CLIENT # シンタックスエラー修正: 実行文の一行目に配置
+    global EXCHANGE_CLIENT
     if EXCHANGE_CLIENT:
         await EXCHANGE_CLIENT.close()
         logging.info("CCXTクライアントをシャットダウンしました。")
@@ -781,8 +818,4 @@ def home_view():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000)) 
-    # Uvicornの実行
-    # 注: uvicorn.runの第一引数は 'ファイル名:FastAPIインスタンス名' の文字列か、
-    # 既にインポートされたFastAPIインスタンス itself のいずれかです。
-    # ここではインスタンスを渡す方法を使用しています。
     uvicorn.run(app, host="0.0.0.0", port=port)
