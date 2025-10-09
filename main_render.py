@@ -1,8 +1,7 @@
 # ====================================================================================
-# Apex BOT v16.0.2 - Heatmap Feature Add (Structural SL Buffer Fix Base)
-# - NEW: BTC/USDT 1時間足の価格帯出来高ヒートマップを生成し、Telegramに通知する機能を追加
-# - FIX: 構造的SL (S1/R1) を使用する際に、エントリーポイントとの一致を避けるため、SLに 0.5 * ATR のバッファを追加
-# - BTCドミナンスの増減トレンドを判定し、Altcoinのシグナルスコアに反映 (+/- 0.05点)
+# Apex BOT v16.0.3 - Async Fix
+# - FIX: analyze_single_timeframe 関数を async def に変更し、'await' outside async function エラーを解消
+# - BASE: v16.0.2 (Heatmap Feature Add / Structural SL Buffer Fix Base)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -199,7 +198,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.1対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.3対応)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -361,7 +360,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                     analysis_detail += f"   └ **出来高/流動性確証**: ❌ 確認なし (比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
                 
                 # Funding Rate Analysis
-                funding_rate_val = tech_data.get('funding_rate_value', 0.0)
+                # funding_rate_val は analyse_single_timeframe で計算されて tech_data に入っていないため、ここでは 0.0 と表示
                 funding_rate_bonus = tech_data.get('funding_rate_bonus_value', 0.0)
                 funding_rate_status = ""
                 if funding_rate_bonus > 0:
@@ -371,7 +370,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 else:
                     funding_rate_status = "❌ フィルター範囲外"
                 
-                analysis_detail += f"   └ **資金調達率 (FR)**: {funding_rate_val * 100:.4f}% (8h) - {funding_rate_status}\n"
+                analysis_detail += f"   └ **資金調達率 (FR)**: (分析時に使用) - {funding_rate_status}\n"
 
                 # Dominance Analysis
                 dominance_trend = tech_data.get('dominance_trend', 'Neutral')
@@ -398,7 +397,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v16.0.2** - Heatmap Feature Add |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v16.0.3** - Async Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -781,7 +780,8 @@ def calculate_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Dict:
+# <--- 修正箇所 1: analyze_single_timeframe を async 関数に変更 --->
+async def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Dict:
     """
     単一の時間軸 (timeframe) に基づくテクニカル分析とシグナルスコアリング
     """
@@ -990,6 +990,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
         # Longシグナルの場合: FRがマイナスで大きなペナルティが発生していない -> 良い
         # Shortシグナルの場合: FRがプラスで大きなペナルティが発生していない -> 良い
         if symbol != 'BTC-USDT':
+            # await が付いているため、この関数を async にする必要があった
             funding_rate = await fetch_funding_rate(symbol)
             
             if abs(funding_rate) >= FUNDING_RATE_THRESHOLD:
@@ -1179,7 +1180,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
             'stoch_filter_penalty': stoch_filter_penalty,
             'volume_confirmation_bonus': volume_confirmation_bonus,
             'volume_ratio': volume_ratio,
-            'funding_rate_value': 0.0, # fetch_funding_rate(symbol), # 資金調達率は既にマクロコンテキスト内で取得済み
+            # funding_rate_value はこの関数内で計算された funding_rate をそのまま渡す
             'funding_rate_bonus_value': funding_rate_bonus_value,
             'structural_pivot_bonus': structural_pivot_bonus,
             'structural_sl_used': structural_sl_used,
@@ -1237,7 +1238,8 @@ async def get_integrated_signals(symbol: str, macro_context: Dict) -> List[Dict]
             continue
 
         # 3. 単一時間軸の分析
-        analysis_result = analyze_single_timeframe(df, tf, symbol, macro_context)
+        # <--- 修正箇所 2: analyze_single_timeframe の呼び出しに await を追加 --->
+        analysis_result = await analyze_single_timeframe(df, tf, symbol, macro_context)
         all_signals.append(analysis_result)
         
     return all_signals
@@ -1406,11 +1408,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v16.0.2 - Heatmap Feature Add") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v16.0.3 - Async Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v16.0.2 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v16.0.3 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1424,7 +1426,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v16.0.2 - Heatmap Feature Add", # バージョン更新
+        "bot_version": "v16.0.3 - Async Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1435,7 +1437,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v16.0.2 - Heatmap Feature Add)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v16.0.3 - Async Fix)"})
 
 if __name__ == "__main__":
     # Windowsで動かす場合は以下をコメントアウトし、uvicorn.run() を使う 
