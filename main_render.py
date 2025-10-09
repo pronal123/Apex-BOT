@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.10 - Notify Insufficient Score & Best Candidate
-# - NEW: 取引実行基準スコア (SIGNAL_THRESHOLD) を満たすシグナルがない場合、
-#        その旨と、最もスコアが高かった優良候補銘柄を通知するロジックを追加。
-# - v17.0.9: BTCドミナンス SMA KeyError修正ロジックを維持。
+# Apex BOT v17.0.11 - FIX: BTC Dominance MultiIndex Error
+# - FIX: yfinanceから取得したデータがMultiIndexを返し、その後の処理でエラーとなる問題を解決。
+#        データフレームのインデックスと列を明示的に平坦化するロジックを追加。
+# - v17.0.10: 通知不成立時の通知ロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -514,21 +514,20 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int = 500) -> Tup
         return pd.DataFrame(), False
 
 # ====================================================================================
-# MACRO CONTEXT FETCHING (v17.0.9 FIX APPLIED)
+# MACRO CONTEXT FETCHING (v17.0.11 FIX APPLIED)
 # ====================================================================================
 
 def get_btc_dominance_context(df: pd.DataFrame) -> Tuple[float, str]:
     """
     BTC-USDの価格データから、トレンドバイアスと方向性を決定する。
-    v17.0.9: SMA計算のキーエラーを修正済み。
     """
+    # 既存のロジックを維持 (SMA計算はPandas標準機能を使用)
     if df.empty or len(df) < LONG_TERM_SMA_LENGTH + SMA_LENGTH:
         return 0.0, "DataShortage"
 
     close = df['Close']
     
     # 20期間SMAを計算 (短期トレンド)
-    # v17.0.9 FIX: pd.Series.rolling.mean() を使用して 'sma' キーエラーを回避
     sma_20 = close.rolling(window=SMA_LENGTH).mean()
     
     # 50期間SMAを計算 (長期トレンド)
@@ -569,13 +568,26 @@ async def fetch_global_macro_context() -> Dict:
     # 1. BTC価格トレンド (代理としてBTC-USDの価格トレンドを使用)
     try:
         # YF.download()のauto_adjust引数の警告を抑制
-        yf.download("BTC-USD", period="7d", interval="4h", progress=False, auto_adjust=False)
         dom_df = yf.download("BTC-USD", period="7d", interval="4h", progress=False, auto_adjust=False)
+        
+        # --- v17.0.11 FIX: yfinanceのDataFrameがMultiIndexで返される場合の対策 ---
+        # 1. 列のMultiIndexを平坦化 (通常は複数ティッカー時だが、環境依存で発生するため)
+        if isinstance(dom_df.columns, pd.MultiIndex):
+            dom_df.columns = [col[0] for col in dom_df.columns.values]
+            
+        # 2. 行のMultiIndexを平坦化 (エラーメッセージ "not MultiIndex" の直接的な原因対策)
+        # droplevel(axis=0) は MultiIndexの場合のみ適用可能
+        if isinstance(dom_df.index, pd.MultiIndex):
+            # 最初のレベルのみを残す
+            dom_df = dom_df.droplevel(level=0, axis=0)
+        # ------------------------------------------------------------------------
+
         dom_df.ta.ema(length=20, append=True) # EMAを計算しておく (将来の使用のため)
 
         btc_bias, btc_trend = get_btc_dominance_context(dom_df)
     except Exception as e:
-        logging.error(f"BTCドミナンスデータの取得に失敗: {e}")
+        error_name = type(e).__name__
+        logging.error(f"BTCドミナンスデータの取得に失敗: {error_name} {e}")
         btc_bias, btc_trend = 0.0, "FetchFailed"
 
     # 2. Funding Rate (FR) - 今回はダミー値を使用
@@ -617,9 +629,9 @@ def calculate_pivot_points(df: pd.DataFrame) -> Dict[str, float]:
     prev_row = df.iloc[-2]
 
     # 前日の高値・安値・終値
-    h = prev_row['high']
-    l = prev_row['low']
-    c = prev_row['close']
+    h = prev_row['High'] # yfinanceの列名に合わせる
+    l = prev_row['Low']
+    c = prev_row['Close']
     
     # Pivot Point (PP)
     pp = (h + l + c) / 3
@@ -948,7 +960,7 @@ async def main_loop():
     while True:
         try:
             current_time_j = datetime.now(JST)
-            logging.info(f"🔄 Apex BOT v17.0.10 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
+            logging.info(f"🔄 Apex BOT v17.0.11 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
 
             logging.info(f"監視対象シンボル: {len(CURRENT_MONITOR_SYMBOLS)} 種類を決定しました。")
 
@@ -1064,7 +1076,7 @@ async def main_loop():
             LAST_SUCCESS_TIME = now
             LAST_SUCCESSFUL_MONITOR_SYMBOLS = CURRENT_MONITOR_SYMBOLS.copy()
             logging.info("====================================")
-            logging.info(f"✅ Apex BOT v17.0.10 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
+            logging.info(f"✅ Apex BOT v17.0.11 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
             logging.info(f"通知クールダウン中のシンボル: {list(TRADE_NOTIFIED_SYMBOLS.keys())}")
             
             await asyncio.sleep(LOOP_INTERVAL)
@@ -1086,11 +1098,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.10 - Insufficient Score Notify") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.11 - FIX: BTC Dominance MultiIndex Error") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.10 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.11 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1104,7 +1116,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.10 - Insufficient Score Notify", # バージョン更新
+        "bot_version": "v17.0.11 - FIX: BTC Dominance MultiIndex Error", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1115,7 +1127,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.10)"}) # バージョン更新
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.11)"}) # バージョン更新
 
 # ====================================================================================
 # EXECUTION (If run directly)
