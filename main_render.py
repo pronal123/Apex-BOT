@@ -1,6 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.17 - FIX: VWAP DatetimeIndex KeyError
-# - FIX: VWAP計算時の警告とそれに続くKeyErrorを解消するため、DataFrameにDatetimeIndexを設定。
+# Apex BOT v17.0.18 - FIX: Indicator KeyError SafeGuard
+# - FIX: pandas_ta計算失敗によるKeyErrorを回避するため、calculate_indicators関数で必須カラムの存在を厳格にチェック。
+# - 修正: VWAP計算時の警告とそれに続くKeyErrorを解消するため、DataFrameにDatetimeIndexを設定。
 # - 修正: 損益予測ブロック（SL/TPおよびPivot PNL）をユーザー要望に基づき完全に復元。
 # - 修正: スコアに関わらず、最高スコアの1銘柄を常に通知する (クールダウン無効)。
 # ====================================================================================
@@ -177,7 +178,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.17対応 - PNLブロック復元)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.18対応 - PNLブロック復元)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -431,7 +432,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.17** - FIX_VWAP_KEYERROR |\n" 
+        f"| ⚙️ **BOT Ver** | **v17.0.18** - FIX_KEYERROR_SAFEGUARD |\n" 
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -724,8 +725,19 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     # 出来高の移動平均線
     df['volume_ma'] = df['volume'].rolling(window=20).mean()
 
-    # FIX v17.0.17: VWAPのdropnaチェックを追加
-    return df.dropna(subset=['close', 'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'ATR_14', 'BBL_20_2.0', 'BBU_20_2.0', 'STOCHRSIk_14_14_3_3', 'VWAP'])
+    # --- 修正 v17.0.18: dropeaの前に必要なカラムが存在するか確認し、存在しない場合は空のDataFrameを返す ---
+    required_cols = ['close', 'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'ATR_14', 'BBL_20_2.0', 'BBU_20_2.0', 'STOCHRSIk_14_14_3_3', 'VWAP', 'volume_ma']
+    
+    # 欠損しているカラム名を取得
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        # ログ出力を行い、致命的なエラーを防ぐために空のDataFrameを返す
+        logging.error(f"⚠️ 指標計算失敗 (タイムフレーム: {timeframe}): 以下の必要なカラムがありません: {', '.join(missing_cols)}")
+        return pd.DataFrame() # 空のDataFrameを返して、`analyze_symbol_async`で'DataShortage'として処理させる
+
+    # 欠損値を含む行を削除 (これでKeyErrorは発生しない)
+    return df.dropna(subset=required_cols)
 
 
 def determine_trend_regime(adx: float, pdi: float, mdi: float) -> str:
@@ -1123,7 +1135,8 @@ async def main_loop():
                     TRADE_NOTIFIED_SYMBOLS[symbol] = time.time() 
                     notification_count += 1
                     
-                    if best_signal_overall['score'] < SIGNAL_THRESHOLD:
+                    # ログの出力は古いSIGNAL_THRESHOLDを参照するが、ロジック上は常に通知される
+                    if best_signal_overall['score'] * 100 < 75.0: 
                          logging.info(f"Telegram通知を 1 件送信しました。(TOPシグナル: {symbol.replace('-', '/')} - スコア不成立 {score_100:.2f}点 - クールダウン無視)")
                     else:
                          logging.info(f"Telegram通知を 1 件送信しました。(TOPシグナル: {symbol.replace('-', '/')} - スコア成立 {score_100:.2f}点 - クールダウン無視)")
@@ -1150,11 +1163,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.17 - FIX_VWAP_KEYERROR")
+app = FastAPI(title="Apex BOT API", version="v17.0.18 - FIX_KEYERROR_SAFEGUARD")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.17 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.0.18 Startup initializing...") 
     await initialize_ccxt_client()
     asyncio.create_task(main_loop())
 
@@ -1169,7 +1182,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.17 - FIX_VWAP_KEYERROR",
+        "bot_version": "v17.0.18 - FIX_KEYERROR_SAFEGUARD",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1180,7 +1193,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running on v17.0.17."})
+    return JSONResponse(content={"message": "Apex BOT is running on v17.0.18."})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得。デフォルトは8000
