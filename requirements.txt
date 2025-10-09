@@ -20,3 +20,5 @@ requests
 
 # 株価/金融データ取得 (コードでyfとしてインポートされているため必須)
 yfinance
+
+matplotlib
