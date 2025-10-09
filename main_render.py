@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.7 - Dynamic Symbol Removal
-# - NEW: fetch_ohlcv_data 関数内で「market symbol does not exist」エラーを検知した場合、
-#        そのシンボルを次回以降の監視リスト (CURRENT_MONITOR_SYMBOLS) から自動的に除外するロジックを追加。
-# - FIX: main_loopでasyncio.gatherの使用を停止し、シンボルごとの逐次処理 + 1秒遅延を導入 (OKX Rate Limit回避)
-# - FIX: fetch_global_macro_context内でyfinanceのデータ処理にdropnaと明示的なスカラー比較を導入 (AmbiguousValueError解消)
+# Apex BOT v17.0.8 - YF Dominance Fix
+# - FIX: fetch_global_macro_context 関数内で yfinance が MultiIndex の列名を返す場合に 
+#        発生する「'tuple' object has no attribute 'lower'」エラーを解消。
+# - v17.0.7: 取引所に存在しないシンボルを自動で監視リストから除外するロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -185,7 +184,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.7)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.8)
     """
     global POSITION_CAPITAL
     
@@ -389,9 +388,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"----------------------------------\n"
     )
 
-    # ----------------------------------------------------
     # 3. マクロ要因
-    # ----------------------------------------------------
     macro_summary = (
         f"\n**🌍 マクロコンテキストフィルター**\n"
         f"----------------------------------\n"
@@ -576,18 +573,21 @@ async def fetch_global_macro_context() -> Dict[str, Any]:
     # 2. BTCドミナンス (BTC Dominance - proxy by BTC-USD trend)
     try:
         # yfinance (Yahoo Finance) から BTC-USD の過去7日間、4時間足データを取得
-        # v17.0.6 FIX: FutureWarningとAmbiguousValueError対策として、dropna()と.item()/.all()を使用
         dom_df = yf.download("BTC-USD", period="7d", interval="4h", progress=False)
         
         if dom_df.empty:
              raise ValueError("BTC-USDデータの取得が空でした。")
+        
+        # v17.0.8 FIX: yfinanceがMultiIndexを返す場合に 'tuple' object has no attribute 'lower' エラーになるのを回避
+        if isinstance(dom_df.columns, pd.MultiIndex):
+            dom_df.columns = dom_df.columns.get_level_values(0) 
              
         dom_df.columns = [c.lower() for c in dom_df.columns]
         
         # Simple Moving Average (SMA) を計算
         dom_df['SMA'] = ta.sma(dom_df['close'], length=SMA_LENGTH)
         
-        # 不完全な行を削除 (AmbiguousValueError対策)
+        # 不完全な行を削除
         dom_df = dom_df.dropna(subset=['close', 'SMA'])
 
         # 最新行と1つ前の行を取得
@@ -701,7 +701,7 @@ def calculate_pivot_points(last_row: pd.Series) -> Dict[str, float]:
 
 def calculate_atr_sl_tp(price: float, atr_value: float, pivot_points: Dict[str, float], side_long: bool, timeframe: str) -> Tuple[float, float, float, float, bool]:
     """
-    ATR、Pivot Point、および時間軸別TP乗数に基づき、SL/TP/Entryを計算する (v17.0.6)
+    ATR、Pivot Point、および時間軸別TP乗数に基づき、SL/TP/Entryを計算する (v17.0.8)
     
     戻り値: (entry, sl, tp_dts, rr_ratio, structural_sl_used)
     """
@@ -790,7 +790,7 @@ def calculate_atr_sl_tp(price: float, atr_value: float, pivot_points: Dict[str, 
         return entry_price, sl_final, tp_dts, rr_ratio, structural_sl_used
 
 def score_trend_long(df: pd.DataFrame, last_row: pd.Series, prev_row: pd.Series, timeframe: str) -> float:
-    """ロングシグナルに対するスコアリングロジック (v17.0.6)"""
+    """ロングシグナルに対するスコアリングロジック (v17.0.8)"""
     score = BASE_SCORE # 0.40
     
     # 1. 長期トレンド (SMA)
@@ -853,7 +853,7 @@ def score_trend_long(df: pd.DataFrame, last_row: pd.Series, prev_row: pd.Series,
     return min(1.0, score)
 
 def score_trend_short(df: pd.DataFrame, last_row: pd.Series, prev_row: pd.Series, timeframe: str) -> float:
-    """ショートシグナルに対するスコアリングロジック (v17.0.6)"""
+    """ショートシグナルに対するスコアリングロジック (v17.0.8)"""
     score = BASE_SCORE # 0.40
 
     # 1. 長期トレンド (SMA)
@@ -936,7 +936,7 @@ def calculate_regime(last_row: pd.Series) -> str:
 
 
 def analyze_single_timeframe(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Dict:
-    """単一の時間足データに対して分析とスコアリングを実行する (v17.0.7)"""
+    """単一の時間足データに対して分析とスコアリングを実行する (v17.0.8)"""
     
     result = {
         'symbol': symbol,
@@ -1143,7 +1143,7 @@ async def main_loop():
     while True:
         try:
             current_time_j = datetime.now(JST)
-            logging.info(f"🔄 Apex BOT v17.0.7 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
+            logging.info(f"🔄 Apex BOT v17.0.8 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
 
             # 1. シンボルリストの更新 (省略: 固定リストを使用)
             # CURRENT_MONITOR_SYMBOLS = await fetch_all_available_symbols(TOP_SYMBOL_LIMIT)
@@ -1260,7 +1260,7 @@ async def main_loop():
             LAST_SUCCESS_TIME = now
             LAST_SUCCESSFUL_MONITOR_SYMBOLS = CURRENT_MONITOR_SYMBOLS.copy()
             logging.info("====================================")
-            logging.info(f"✅ Apex BOT v17.0.7 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
+            logging.info(f"✅ Apex BOT v17.0.8 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
             logging.info(f"通知クールダウン中のシンボル: {list(TRADE_NOTIFIED_SYMBOLS.keys())}")
             
             await asyncio.sleep(LOOP_INTERVAL)
@@ -1283,11 +1283,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.7 - Dynamic Symbol Removal") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.8 - YF Dominance Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.7 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.8 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1301,7 +1301,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.7 - Dynamic Symbol Removal", # バージョン更新
+        "bot_version": "v17.0.8 - YF Dominance Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1312,7 +1312,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.7)"}) # バージョン更新
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.8)"}) # バージョン更新
 
 # ====================================================================================
 # EXECUTION (If run directly)
