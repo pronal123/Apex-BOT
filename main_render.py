@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.7 - Fix Fatal AttributeError in calculate_technical_indicators (Pivot Points Check)
-# - FIX: calculate_technical_indicators 関数内で、pandas_ta.pivot_points の呼び出しを 
-#        try-exceptブロックでラップし、AttributeError をキャッチすることで致命的なクラッシュを防止。
-# - UPDATE: Pivot Pointsの計算前に hasattr(ta, 'pivot_points') で存在チェックを追加。
+# Apex BOT v17.0.8 - Fix Fatal AttributeError for 'regime' (and 'pivot_points')
+# - FIX: calculate_technical_indicators 関数内で、pandas_ta.regime の呼び出しを 
+#        try-exceptブロックと hasattr(ta, 'regime') でラップし、致命的なクラッシュを防止。
+# - UPDATE: バージョンが古い環境でも安全に動作するようにフォールバックロジックを強化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -173,7 +173,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.7対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.8対応)
     """
     global POSITION_CAPITAL
     
@@ -550,7 +550,7 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[
 
 def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """
-    Pandas TAを使用してテクニカル指標を計算し、DataFrameに結合する
+    Pandas TAを使用してテクニカル指標を計算し、DataFrameに結合する (v17.0.8 対応)
     """
     if df.empty:
         return df
@@ -616,12 +616,24 @@ def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataF
         # その他の潜在的なエラー (e.g., IndexError, ValueError) もキャッチ
         logging.warning(f"Pivot Points計算中に予期せぬエラーが発生: {e}。Pivot Pointsをスキップします。")
 
-    # --- 6. Regime Filter (Market Regime) ---
-    if len(df) >= 50: # Regime計算に必要な最低限のデータがあることを確認
-        regime_df = ta.regime(df.iloc[-50:], append=False)
-        if not regime_df.empty:
-            df['REGIME'] = np.nan 
-            df.loc[df.index[-1], 'REGIME'] = regime_df.iloc[-1].get('REGIME', np.nan)
+    # --- 6. Regime Filter (Market Regime) (v17.0.8 FIX: AttributeError対応) ---
+    try:
+        if hasattr(ta, 'regime') and len(df) >= 50: # Regime計算に必要な最低限のデータがあることを確認
+            regime_df = ta.regime(df.iloc[-50:], append=False)
+            if not regime_df.empty:
+                df['REGIME'] = np.nan 
+                df.loc[df.index[-1], 'REGIME'] = regime_df.iloc[-1].get('REGIME', np.nan)
+            else:
+                logging.warning(f"Regime Filter計算失敗: ta.regimeが空のデータフレームを返しました。{timeframe}")
+        elif not hasattr(ta, 'regime'):
+             logging.warning("Regime Filter計算スキップ: pandas_taモジュールに 'regime' 属性が存在しません。バージョンを確認してください。")
+        else: # データ不足 (len(df) < 50)
+             logging.debug(f"Regime Filter計算スキップ: データが {len(df)} 行で、最低50行の要件を満たしません。{timeframe}")
+    except AttributeError as e:
+         # v17.0.8 FIX: pandas_taのバージョンが古く、regimeがない場合にクラッシュしないようにする
+         logging.error(f"Regime Filter計算中に致命的なAttributeErrorが発生: {e}。Regimeをスキップします。")
+    except Exception as e:
+         logging.warning(f"Regime Filter計算中に予期せぬエラーが発生: {e}。Regimeをスキップします。")
 
     return df
 
@@ -646,10 +658,7 @@ def get_pivot_points_data(df: pd.DataFrame) -> Dict[str, float]:
     # NaNを0.0に変換して返す (NoneTypeエラー回避のため)
     return {k: v if not np.isnan(v) else 0.0 for k, v in pivot_data.items()}
 
-# ... (calculate_score_long, calculate_score_short, calculate_rr_ratio_and_stops, analyze_single_timeframe, get_macro_context, get_top_volume_symbols, main_loop の各関数は変更なし) ...
-
 def calculate_score_long(last_row: pd.Series, prev_row: pd.Series, timeframe: str) -> float:
-    # ... (変更なし) ...
     score = BASE_SCORE # 0.40点からスタート
     tech_data = {}
 
@@ -785,7 +794,7 @@ def calculate_score_long(last_row: pd.Series, prev_row: pd.Series, timeframe: st
     if not np.isnan(open_val) and not np.isnan(prev_close) and not np.isnan(volume):
         # 陽線 (Close > Open) かつ 出来高が過去の平均出来高の一定倍数以上 (例: 2.5倍)
         # 平均出来高はここでは簡易的に過去14期間のSMAを使用
-        avg_volume_14 = last_row.get('Volume_SMA_14', df['Volume'].iloc[-21:-1].mean() if len(df) >= 21 else np.nan)
+        avg_volume_14 = last_row.get('Volume_SMA_14', pd.Series(df['Volume']).iloc[-21:-1].mean() if len(df) >= 21 else np.nan) # Seriesに変換してilocを使用
         if close > open_val and volume > (avg_volume_14 * VOLUME_CONFIRMATION_MULTIPLIER) and not np.isnan(avg_volume_14):
             volume_confirmation_bonus = 0.07
             score += volume_confirmation_bonus
@@ -834,7 +843,6 @@ def calculate_score_long(last_row: pd.Series, prev_row: pd.Series, timeframe: st
     return score, tech_data
 
 def calculate_score_short(last_row: pd.Series, prev_row: pd.Series, timeframe: str) -> float:
-    # ... (変更なし) ...
     score = BASE_SCORE # 0.40点からスタート
     tech_data = {}
 
@@ -969,7 +977,7 @@ def calculate_score_short(last_row: pd.Series, prev_row: pd.Series, timeframe: s
     volume_confirmation_bonus = 0.0
     if not np.isnan(open_val) and not np.isnan(prev_close) and not np.isnan(volume):
         # 陰線 (Close < Open) かつ 出来高が過去の平均出来高の一定倍数以上 (例: 2.5倍)
-        avg_volume_14 = last_row.get('Volume_SMA_14', df['Volume'].iloc[-21:-1].mean() if len(df) >= 21 else np.nan)
+        avg_volume_14 = last_row.get('Volume_SMA_14', pd.Series(df['Volume']).iloc[-21:-1].mean() if len(df) >= 21 else np.nan) # Seriesに変換してilocを使用
         if close < open_val and volume > (avg_volume_14 * VOLUME_CONFIRMATION_MULTIPLIER) and not np.isnan(avg_volume_14):
             volume_confirmation_bonus = 0.07
             score += volume_confirmation_bonus
@@ -1533,12 +1541,12 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.7 - AttributeError Fix (Pivot Points Check)") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.8 - Regime/Pivot AttributeError Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にメインループタスクを開始"""
-    logging.info("🚀 Apex BOT v17.0.7 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.8 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1554,7 +1562,7 @@ def get_status():
     """ボットのステータスを返すエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.7 - AttributeError Fix (Pivot Points Check)", # バージョン更新
+        "bot_version": "v17.0.8 - Regime/Pivot AttributeError Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1566,4 +1574,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """Renderのヘルスチェック用エンドポイント"""
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.7)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.8)"})
