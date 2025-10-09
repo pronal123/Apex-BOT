@@ -1,5 +1,6 @@
 # ====================================================================================
-# Apex BOT v17.0.16 - ALL_SIGNAL_BEST_1 & NO_COOLDOWN & PNL_BLOCK_RESTORED
+# Apex BOT v17.0.17 - FIX: VWAP DatetimeIndex KeyError
+# - FIX: VWAP計算時の警告とそれに続くKeyErrorを解消するため、DataFrameにDatetimeIndexを設定。
 # - 修正: 損益予測ブロック（SL/TPおよびPivot PNL）をユーザー要望に基づき完全に復元。
 # - 修正: スコアに関わらず、最高スコアの1銘柄を常に通知する (クールダウン無効)。
 # ====================================================================================
@@ -176,7 +177,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.16対応 - PNLブロック復元)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.17対応 - PNLブロック復元)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -285,7 +286,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| :--- | :--- | :--- |\n"
         f"| ❌ SL実行時 | **{format_pnl_utility_telegram(sl_loss_usd)}** | {sl_risk_percent:.2f}% |\n" 
         f"| 🟢 TP目標時 | **{format_pnl_utility_telegram(tp_gain_usd)}** | {tp_gain_percent:.2f}% |\n"
-        f"----------------------------------\n"
+        f"| ----------------------------------\n"
     )
     
     # Pivot PNLの計算とブロック生成
@@ -293,9 +294,9 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     
     pivot_pnl_block = ""
     pivot_r1 = pivot_points.get('R1', 0.0)
-    pivot_r2 = pivot_points.get('R2', 0.0) # calculate_fib_pivotではR2を計算していないが、ここでは0.0を想定
+    pivot_r2 = pivot_points.get('R2', 0.0) 
     pivot_s1 = pivot_points.get('S1', 0.0)
-    pivot_s2 = pivot_points.get('S2', 0.0) # calculate_fib_pivotではS2を計算していないが、ここでは0.0を想定
+    pivot_s2 = pivot_points.get('S2', 0.0)
     
     # R2/S2が計算されていない場合の代替値 (R1/S1からATRを引いた/足した値を利用)
     atr_value = best_signal.get('tech_data', {}).get('atr_value', 0.0)
@@ -406,7 +407,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 analysis_detail += f"   └ **資金調達率 (FR)**: {funding_rate_val * 100:.4f}% (8h) - {funding_rate_status}\n"
 
                 # Dominance Analysis
-                dominance_trend = tech_data.get('dominance_trend', 'Neutral')
+                dominance_trend = tech_data.get('dominance_trend', 'N/A')
                 dominance_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
                 
                 dominance_status = ""
@@ -430,7 +431,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.16** - ALL_SIGNAL_BEST_1 & NO_COOLDOWN & PNL_BLOCK_RESTORED |\n" 
+        f"| ⚙️ **BOT Ver** | **v17.0.17** - FIX_VWAP_KEYERROR |\n" 
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -623,12 +624,12 @@ async def get_crypto_macro_context() -> Dict:
 # Fibonacci Pivot Point Calculation Utility
 def calculate_fib_pivot(df: pd.DataFrame) -> Dict:
     """直近のバーに基づきフィボナッチ・ピボットポイントを計算する (H, L, C, P, R, S)"""
-    if len(df) < 1: return {'P': np.nan, 'R1': np.nan, 'S1': np.nan}
+    if len(df) < 2: return {'P': np.nan, 'R1': np.nan, 'S1': np.nan}
 
-    # 最新の完成足を使用
-    H = df['high'].iloc[-2] if len(df) >= 2 else df['high'].iloc[-1]
-    L = df['low'].iloc[-2] if len(df) >= 2 else df['low'].iloc[-1]
-    C = df['close'].iloc[-2] if len(df) >= 2 else df['close'].iloc[-1]
+    # 最新の完成足を使用 (index -2)
+    H = df['high'].iloc[-2] 
+    L = df['low'].iloc[-2] 
+    C = df['close'].iloc[-2]
     
     P = (H + L + C) / 3 
     
@@ -723,7 +724,8 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     # 出来高の移動平均線
     df['volume_ma'] = df['volume'].rolling(window=20).mean()
 
-    return df.dropna(subset=['close', 'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'ATR_14', 'BBL_20_2.0', 'BBU_20_2.0', 'STOCHRSIk_14_14_3_3'])
+    # FIX v17.0.17: VWAPのdropnaチェックを追加
+    return df.dropna(subset=['close', 'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'ATR_14', 'BBL_20_2.0', 'BBU_20_2.0', 'STOCHRSIk_14_14_3_3', 'VWAP'])
 
 
 def determine_trend_regime(adx: float, pdi: float, mdi: float) -> str:
@@ -1010,11 +1012,18 @@ async def analyze_symbol_async(symbol: str, macro_context: Dict) -> Dict:
     for (ohlcv, status, client), timeframe in zip(results, timeframes):
         if status == "Success":
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # --- FIX v17.0.17: VWAPのエラー/警告解消のためDatatimeIndexを設定 ---
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            # -----------------------------------------------------------------
+            
             df['close'] = pd.to_numeric(df['close'], errors='coerce').astype('float64')
             df['open'] = pd.to_numeric(df['open'], errors='coerce').astype('float64')
             df['high'] = pd.to_numeric(df['high'], errors='coerce').astype('float64')
             df['low'] = pd.to_numeric(df['low'], errors='coerce').astype('float64')
             df['volume'] = pd.to_numeric(df['volume'], errors='coerce').astype('float64')
+            
             df = calculate_indicators(df, timeframe)
             
             # 資金調達率を追加
@@ -1141,11 +1150,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.16 - ALL_SIGNAL_BEST_1 & NO_COOLDOWN & PNL_BLOCK_RESTORED")
+app = FastAPI(title="Apex BOT API", version="v17.0.17 - FIX_VWAP_KEYERROR")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.16 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.0.17 Startup initializing...") 
     await initialize_ccxt_client()
     asyncio.create_task(main_loop())
 
@@ -1160,7 +1169,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.16 - ALL_SIGNAL_BEST_1 & NO_COOLDOWN & PNL_BLOCK_RESTORED",
+        "bot_version": "v17.0.17 - FIX_VWAP_KEYERROR",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1171,7 +1180,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running on v17.0.16."})
+    return JSONResponse(content={"message": "Apex BOT is running on v17.0.17."})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得。デフォルトは8000
