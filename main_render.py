@@ -1,9 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.18 - FIX: Indicator KeyError SafeGuard
-# - FIX: pandas_ta計算失敗によるKeyErrorを回避するため、calculate_indicators関数で必須カラムの存在を厳格にチェック。
-# - 修正: VWAP計算時の警告とそれに続くKeyErrorを解消するため、DataFrameにDatetimeIndexを設定。
-# - 修正: 損益予測ブロック（SL/TPおよびPivot PNL）をユーザー要望に基づき完全に復元。
-# - 修正: スコアに関わらず、最高スコアの1銘柄を常に通知する (クールダウン無効)。
+# Apex BOT v17.0.19 - FIX: Robust Indicator Calculation & Final KeyError
+# - FIX: CCXTデータが不完全な場合にpandas_taがカラム生成をスキップする問題を、不完全なOHLCVデータ行を削除することで解決。
+# - FIX: 最終統合シグナルの生成時に'rr_ratio'などのキー欠損によるKeyErrorが発生しないよう、.get()を使用し堅牢化。
+# - 修正: v17.0.18のKeyError SafeGuardロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -379,7 +378,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
                 regime = best_signal.get('regime', 'N/A')
                 # ADX/Regime
                 analysis_detail += f"   └ **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({regime})\n"
-                # RSI/MACDH/CCI/STOCH
+                # RSI/MACDH/CCI
                 analysis_detail += f"   └ **RSI/MACDH/CCI**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f} / {tech_data.get('cci', 0.0):.2f}\n"
 
                 # Structural/Pivot Analysis
@@ -432,7 +431,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.18** - FIX_KEYERROR_SAFEGUARD |\n" 
+        f"| ⚙️ **BOT Ver** | **v17.0.19** - FIX_ROBUSTNESS |\n" 
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -1036,6 +1035,10 @@ async def analyze_symbol_async(symbol: str, macro_context: Dict) -> Dict:
             df['low'] = pd.to_numeric(df['low'], errors='coerce').astype('float64')
             df['volume'] = pd.to_numeric(df['volume'], errors='coerce').astype('float64')
             
+            # --- FIX v17.0.19: 不完全なOHLCVデータ行を削除し、pandas_taの計算失敗を防ぐ ---
+            df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True)
+            # ---------------------------------------------------------------------------------
+
             df = calculate_indicators(df, timeframe)
             
             # 資金調達率を追加
@@ -1057,8 +1060,8 @@ async def analyze_symbol_async(symbol: str, macro_context: Dict) -> Dict:
     main_side = best_signal['side']
     
     # 4. 統合スコアの計算
-    avg_score = sum(s['score'] for s in valid_signals) / len(valid_signals)
-    integrated_score = (avg_score * 0.4) + (best_signal['score'] * 0.6) # ベストスコアを重視
+    avg_score = sum(s.get('score', 0.0) for s in valid_signals) / len(valid_signals)
+    integrated_score = (avg_score * 0.4) + (best_signal.get('score', 0.0) * 0.6) # ベストスコアを重視
     
     # 5. 最終的な統合シグナルを返す
     return {
@@ -1066,7 +1069,7 @@ async def analyze_symbol_async(symbol: str, macro_context: Dict) -> Dict:
         'score': integrated_score,
         'signals': combined_signals,
         'main_side': main_side,
-        'rr_ratio': best_signal['rr_ratio'] 
+        'rr_ratio': best_signal.get('rr_ratio', 0.0) # <-- FIX v17.0.19: .get()を使用してKeyErrorを回避
     }
 
 
@@ -1163,11 +1166,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.18 - FIX_KEYERROR_SAFEGUARD")
+app = FastAPI(title="Apex BOT API", version="v17.0.19 - FIX_ROBUSTNESS")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.18 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.0.19 Startup initializing...") 
     await initialize_ccxt_client()
     asyncio.create_task(main_loop())
 
@@ -1182,7 +1185,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.18 - FIX_KEYERROR_SAFEGUARD",
+        "bot_version": "v17.0.19 - FIX_ROBUSTNESS",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1193,7 +1196,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running on v17.0.18."})
+    return JSONResponse(content={"message": "Apex BOT is running on v17.0.19."})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得。デフォルトは8000
