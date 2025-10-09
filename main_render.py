@@ -1,7 +1,7 @@
 # ====================================================================================
-# Apex BOT v17.0.6 - Fix Persistent CCXT AttributeError
-# - FIX: initialize_ccxt_client 関数内で、既存クライアントを閉じた後に明示的に EXCHANGE_CLIENT = None を設定し、グローバル参照を確実にクリア。
-# - FIX: main_loop のエラー回復ロジック内で、CCXTクライアント再初期化後に asyncio.sleep(3) を追加し、新しい aiohttp セッションが安定する時間を確保。
+# Apex BOT v16.0.1 - DTS & Dominance Bias Filter (Structural SL Buffer Fix)
+# - FIX: 構造的SL (S1/R1) を使用する際に、エントリーポイントとの一致を避けるため、SLに 0.5 * ATR のバッファを追加
+# - BTCドミナンスの増減トレンドを判定し、Altcoinのシグナルスコアに反映 (+/- 0.05点)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -52,7 +52,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
 SIGNAL_THRESHOLD = 0.75             # 閾値を 0.75 に設定
-TOP_SIGNAL_COUNT = 3        
+TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
@@ -63,7 +63,6 @@ MACD_CROSS_PENALTY = 0.15
 # Dynamic Trailing Stop (DTS) Parameters
 ATR_TRAIL_MULTIPLIER = 3.0          
 DTS_RRR_DISPLAY = 5.0               
-POSITION_CAPITAL = 1000.0           # 1x想定のポジションサイズ (USD) - NEW
 
 # Funding Rate Bias Filter Parameters
 FUNDING_RATE_THRESHOLD = 0.00015    
@@ -119,15 +118,6 @@ def format_price_utility(price: float, symbol: str) -> str:
     if price >= 0.1: return f"{price:,.6f}"
     return f"{price:,.8f}"
 
-def format_pnl_utility_telegram(pnl_usd: float) -> str:
-    """損益額をTelegram表示用に整形し、色付けする"""
-    if pnl_usd > 0.0001:
-        return f"<ins>+${pnl_usd:,.2f}</ins> 🟢"
-    elif pnl_usd < -0.0001:
-        # マイナス記号を付けて、赤色にする
-        return f"<ins>${pnl_usd:,.2f}</ins> 🔴" 
-    return f"+$0.00 🟡"
-
 def send_telegram_html(message: str) -> bool:
     """TelegramにHTML形式でメッセージを送信する"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -153,28 +143,11 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
     adjusted_rate = 0.50 + (score - 0.50) * 1.45 
     return max(0.40, min(0.85, adjusted_rate))
 
-def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, capital: float) -> float:
-    """Pivot価格到達時の損益を計算する (1x想定)"""
-    if target_price <= 0 or entry <= 0: return 0.0
-    
-    # 数量 = 資本 / エントリー価格
-    quantity = capital / entry
-    
-    # 損益 = 数量 * (目標価格 - エントリー価格)
-    pnl = quantity * (target_price - entry)
-    
-    # ショートの場合は符号を反転させる (目標価格がエントリー価格より低いと利益になるため)
-    if not side_long:
-        pnl = -pnl
-        
-    return pnl
-
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.6対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v16.0.1対応)
     """
-    global POSITION_CAPITAL
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
     
@@ -215,31 +188,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     display_symbol = symbol.replace('-', '/')
     
     # リスク幅を計算 (初期のストップ位置との差)
-    sl_width_calculated = abs(entry_price - sl_price)
+    sl_width = abs(entry_price - sl_price)
     
-    # NEW: $1000 ポジションに基づくP&L計算 (1xレバレッジ)
-    is_long = (side == "ロング")
-    if entry_price > 0:
-        # 数量 = 資本 / エントリー価格
-        quantity = POSITION_CAPITAL / entry_price
-        
-        # SL/TPの絶対損益額
-        sl_risk_usd_abs = quantity * sl_width_calculated 
-        tp_gain_usd_abs = quantity * abs(entry_price - tp_price) 
-        
-        # 損益率
-        sl_risk_percent = (sl_risk_usd_abs / POSITION_CAPITAL) * 100
-        tp_gain_percent = (tp_gain_usd_abs / POSITION_CAPITAL) * 100
-        
-    else:
-        sl_risk_usd_abs = 0.0
-        tp_gain_usd_abs = 0.0
-        sl_risk_percent = 0.0
-        tp_gain_percent = 0.0
-
-    sl_loss_usd = sl_risk_usd_abs
-    tp_gain_usd = tp_gain_usd_abs
-
     # ----------------------------------------------------
     # 1. ヘッダーとエントリー情報の可視化
     # ----------------------------------------------------
@@ -267,11 +217,10 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     header = (
         f"--- 🟢 --- **{display_symbol}** --- 🟢 ---\n"
-        f"{rank_header} 🔥 {strength} 発生！ - {direction_emoji}{market_sentiment_str}\n" 
+        f"{rank_header} 📈 {strength} 発生！ - {direction_emoji}{market_sentiment_str}\n" 
         f"==================================\n"
         f"| 🎯 **予測勝率** | **<ins>{win_rate:.1f}%</ins>** | **条件極めて良好** |\n"
         f"| 💯 **分析スコア** | <b>{score_100:.2f} / 100.00 点</b> (ベース: {timeframe}足) |\n" 
-        f"| 💰 **予想損益** | **<ins>損益比 1:{rr_ratio:.2f}</ins>** (損失: ${sl_loss_usd:,.0f} / 利益: ${tp_gain_usd:,.0f}+) |\n"
         f"| ⏰ **決済戦略** | **{exit_type_str}** (目標RRR: 1:{rr_ratio:.2f}+) |\n" 
         f"| ⏳ **TP到達目安** | **{time_to_tp}** | (変動する可能性があります) |\n"
         f"==================================\n"
@@ -279,7 +228,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     sl_source_str = "ATR基準"
     if best_signal.get('tech_data', {}).get('structural_sl_used', False):
-        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" 
+        sl_source_str = "構造的 (Pivot) + **0.5 ATR バッファ**" # FIX反映
         
     # 取引計画の表示をDTSに合わせて変更
     trade_plan = (
@@ -289,73 +238,11 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"| :--- | :--- | :--- |\n"
         f"| 💰 現在価格 | <code>${format_price_utility(price, symbol)}</code> | 参照価格 |\n"
         f"| ➡️ **Entry ({entry_type})** | <code>${format_price_utility(entry_price, symbol)}</code> | {side}ポジション (**<ins>底/天井を狙う Limit 注文</ins>**) |\n" 
-        f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width_calculated, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}) |\n"
+        f"| 📉 **Risk (SL幅)** | ${format_price_utility(sl_width, symbol)} | **初動リスク** (ATR x {ATR_TRAIL_MULTIPLIER:.1f}) |\n"
         f"| 🟢 TP 目標 | <code>${format_price_utility(tp_price, symbol)}</code> | **動的決済** (DTSにより利益最大化) |\n" 
         f"| ❌ SL 位置 | <code>${format_price_utility(sl_price, symbol)}</code> | 損切 ({sl_source_str} / **初期追跡ストップ**) |\n"
         f"----------------------------------\n"
     )
-
-    # NEW: SL/TP 到達時のP&Lブロック (1000 USD ポジション)
-    pnl_block = (
-        f"\n**📈 損益結果 ({POSITION_CAPITAL:,.0f} USD ポジションの場合)**\n"
-        f"----------------------------------\n"
-        f"| 項目 | **損益額 (USD)** | 損益率 (対ポジションサイズ) |\n"
-        f"| :--- | :--- | :--- |\n"
-        f"| ❌ SL実行時 | **{format_pnl_utility_telegram(-sl_loss_usd)}** | {sl_risk_percent:.2f}% |\n" 
-        f"| 🟢 TP目標時 | **{format_pnl_utility_telegram(tp_gain_usd)}** | {tp_gain_percent:.2f}% |\n"
-        f"----------------------------------\n"
-    ) 
-    
-    # NEW: Pivot S/R 到達時のP&Lブロック (1000 USD ポジション)
-    pivot_points = best_signal.get('tech_data', {}).get('pivot_points', {})
-    
-    pivot_pnl_block = ""
-    pivot_r1 = pivot_points.get('r1', 0.0)
-    pivot_r2 = pivot_points.get('r2', 0.0)
-    pivot_s1 = pivot_points.get('s1', 0.0)
-    pivot_s2 = pivot_points.get('s2', 0.0)
-
-    if pivot_r1 > 0 and entry_price > 0 and side in ["ロング", "ショート"]:
-        
-        # Long/Shortに応じてP&Lを計算
-        is_long = (side == "ロング")
-        pnl_r1 = calculate_pnl_at_pivot(pivot_r1, entry_price, is_long, POSITION_CAPITAL)
-        pnl_r2 = calculate_pnl_at_pivot(pivot_r2, entry_price, is_long, POSITION_CAPITAL)
-        pnl_s1 = calculate_pnl_at_pivot(pivot_s1, entry_price, is_long, POSITION_CAPITAL)
-        pnl_s2 = calculate_pnl_at_pivot(pivot_s2, entry_price, is_long, POSITION_CAPITAL)
-        
-        # 損益ブロックの構築
-        pivot_pnl_block = (
-            f"\n**🧮 ${POSITION_CAPITAL:,.0f} ポジションの到達損益 (Pivot S/R) [1x想定]**\n"
-            f"----------------------------------\n"
-            f"| 目標レベル | **価格 (USD)** | 損益 (概算) |\n"
-            f"| :--- | :--- | :--- |\n"
-            f"| 📈 **抵抗線 R1** | <code>${format_price_utility(pivot_r1, symbol)}</code> | {format_pnl_utility_telegram(pnl_r1)} |\n"
-            f"| 🚨 **抵抗線 R2** | <code>${format_price_utility(pivot_r2, symbol)}</code> | {format_pnl_utility_telegram(pnl_r2)} |\n"
-            f"| 📉 **支持線 S1** | <code>${format_price_utility(pivot_s1, symbol)}</code> | {format_pnl_utility_telegram(pnl_s1)} |\n"
-            f"| 🚀 **支持線 S2** | <code>${format_price_utility(pivot_s2, symbol)}</code> | {format_pnl_utility_telegram(pnl_s2)} |\n"
-            f"----------------------------------\n"
-        )
-    
-    # NEW: 構造的S/R候補ブロック (P&Lブロックで全て表示されるため、このブロックは省略される可能性あり)
-    sr_info = ""
-    if pivot_points and not pivot_pnl_block: # P&Lブロックがない場合にのみS/R候補を表示
-        r1 = format_price_utility(pivot_r1, symbol)
-        r2 = format_price_utility(pivot_r2, symbol)
-        s1 = format_price_utility(pivot_s1, symbol)
-        s2 = format_price_utility(pivot_s2, symbol)
-        pp = format_price_utility(pivot_points.get('pp', 0.0), symbol)
-        
-        sr_info = (
-            f"\n**🧱 構造的S/R候補 (日足)**\n"
-            f"----------------------------------\n"
-            f"| 候補 | 価格 (USD) | 種類 |\n"
-            f"| :--- | :--- | :--- |\n"
-            f"| 🛡️ S2 / S1 | <code>${s2}</code> / <code>${s1}</code> | 主要な**支持 (Support)** 候補 |\n"
-            f"| 🟡 PP | <code>${pp}</code> | ピボットポイント |\n"
-            f"| ⚔️ R1 / R2 | <code>${r1}</code> / <code>${r2}</code> | 主要な**抵抗 (Resistance)** 候補 |\n"
-            f"----------------------------------\n"
-        )
     
     # ----------------------------------------------------
     # 2. 統合分析サマリーとスコアリングの詳細
@@ -381,27 +268,18 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         else:
             score_icon = "🔥" if s_score >= 0.75 else ("📈" if s_score >= 0.65 else "🟡" )
             
-            # NEW: 長期トレンド逆行ペナルティのハイライト
-            penalty_status = ""
-            if tech_data.get('long_term_reversal_penalty'):
-                 penalty_status = f" (<ins>**逆張りペナルティ**</ins>: -{tech_data.get('long_term_reversal_penalty_value', 0.0) * 100:.1f}点適用)"
+            penalty_status = f" (逆張りペナルティ: -{tech_data.get('long_term_reversal_penalty_value', 0.0) * 100:.1f}点適用)" if tech_data.get('long_term_reversal_penalty') else ""
             
-            # NEW: MACD反転ペナルティのハイライト
             momentum_valid = tech_data.get('macd_cross_valid', True)
-            momentum_text = "[✅ モメンタム確証: OK]"
-            if not momentum_valid:
-                 momentum_text = f"[❌ **モメンタム反転により減点** : -{tech_data.get('macd_cross_penalty_value', 0.0) * 100:.1f}点]"
+            momentum_text = "[✅ モメンタム確証: OK]" if momentum_valid else f"[⚠️ モメンタム反転により減点: -{tech_data.get('macd_cross_penalty_value', 0.0) * 100:.1f}点]"
 
             vwap_consistent = tech_data.get('vwap_consistent', False)
-            vwap_text = "[🌊 VWAP一致: OK]"
-            if not vwap_consistent:
-                 vwap_text = "[⚠️ VWAP不一致: NG]"
+            vwap_text = "[🌊 VWAP一致: OK]" if vwap_consistent else "[🌊 VWAP不一致: NG]"
 
-            # NEW: StochRSIペナルティのハイライト
             stoch_penalty = tech_data.get('stoch_filter_penalty', 0.0)
             stoch_text = ""
             if stoch_penalty > 0:
-                 stoch_text = f" [⚠️ **STOCHRSI 過熱感により減点** : -{stoch_penalty * 100:.2f}点]"
+                 stoch_text = f" [⚠️ STOCHRSI 過熱感により減点: -{stoch_penalty * 100:.2f}点]"
             elif stoch_penalty == 0 and tf in ['15m', '1h']:
                  stoch_text = f" [✅ STOCHRSI 確証]"
 
@@ -411,50 +289,46 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
             
             # 採用された時間軸の技術指標を詳細に表示
             if tf == timeframe:
-                # FIX: regimeをtech_dataから取得
-                regime = best_signal.get('tech_data', {}).get('regime', 'N/A')
-                
+                regime = best_signal.get('regime', 'N/A')
                 # ADX/Regime
                 analysis_detail += f"   └ **ADX/Regime**: {tech_data.get('adx', 0.0):.2f} ({regime})\n"
                 # RSI/MACDH/CCI/STOCH
                 analysis_detail += f"   └ **RSI/MACDH/CCI**: {tech_data.get('rsi', 0.0):.2f} / {tech_data.get('macd_hist', 0.0):.4f} / {tech_data.get('cci', 0.0):.2f}\n"
 
-                # NEW: 構造的S/Rボーナスのハイライト
+                # Structural/Pivot Analysis
                 pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
-                pivot_status = "❌ 構造確証なし"
-                if pivot_bonus > 0:
-                     pivot_status = f"✅ **構造的S/R確証**"
-                analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} (<ins>**+{pivot_bonus * 100:.2f}点 ボーナス追加**</ins>)\n"
+                pivot_status = "✅ 構造的S/R確証" if pivot_bonus > 0 else "❌ 構造確証なし"
+                analysis_detail += f"   └ **構造分析(Pivot)**: {pivot_status} (+{pivot_bonus * 100:.2f}点)\n"
 
-                # NEW: 出来高確証ボーナスのハイライト
+                # 出来高確証の表示
                 volume_bonus = tech_data.get('volume_confirmation_bonus', 0.0)
                 if volume_bonus > 0:
-                    analysis_detail += f"   └ **出来高/流動性確証**: ✅ <ins>**+{volume_bonus * 100:.2f}点 ボーナス追加**</ins> (平均比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
+                    analysis_detail += f"   └ **出来高/流動性確証**: ✅ +{volume_bonus * 100:.2f}点 ボーナス追加 (平均比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
                 else:
                     analysis_detail += f"   └ **出来高/流動性確証**: ❌ 確認なし (比率: {tech_data.get('volume_ratio', 0.0):.1f}x)\n"
-           
-                # NEW: Funding Rateボーナス/ペナルティのハイライト
+                
+                # Funding Rate Analysis
                 funding_rate_val = tech_data.get('funding_rate_value', 0.0)
                 funding_rate_bonus = tech_data.get('funding_rate_bonus_value', 0.0)
                 funding_rate_status = ""
                 if funding_rate_bonus > 0:
-                    funding_rate_status = f"✅ **優位性あり** (<ins>**+{funding_rate_bonus * 100:.2f}点**</ins>)"
+                    funding_rate_status = f"✅ 優位性あり (+{funding_rate_bonus * 100:.2f}点)"
                 elif funding_rate_bonus < 0:
-                    funding_rate_status = f"⚠️ **過密ペナルティ適用** (<ins>**-{abs(funding_rate_bonus) * 100:.2f}点**</ins>)"
+                    funding_rate_status = f"⚠️ 過密ペナルティ適用 (-{abs(funding_rate_bonus) * 100:.2f}点)"
                 else:
                     funding_rate_status = "❌ フィルター範囲外"
                 
                 analysis_detail += f"   └ **資金調達率 (FR)**: {funding_rate_val * 100:.4f}% (8h) - {funding_rate_status}\n"
 
-                # NEW: Dominance Biasボーナス/ペナルティのハイライト
+                # Dominance Analysis
                 dominance_trend = tech_data.get('dominance_trend', 'Neutral')
-                dominance_bias_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
+                dominance_bonus = tech_data.get('dominance_bias_bonus_value', 0.0)
                 
                 dominance_status = ""
-                if dominance_bias_bonus > 0:
-                    dominance_status = f"✅ **優位性あり** (<ins>**+{dominance_bias_bonus * 100:.2f}点**</ins>)"
-                elif dominance_bias_bonus < 0:
-                    dominance_status = f"⚠️ **バイアスにより減点適用** (<ins>**-{abs(dominance_bias_bonus) * 100:.2f}点**</ins>)"
+                if dominance_bonus > 0:
+                    dominance_status = f"✅ 優位性あり (+{dominance_bonus * 100:.2f}点)"
+                elif dominance_bonus < 0:
+                    dominance_status = f"⚠️ バイアスにより減点適用 (-{abs(dominance_bonus) * 100:.2f}点)"
                 else:
                     dominance_status = "❌ フィルター範囲外/非該当"
                 
@@ -466,18 +340,17 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 
     # 3. リスク管理とフッター
-    # FIX: regimeをtech_dataから取得
-    regime = best_signal.get('tech_data', {}).get('regime', 'N/A')
+    regime = best_signal.get('regime', 'N/A')
     
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.6** - CCXT Stability Fix |\n" # バージョン更新
+        f"| ⚙️ **BOT Ver** | **v16.0.1** - Structural SL Buffer Fix |\n" # バージョン更新
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
 
-    return header + trade_plan + pnl_block + pivot_pnl_block + sr_info + analysis_detail + footer
+    return header + trade_plan + analysis_detail + footer
 
 
 # ====================================================================================
@@ -485,30 +358,20 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 # ====================================================================================
 
 async def initialize_ccxt_client():
-    """CCXTクライアントを初期化 (OKX) - Stability Fix (v17.0.6)適用"""
+    """CCXTクライアントを初期化 (OKX)"""
     global EXCHANGE_CLIENT
     
-    # NEW FIX 1: 既存のクライアントがあれば、安全に閉じ、明示的にNoneに設定する
-    if EXCHANGE_CLIENT:
-        try:
-            # CCXTクライアントの非同期セッションを閉じる
-            await EXCHANGE_CLIENT.close() 
-        except Exception:
-            # 既に閉じているか、閉じられない場合も無視
-            pass 
-        finally:
-            # 明示的にNoneに設定し、参照をクリアする (AttributeErrorの再発防止)
-            EXCHANGE_CLIENT = None 
-
     EXCHANGE_CLIENT = ccxt_async.okx({
-        'timeout': 30000,
+        'timeout': 30000, 
         'enableRateLimit': True,
-        'options': {'defaultType': 'swap'}
+        'options': {'defaultType': 'swap'} 
     })
+    
     if EXCHANGE_CLIENT:
         logging.info(f"CCXTクライアントを初期化しました ({CCXT_CLIENT_NAME} - リアル接続, Default: Swap)")
     else:
         logging.error("CCXTクライアントの初期化に失敗しました。")
+
 
 def convert_symbol_to_okx_swap(symbol: str) -> str:
     """USDT現物シンボル (BTC/USDT) をOKXの無期限スワップシンボル (BTC-USDT) に変換する"""
@@ -517,8 +380,8 @@ def convert_symbol_to_okx_swap(symbol: str) -> str:
 async def fetch_funding_rate(symbol: str) -> float:
     """OKXからシンボルの直近の資金調達率を取得する"""
     global EXCHANGE_CLIENT
-    if not EXCHANGE_CLIENT: return 0.0
-    
+    if not EXCHANGE_CLIENT:
+        return 0.0
     try:
         funding_rate = await EXCHANGE_CLIENT.fetch_funding_rate(symbol)
         return funding_rate.get('fundingRate', 0.0) if funding_rate else 0.0
@@ -528,39 +391,43 @@ async def fetch_funding_rate(symbol: str) -> float:
 async def update_symbols_by_volume():
     """CCXTを使用してOKXの出来高トップ30のUSDTペア銘柄を動的に取得・更新する"""
     global CURRENT_MONITOR_SYMBOLS, EXCHANGE_CLIENT, LAST_SUCCESSFUL_MONITOR_SYMBOLS
-    if not EXCHANGE_CLIENT: return
+    
+    if not EXCHANGE_CLIENT:
+        return
 
     try:
         tickers_spot = await EXCHANGE_CLIENT.fetch_tickers(params={'instType': 'SPOT'})
+        
         usdt_tickers = {
-            symbol: ticker for symbol, ticker in tickers_spot.items()
+            symbol: ticker for symbol, ticker in tickers_spot.items() 
             if symbol.endswith('/USDT') and ticker.get('quoteVolume') is not None
         }
 
         sorted_tickers = sorted(
-            usdt_tickers.items(),
-            key=lambda item: item[1]['quoteVolume'],
+            usdt_tickers.items(), 
+            key=lambda item: item[1]['quoteVolume'], 
             reverse=True
         )
-
+        
         new_monitor_symbols = [convert_symbol_to_okx_swap(symbol) for symbol, _ in sorted_tickers[:TOP_SYMBOL_LIMIT]]
-
+        
         if new_monitor_symbols:
             CURRENT_MONITOR_SYMBOLS = new_monitor_symbols
             LAST_SUCCESSFUL_MONITOR_SYMBOLS = new_monitor_symbols.copy()
         else:
             CURRENT_MONITOR_SYMBOLS = LAST_SUCCESSFUL_MONITOR_SYMBOLS
             logging.warning("⚠️ 出来高データを取得できませんでした。前回成功したリストを使用します。")
-            
+
     except Exception as e:
         logging.error(f"出来高による銘柄更新中にエラーが発生しました: {e}")
         CURRENT_MONITOR_SYMBOLS = LAST_SUCCESSFUL_MONITOR_SYMBOLS
         logging.warning("⚠️ 出来高データ取得エラー。前回成功したリストにフォールバックします。")
 
-
+        
 async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: str) -> Tuple[List[List[float]], str, str]:
     """CCXTを使用してOHLCVデータを取得し、エラー発生時にフォールバックする"""
     global EXCHANGE_CLIENT
+
     if not EXCHANGE_CLIENT:
         return [], "ExchangeError", client_name
 
@@ -568,713 +435,763 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit, params={'instType': 'SWAP'})
         
-        if not ohlcv or len(ohlcv) < 30:
+        if not ohlcv or len(ohlcv) < 30: 
             return [], "DataShortage", client_name
-        
+            
         return ohlcv, "Success", client_name
 
     except ccxt.NetworkError as e:
         return [], "ExchangeError", client_name
     except ccxt.ExchangeError as e:
-        # スワップ市場で見つからなかった場合、現物市場を試す
         if 'market symbol' in str(e) or 'not found' in str(e):
-            spot_symbol = symbol.replace('-', '/')
-            try:
-                ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(spot_symbol, timeframe, limit=limit, params={'instType': 'SPOT'})
-                if not ohlcv or len(ohlcv) < 30:
-                    return [], "DataShortage", client_name
-                return ohlcv, "Success", client_name
-            except Exception:
-                return [], "ExchangeError", client_name
+             spot_symbol = symbol.replace('-', '/')
+             try:
+                 ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(spot_symbol, timeframe, limit=limit, params={'instType': 'SPOT'})
+                 if not ohlcv or len(ohlcv) < 30: 
+                     return [], "DataShortage", client_name
+                 return ohlcv, "Success", client_name
+             except Exception:
+                 return [], "ExchangeError", client_name
+        
         return [], "ExchangeError", client_name
+        
     except Exception as e:
         return [], "ExchangeError", client_name
 
-async def fetch_ohlcv_for_macro(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
-    """マクロコンテキスト (BTCドミナンスなど) 用のOHLCVデータを取得する"""
+
+async def get_crypto_macro_context() -> Dict:
+    """
+    マクロ市場コンテキストを取得 (FGI Proxy, BTC/ETH Trend, Dominance Bias)
+    """
     
-    if symbol == 'BTC-DOMINANCE':
-        # TradingViewのティッカーに依存するため、CCXTではなく直接データプロバイダを使用することが多い
-        # 現状は外部依存性を減らすため、一旦データ取得ロジックは省略
-        return None 
+    # 1. BTC/USDTとETH/USDTの長期トレンドと直近の価格変化率を取得 (4h足)
+    btc_ohlcv, status_btc, _ = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, "BTC-USDT", '4h')
+    eth_ohlcv, status_eth, _ = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, "ETH-USDT", '4h')
     
-    # 通常の取引所クライアントで取得
-    ohlcv, status, _ = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, symbol, timeframe)
+    btc_trend = 0
+    eth_trend = 0
+    btc_change = 0.0
+    eth_change = 0.0
+    
+    df_btc = pd.DataFrame()
+    df_eth = pd.DataFrame()
+
+    if status_btc == "Success":
+        df_btc = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_btc['close'] = pd.to_numeric(df_btc['close'], errors='coerce').astype('float64')
+        df_btc['sma'] = ta.sma(df_btc['close'], length=LONG_TERM_SMA_LENGTH)
+        df_btc.dropna(subset=['sma'], inplace=True)
+        if not df_btc.empty:
+            if df_btc['close'].iloc[-1] > df_btc['sma'].iloc[-1]: btc_trend = 1 # Long
+            elif df_btc['close'].iloc[-1] < df_btc['sma'].iloc[-1]: btc_trend = -1 # Short
+            if len(df_btc) >= 2:
+                btc_change = (df_btc['close'].iloc[-1] - df_btc['close'].iloc[-2]) / df_btc['close'].iloc[-2]
+    
+    if status_eth == "Success":
+        df_eth = pd.DataFrame(eth_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df_eth['close'] = pd.to_numeric(df_eth['close'], errors='coerce').astype('float64')
+        df_eth['sma'] = ta.sma(df_eth['close'], length=LONG_TERM_SMA_LENGTH)
+        df_eth.dropna(subset=['sma'], inplace=True)
+        if not df_eth.empty:
+            if df_eth['close'].iloc[-1] > df_eth['sma'].iloc[-1]: eth_trend = 1 # Long
+            elif df_eth['close'].iloc[-1] < df_eth['sma'].iloc[-1]: eth_trend = -1 # Short
+            if len(df_eth) >= 2:
+                eth_change = (df_eth['close'].iloc[-1] - df_eth['close'].iloc[-2]) / df_eth['close'].iloc[-2]
+
+    # 2. FGI Proxyの計算 (恐怖指数/市場センチメント)
+    sentiment_score = 0.0
+    if btc_trend == 1 and eth_trend == 1:
+        sentiment_score = 0.07 # 強いリスクオン (ボーナス強化)
+    elif btc_trend == -1 and eth_trend == -1:
+        sentiment_score = -0.07 # 強いリスクオフ (恐怖) (ボーナス強化)
+        
+    # 3. BTC Dominance Proxyの計算
+    dominance_trend = "Neutral"
+    dominance_bias_score = 0.0
+    DOM_DIFF_THRESHOLD = 0.002 # 0.2%以上の差でドミナンスに偏りありと判断
+    
+    if status_btc == "Success" and status_eth == "Success" and len(df_btc) >= 2 and len(df_eth) >= 2:
+        if btc_change - eth_change > DOM_DIFF_THRESHOLD:
+            # BTCの上昇/下落がETHより強い -> ドミナンス増 (BTC強、Alt弱)
+            dominance_trend = "Increasing"
+            dominance_bias_score = -DOMINANCE_BIAS_BONUS_PENALTY # Altcoin Longにペナルティ
+        elif eth_change - btc_change > DOM_DIFF_THRESHOLD:
+            # ETHの上昇/下落がBTCより強い -> ドミナンス減 (Alt強、BTC弱)
+            dominance_trend = "Decreasing"
+            dominance_bias_score = DOMINANCE_BIAS_BONUS_PENALTY # Altcoin Longにボーナス
+    
+    return {
+        "btc_trend_4h": "Long" if btc_trend == 1 else ("Short" if btc_trend == -1 else "Neutral"),
+        "eth_trend_4h": "Long" if eth_trend == 1 else ("Short" if eth_trend == -1 else "Neutral"),
+        "sentiment_fgi_proxy": sentiment_score,
+        "dominance_trend": dominance_trend, 
+        "dominance_bias_score": dominance_bias_score 
+    }
+
+
+# ====================================================================================
+# CORE ANALYSIS LOGIC
+# ====================================================================================
+
+# Fibonacci Pivot Point Calculation Utility (Simplified)
+def calculate_fib_pivot(df: pd.DataFrame) -> Dict:
+    """直近のバーに基づきフィボナッチ・ピボットポイントを計算する (H, L, C, P, R, S)"""
+    if len(df) < 1:
+        return {'P': np.nan, 'R1': np.nan, 'S1': np.nan}
+    
+    H = df['high'].iloc[-2] if len(df) >= 2 else df['high'].iloc[-1]
+    L = df['low'].iloc[-2] if len(df) >= 2 else df['low'].iloc[-1]
+    C = df['close'].iloc[-1]
+    
+    P = (H + L + C) / 3
+    
+    # フィボナッチ係数
+    R1 = P + (H - L) * 0.382
+    S1 = P - (H - L) * 0.382
+    
+    return {'P': P, 'R1': R1, 'S1': S1}
+
+def analyze_structural_proximity(price: float, pivots: Dict, side: str) -> Tuple[float, float, float]:
+    """
+    価格とPivotポイントを比較し、構造的なSL/TPを決定し、ボーナススコアを返す (0.07点)
+    返り値: (ボーナススコア, 構造的SL, 構造的TP)
+    """
+    bonus = 0.0
+    structural_sl = 0.0
+    structural_tp = 0.0
+    BONUS_POINT = 0.07 
+
+    R1 = pivots.get('R1', np.nan)
+    S1 = pivots.get('S1', np.nan)
+
+    if pd.isna(R1) or pd.isna(S1):
+        return 0.0, 0.0, 0.0
+
+    # 構造的なSL/TPの採用
+    if side == "ロング":
+        if price > S1 and (price - S1) / (R1 - S1) < 0.5:
+            # Current price is between S1 and the midpoint (closer to S1). Idea: Target R1, SL S1.
+            bonus = BONUS_POINT 
+            structural_sl = S1
+            structural_tp = R1 * 1.01 
+        elif price > R1:
+            # Price is above R1 (Breakout scenario). Idea: Target R1 extension, SL R1.
+            bonus = BONUS_POINT
+            structural_sl = R1 
+            structural_tp = R1 * 1.05 
+            
+    elif side == "ショート":
+        if price < R1 and (R1 - price) / (R1 - S1) < 0.5:
+            # Current price is between R1 and the midpoint (closer to R1). Idea: Target S1, SL R1.
+            bonus = BONUS_POINT 
+            structural_sl = R1 # R1 is the resistance used as SL
+            structural_tp = S1 * 0.99 
+        elif price < S1:
+            # Price is below S1 (Breakout scenario). Idea: Target S1 extension, SL S1.
+            bonus = BONUS_POINT
+            structural_sl = S1 # S1 is the support used as SL/resistance
+            structural_tp = S1 * 0.95 
+
+    return bonus, structural_sl, structural_tp
+
+async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
+    """
+    単一の時間軸で分析とシグナル生成を行う関数 (v16.0.1 - Structural SL Buffer Fix)
+    """
+    
+    # 1. データ取得とFunding Rate取得
+    ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
+    
+    funding_rate_val = 0.0
+    if timeframe == '1h': 
+        funding_rate_val = await fetch_funding_rate(symbol)
+    
+    
+    tech_data_defaults = {
+        "rsi": 50.0, "macd_hist": 0.0, "adx": 25.0, "bb_width_pct": 0.0, "atr_value": 0.005,
+        "long_term_trend": long_term_trend, "long_term_reversal_penalty": False, "macd_cross_valid": False,
+        "cci": 0.0, "vwap_consistent": False, "ppo_hist": 0.0, "dc_high": 0.0, "dc_low": 0.0,
+        "stoch_k": 50.0, "stoch_d": 50.0, "stoch_filter_penalty": 0.0,
+        "volume_confirmation_bonus": 0.0, "current_volume": 0.0, "average_volume": 0.0,
+        "sentiment_fgi_proxy_bonus": 0.0, "structural_pivot_bonus": 0.0, 
+        "volume_ratio": 0.0, "structural_sl_used": False,
+        "long_term_reversal_penalty_value": 0.0, 
+        "macd_cross_penalty_value": 0.0,
+        "funding_rate_value": funding_rate_val, 
+        "funding_rate_bonus_value": 0.0, 
+        "dynamic_exit_strategy": "DTS",
+        "dominance_trend": "Neutral",
+        "dominance_bias_bonus_value": 0.0
+    }
     
     if status != "Success":
-        return None
+        return {"symbol": symbol, "side": status, "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": 0.0, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize(timezone.utc).dt.tz_convert(JST)
+    
+    # 💡 データ型変換とインデックス設定の厳格化
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').astype('float64')
+
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     df.set_index('timestamp', inplace=True)
     
-    return df
+    price = df['close'].iloc[-1] if not df.empty and not pd.isna(df['close'].iloc[-1]) else 0.0
+    atr_val = price * 0.005 if price > 0 else 0.005 
 
-# ====================================================================================
-# TECHNICAL ANALYSIS ENGINE
-# ====================================================================================
-
-def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """
-    Pandas TAを使用してテクニカル指標を計算し、DataFrameに追加する。
-    """
-    if df.empty:
-        return df
-
-    # 1. 基礎的な指標
-    df.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
-    df.ta.rsi(append=True)
-    df.ta.macd(append=True)
-    df.ta.cci(append=True)
-    df.ta.adx(append=True)
-    df.ta.stoch(append=True)
-    df.ta.vwap(append=True)
+    final_side = "Neutral"
+    base_score = BASE_SCORE # 0.40 からスタート
+    macd_valid = False
+    current_long_term_penalty_applied = False
     
-    # 2. ボラティリティ指標 (BBANDS)
-    df.ta.bbands(append=True)
-    
-    # 3. 構造的なS/R (Pivot Points)
-    df.ta.pivot_fibonacci(append=True) # フィボナッチピボットを使用
+    MACD_HIST_COL = 'MACD_Hist'     
+    PPO_HIST_COL = 'PPOh_12_26_9'   
+    STOCHRSI_K = 'STOCHRSIk_14_14_3_3'
+    STOCHRSI_D = 'STOCHRSId_14_14_3_3'
 
-    return df
-
-def get_last_row_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    DataFrameの最後の行から必要なテクニカル指標を抽出する 
-    """
-    if df.empty:
-        return {}
-
-    # .iloc[-1] で最後の行（Series）を取得
-    last_row = df.iloc[-1]
-    
-    # .get(key, default) を使用して、KeyErrorを回避し、np.nanをデフォルト値とする
-    data = {
-        'close': last_row.get('close', np.nan),
-        'volume': last_row.get('volume', np.nan),
-        'atr_value': last_row.get(f'ATR_{ta.get_defaults("atr").get("length")}', np.nan),
-        'long_sma': last_row.get(f'SMA_{LONG_TERM_SMA_LENGTH}', np.nan),
-        'rsi': last_row.get('RSI_14', np.nan),
-        'stoch_k': last_row.get('STOCHk_14_3_3', np.nan),
-        'stoch_d': last_row.get('STOCHd_14_3_3', np.nan),
-        'macd_hist': last_row.get('MACDh_12_26_9', np.nan),
-        'adx': last_row.get('ADX_14', np.nan),
-        'cci': last_row.get('CCI_14_0.015', np.nan),
-        'bb_width': last_row.get('BBP_20_2.0', np.nan), # BBPはBB%B
-        'bb_high': last_row.get('BBU_20_2.0', np.nan),
-        'bb_low': last_row.get('BBL_20_2.0', np.nan),
-        'vwap': last_row.get('VWAP', np.nan),
+    try:
+        # テクニカル指標の計算
+        df['rsi'] = ta.rsi(df['close'], length=14)
         
-        # Pivot Points
-        'pp': last_row.get('P_F', np.nan),
-        'r1': last_row.get('R1_F', np.nan),
-        'r2': last_row.get('R2_F', np.nan),
-        's1': last_row.get('S1_F', np.nan),
-        's2': last_row.get('S2_F', np.nan),
-    }
-    
-    # np.nanをPythonのNoneに変換しておく
-    return {k: v if not pd.isna(v) else None for k, v in data.items()}
-
-def get_prev_row_data(df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    DataFrameの最後の行から2番目の行から必要なテクニカル指標を抽出する 
-    """
-    if df.shape[0] < 2:
-        return {}
-
-    # .iloc[-2] で最後の行から2番目の行（Series）を取得
-    prev_row = df.iloc[-2]
-    
-    # .get(key, default) を使用して、KeyErrorを回避し、np.nanをデフォルト値とする
-    data = {
-        'close': prev_row.get('close', np.nan),
-        'volume': prev_row.get('volume', np.nan),
-        'macd_hist': prev_row.get('MACDh_12_26_9', np.nan),
-    }
-    
-    # np.nanをPythonのNoneに変換しておく
-    return {k: v if not pd.isna(v) else None for k, v in data.items()}
-
-def analyze_single_timeframe(
-    df: pd.DataFrame, 
-    symbol: str, 
-    timeframe: str, 
-    funding_rate: float, 
-    macro_context: Dict
-) -> Dict[str, Any]:
-    """
-    単一の時間軸でシグナルを分析し、スコアと取引パラメータを計算する 
-    """
-    
-    analysis_result = {
-        'symbol': symbol,
-        'timeframe': timeframe,
-        'side': 'Neutral',
-        'score': 0.50,
-        'rr_ratio': DTS_RRR_DISPLAY,
-        'price': 0.0,
-        'entry': 0.0,
-        'tp1': 0.0,
-        'sl': 0.0,
-        'entry_type': 'Limit',
-        'tech_data': {},
-        'macro_context': macro_context,
-    }
-
-    if df.shape[0] < LONG_TERM_SMA_LENGTH + 1:
-        analysis_result['side'] = 'DataShortage'
-        return analysis_result
-
-    # 1. テクニカル指標の計算
-    df = calculate_technical_indicators(df, timeframe)
-    
-    last_row = get_last_row_data(df)
-    prev_row = get_prev_row_data(df)
-    
-    price = last_row.get('close')
-    atr = last_row.get('atr_value')
-    long_sma = last_row.get('long_sma')
-    rsi = last_row.get('rsi')
-    stoch_k = last_row.get('stoch_k')
-    stoch_d = last_row.get('stoch_d')
-    macd_hist = last_row.get('macd_hist')
-    adx = last_row.get('adx')
-    cci = last_row.get('cci')
-    bb_width = last_row.get('bb_width')
-    vwap = last_row.get('vwap')
-    volume = last_row.get('volume')
-    prev_volume = prev_row.get('volume')
-    
-    # 欠損値チェック (価格とATRが必須)
-    if any(v is None for v in [price, atr, long_sma, rsi, adx, macd_hist, cci]):
-        analysis_result['side'] = 'DataShortage'
-        return analysis_result
-
-    # 2. トレンド/レジームの決定
-    if adx >= ADX_TREND_THRESHOLD:
-        regime = 'Trend'
-    elif bb_width is not None and bb_width < VOLATILITY_BB_PENALTY_THRESHOLD:
-        regime = 'LowVol'
-    else:
-        regime = 'Chop'
-
-    analysis_result['tech_data'].update({
-        'price': price,
-        'atr_value': atr,
-        'long_term_trend': 'Bullish' if price > long_sma else ('Bearish' if price < long_sma else 'Neutral'),
-        'rsi': rsi,
-        'macd_hist': macd_hist,
-        'adx': adx,
-        'cci': cci,
-        'regime': regime,
-        'volume': volume,
-        'bb_width': bb_width,
-        'vwap': vwap,
-        'pivot_points': {
-            'pp': last_row.get('pp'), 'r1': last_row.get('r1'), 'r2': last_row.get('r2'),
-            's1': last_row.get('s1'), 's2': last_row.get('s2'),
-        }
-    })
-
-    score = BASE_SCORE
-    side_long = False
-    
-    # ----------------------------------------------------
-    # 3. コアロジック (RSI + MACD + CCI)
-    # ----------------------------------------------------
-    
-    # Long Base: RSI (40-60) + CCI (< 0) -> MACDh 転換 ( prev < 0 and curr > 0)
-    # 40-60 はモメンタムの強さを避ける（逆張り/押し目狙いの意図）
-    # MACDh の転換は、短期的なモメンタムの反転を意味する
-    
-    # Long Condition
-    is_long_base_rsi = (rsi < RSI_MOMENTUM_LOW) 
-    is_long_cci = (cci < 0)
-    is_long_macd_cross = (prev_row.get('macd_hist', -1.0) < 0) and (macd_hist > 0)
-
-    # Short Condition
-    is_short_base_rsi = (rsi > RSI_MOMENTUM_HIGH)
-    is_short_cci = (cci > 0)
-    is_short_macd_cross = (prev_row.get('macd_hist', 1.0) > 0) and (macd_hist < 0)
-
-    if is_long_base_rsi and is_long_cci and is_long_macd_cross:
-        score += 0.20 # コア確証
-        side_long = True
+        df['EMA_12'] = ta.ema(df['close'], length=12)
+        df['EMA_26'] = ta.ema(df['close'], length=26)
+        df['MACD_Line'] = df['EMA_12'] - df['EMA_26']
+        df['MACD_Signal'] = ta.ema(df['MACD_Line'], length=9)
+        df[MACD_HIST_COL] = df['MACD_Line'] - df['MACD_Signal']
         
-    elif is_short_base_rsi and is_short_cci and is_short_macd_cross:
-        score += 0.20 # コア確証
-        side_long = False
+        df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
+        df.ta.bbands(close='close', length=20, append=True) 
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['cci'] = ta.cci(df['high'], df['low'], df['close'], length=20)
+        df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['volume'])
+        df.ta.ppo(append=True) 
+        df.ta.donchian(length=20, append=True) 
+        df.ta.stochrsi(append=True)
         
-    else:
-        # コア条件が成立しない場合は Neutral
-        analysis_result['side'] = 'Neutral'
-        analysis_result['score'] = 0.50
-        return analysis_result
-
-    # ----------------------------------------------------
-    # 4. フィルタリングとボーナス/ペナルティ
-    # ----------------------------------------------------
-    
-    # 4.1. 長期トレンド逆行ペナルティ (4h足SMA50)
-    long_term_trend_4h = macro_context.get('long_term_trend_4h', 'Neutral')
-    long_term_reversal_penalty_value = 0.0
-
-    if (side_long and long_term_trend_4h == 'Bearish') or \
-       (not side_long and long_term_trend_4h == 'Bullish'):
+        # Pivot Pointの計算 (Structural Analysis)
+        pivots = calculate_fib_pivot(df)
         
-        score -= LONG_TERM_REVERSAL_PENALTY
-        long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY
-        analysis_result['tech_data']['long_term_reversal_penalty'] = True
-        analysis_result['tech_data']['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
-
-    # 4.2. MACDモメンタム不一致ペナルティ
-    # コア条件でMACDクロスを見たが、モメンタムが弱すぎる（MACDhが0付近、かつ直前と符号が逆転していない）場合はペナルティを課す
-    macd_cross_valid = True
-    macd_cross_penalty_value = 0.0
-    
-    if (side_long and macd_hist < 0) or (not side_long and macd_hist > 0):
-        # ポジション方向とMACDhの符号が一致しない場合はモメンタム不一致
-        score -= MACD_CROSS_PENALTY 
-        macd_cross_valid = False
-        macd_cross_penalty_value = MACD_CROSS_PENALTY
+        # データクリーニング (NaN値の削除)
+        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL] 
+        if STOCHRSI_K in df.columns: required_cols.append(STOCHRSI_K)
+        if STOCHRSI_D in df.columns: required_cols.append(STOCHRSI_D)
+        df.dropna(subset=required_cols, inplace=True)
         
-    analysis_result['tech_data']['macd_cross_valid'] = macd_cross_valid
-    analysis_result['tech_data']['macd_cross_penalty_value'] = macd_cross_penalty_value
+        dc_cols_present = 'DCL_20' in df.columns and 'DCU_20' in df.columns
+        
+        if df.empty or len(df) < 2: 
+            return {"symbol": symbol, "side": "DataShortage", "client": client_used, "timeframe": timeframe, "tech_data": tech_data_defaults, "score": 0.5, "price": price, "entry": 0.0, "tp1": 0.0, "sl": 0.0, "rr_ratio": 0.0, "entry_type": "N/A"}
 
-    # 4.3. VWAP乖離ペナルティ/ボーナス
-    vwap_consistent = False
-    if vwap is not None and price > 0:
-        vwap_diff_percent = (price - vwap) / price
-        if side_long and vwap_diff_percent < 0:
-            vwap_consistent = True # ロングの際はVWAPより下にあると良い
-        elif not side_long and vwap_diff_percent > 0:
-            vwap_consistent = True # ショートの際はVWAPより上にあると良い
+        # 2. **動的シグナル判断ロジック (スコアリング)**
+        
+        rsi_val = df['rsi'].iloc[-1]
+        macd_hist_val = df[MACD_HIST_COL].iloc[-1] 
+        macd_hist_val_prev = df[MACD_HIST_COL].iloc[-2] 
+        adx_val = df['adx'].iloc[-1]
+        atr_val = df['atr'].iloc[-1]
+        cci_val = df['cci'].iloc[-1] 
+        vwap_val = df['vwap'].iloc[-1] 
+        ppo_hist_val = df[PPO_HIST_COL].iloc[-1] 
+        stoch_k_val = df[STOCHRSI_K].iloc[-1] if STOCHRSI_K in df.columns else 50.0
+        current_volume = df['volume'].iloc[-1]
+        average_volume = df['volume'].iloc[-31:-1].mean() if len(df) >= 31 else df['volume'].mean()
+        volume_ratio = current_volume / average_volume if average_volume > 0 else 0.0
 
-    analysis_result['tech_data']['vwap_consistent'] = vwap_consistent
-    
-    # 4.4. 出来高確証ボーナス
-    volume_confirmation_bonus = 0.0
-    volume_ratio = 1.0
-    if volume is not None and prev_volume is not None and prev_volume > 0:
-        volume_ratio = volume / prev_volume
-        if volume_ratio >= VOLUME_CONFIRMATION_MULTIPLIER:
-            volume_confirmation_bonus = 0.10
-            score += volume_confirmation_bonus
+        long_score = BASE_SCORE 
+        short_score = BASE_SCORE 
+        
+        dc_low_val = price 
+        dc_high_val = price
+
+        if dc_cols_present:
+            dc_low_val = df['DCL_20'].iloc[-1]     
+            dc_high_val = df['DCU_20'].iloc[-1]
+        
+        # A-H スコアリングロジックの実行... (変更なし)
+
+        # A. MACDに基づく方向性 (0.15)
+        if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
+            long_score += 0.15 
+        elif macd_hist_val < 0 and macd_hist_val < macd_hist_val_prev:
+            short_score += 0.15 
+
+        # B. RSIに基づく買われすぎ/売られすぎ (0.08)
+        if rsi_val < RSI_OVERSOLD:
+            long_score += 0.08
+        elif rsi_val > RSI_OVERBOUGHT:
+            short_score += 0.08
             
-    analysis_result['tech_data']['volume_confirmation_bonus'] = volume_confirmation_bonus
-    analysis_result['tech_data']['volume_ratio'] = volume_ratio
+        # C. RSIに基づくモメンタムブレイクアウト (0.12)
+        if rsi_val > RSI_MOMENTUM_HIGH and df['rsi'].iloc[-2] <= RSI_MOMENTUM_HIGH:
+            long_score += 0.12 
+        elif rsi_val < RSI_MOMENTUM_LOW and df['rsi'].iloc[-2] >= RSI_MOMENTUM_LOW:
+            short_score += 0.12 
 
-    # 4.5. StochRSI 過熱ペナルティ (15m, 1hのみ)
-    stoch_filter_penalty = 0.0
-    if timeframe in ['15m', '1h'] and stoch_k is not None and stoch_d is not None:
-        if side_long and stoch_k > 80: # ロングの際に買われすぎ
-             stoch_filter_penalty = 0.10
-             score -= stoch_filter_penalty
-        elif not side_long and stoch_k < 20: # ショートの際に売られすぎ
-             stoch_filter_penalty = 0.10
-             score -= stoch_filter_penalty
+        # D. ADXに基づくトレンドフォロー強化 (0.10)
+        if adx_val > ADX_TREND_THRESHOLD:
+            if long_score > short_score:
+                long_score += 0.10
+            elif short_score > long_score:
+                short_score += 0.10
+        
+        # E. VWAPの一致チェック (0.04)
+        vwap_consistent = False
+        if price > vwap_val:
+            long_score += 0.04
+            vwap_consistent = True
+        elif price < vwap_val:
+            short_score += 0.04
+            vwap_consistent = True
+        
+        # F. PPOに基づくモメンタム強度の評価 (0.04)
+        ppo_abs_mean = df[PPO_HIST_COL].abs().mean()
+        if ppo_hist_val > 0 and abs(ppo_hist_val) > ppo_abs_mean:
+            long_score += 0.04 
+        elif ppo_hist_val < 0 and abs(ppo_hist_val) > ppo_abs_mean:
+            short_score += 0.04
+
+        # G. Donchian Channelによるブレイクアウト (0.15)
+        is_breaking_high = False
+        is_breaking_low = False
+        if dc_cols_present: 
+            is_breaking_high = price > dc_high_val and df['close'].iloc[-2] <= dc_high_val
+            is_breaking_low = price < dc_low_val and df['close'].iloc[-2] >= dc_low_val
+
+            if is_breaking_high:
+                long_score += 0.15 
+            elif is_breaking_low:
+                short_score += 0.15
+        
+        # H. 複合モメンタム加速ボーナス (0.05)
+        if macd_hist_val > 0 and ppo_hist_val > 0 and rsi_val > 50:
+             long_score += 0.05
+        elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
+             short_score += 0.05
+        
+        # 最終スコア決定 (中間)
+        if long_score > short_score:
+            side = "ロング"
+            base_score = long_score
+        elif short_score > long_score:
+            side = "ショート"
+            base_score = short_score
+        else:
+            side = "Neutral"
+            base_score = BASE_SCORE
+        
+        score = min(1.0, base_score) 
+
+        # I. 資金調達率 (Funding Rate) バイアスフィルター (+/- 0.08点)
+        funding_rate_bonus = 0.0
+        
+        if timeframe == '1h': 
+            if side == "ロング":
+                if funding_rate_val > FUNDING_RATE_THRESHOLD: 
+                    funding_rate_bonus = -FUNDING_RATE_BONUS_PENALTY
+                elif funding_rate_val < -FUNDING_RATE_THRESHOLD: 
+                    funding_rate_bonus = FUNDING_RATE_BONUS_PENALTY
+            elif side == "ショート":
+                if funding_rate_val < -FUNDING_RATE_THRESHOLD: 
+                    funding_rate_bonus = -FUNDING_RATE_BONUS_PENALTY
+                elif funding_rate_val > FUNDING_RATE_THRESHOLD: 
+                    funding_rate_bonus = FUNDING_RATE_BONUS_PENALTY
+
+        score = max(BASE_SCORE, min(1.0, score + funding_rate_bonus))
+
+        # J. BTCドミナンスバイアスフィルター (Altcoinのみ) (+/- 0.05点)
+        dominance_bonus = 0.0
+        dominance_trend = macro_context.get('dominance_trend', 'Neutral')
+        dominance_bias_score_val = macro_context.get('dominance_bias_score', 0.0)
+        
+        # BTCシンボル自体にはドミナンスバイアスは適用しない
+        if symbol != "BTC-USDT" and dominance_trend != "Neutral":
+            
+            if dominance_trend == "Increasing": 
+                if side == "ロング":
+                    dominance_bonus = dominance_bias_score_val 
+                elif side == "ショート":
+                    dominance_bonus = abs(dominance_bias_score_val) 
+            
+            elif dominance_trend == "Decreasing": 
+                if side == "ロング":
+                    dominance_bonus = abs(dominance_bias_score_val) 
+                elif side == "ショート":
+                    dominance_bonus = dominance_bias_score_val 
+                    
+            score = max(BASE_SCORE, min(1.0, score + dominance_bonus))
+
+
+        # K. 市場センチメント (FGI Proxy) の適用 (+/-0.07点)
+        sentiment_bonus = macro_context.get('sentiment_fgi_proxy', 0.0)
+        if side == "ロング" and sentiment_bonus > 0:
+            score = min(1.0, score + sentiment_bonus)
+        elif side == "ショート" and sentiment_bonus < 0:
+            score = min(1.0, score + abs(sentiment_bonus))
+        
+        # L. Structural/Pivot Analysis (0.07点)
+        structural_pivot_bonus, structural_sl_pivot, structural_tp_pivot = analyze_structural_proximity(price, pivots, side)
+        score = min(1.0, score + structural_pivot_bonus)
+        
+        # M. 出来高/流動性確証 (Max 0.12)
+        volume_confirmation_bonus = 0.0
+        
+        if volume_ratio >= VOLUME_CONFIRMATION_MULTIPLIER: 
+            if dc_cols_present and (is_breaking_high or is_breaking_low):
+                volume_confirmation_bonus += 0.06
+            if abs(macd_hist_val) > df[MACD_HIST_COL].abs().mean():
+                volume_confirmation_bonus += 0.06
+                
+            score = min(1.0, score + volume_confirmation_bonus)
+        
+        
+        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) 
+        penalty_value_lt = 0.0
+        if timeframe in ['15m', '1h']:
+            if (side == "ロング" and long_term_trend == "Short") or \
+               (side == "ショート" and long_term_trend == "Long"):
+                score = max(BASE_SCORE, score - LONG_TERM_REVERSAL_PENALTY) 
+                current_long_term_penalty_applied = True
+                penalty_value_lt = LONG_TERM_REVERSAL_PENALTY
+        
+        # 4. MACDクロス確認と減点 (モメンタム反転チェック)
+        macd_valid = True
+        penalty_value_macd = 0.0
+        if timeframe in ['15m', '1h']:
+             is_macd_reversing = (macd_hist_val > 0 and macd_hist_val < macd_hist_val_prev) or \
+                                 (macd_hist_val < 0 and macd_hist_val > macd_hist_val_prev)
              
-    analysis_result['tech_data']['stoch_filter_penalty'] = stoch_filter_penalty
+             if is_macd_reversing and score >= SIGNAL_THRESHOLD:
+                 score = max(BASE_SCORE, score - MACD_CROSS_PENALTY)
+                 macd_valid = False
+                 penalty_value_macd = MACD_CROSS_PENALTY
+             
+        
+        # 5. TP/SLとRRRの決定 (Dynamic Trailing Stop & Structural SL)
+        
+        rr_base = DTS_RRR_DISPLAY 
+        
+        is_high_conviction = score >= 0.80
+        is_strong_trend = adx_val >= 35
+        
+        use_market_entry = is_high_conviction and is_strong_trend
+        entry_type = "Market" if use_market_entry else "Limit"
+        
+        bb_mid = df['BBM_20_2.0'].iloc[-1] if 'BBM_20_2.0' in df.columns else price
+        dc_mid = (df['DCU_20'].iloc[-1] + df['DCL_20'].iloc[-1]) / 2 if dc_cols_present else price
+        
+        entry = price 
+        tp1 = 0
+        sl = 0
+        
+        sl_dist_atr = atr_val * ATR_TRAIL_MULTIPLIER 
+        structural_sl_used = False
 
-    # 4.6. 構造的 S/R (Pivot Points) ボーナス
-    structural_pivot_bonus = 0.0
-    pivot_points = analysis_result['tech_data']['pivot_points']
-    
-    if pivot_points.get('pp') is not None:
-        if side_long:
-            # ロングの場合、価格がS1/S2に近づいているとボーナス
-            s1_price = pivot_points.get('s1')
-            s2_price = pivot_points.get('s2')
+        if side == "ロング":
+            if use_market_entry: 
+                entry = price
+            else: 
+                # Limit Entry (Targeting a low price)
+                entry = min(min(bb_mid, dc_mid), price) 
             
-            # S1より下、またはS1-PPの間に価格がある場合を考慮
-            if price < s1_price:
-                 structural_pivot_bonus = 0.10
-                 score += structural_pivot_bonus
-            elif price < pivot_points.get('pp') and price > s1_price * 0.999: # S1の近く
-                 structural_pivot_bonus = 0.05
-                 score += structural_pivot_bonus
+            atr_sl = entry - sl_dist_atr
             
-        elif not side_long:
-            # ショートの場合、価格がR1/R2に近づいているとボーナス
-            r1_price = pivot_points.get('r1')
-            r2_price = pivot_points.get('r2')
+            # Check if structural_sl_pivot (S1) is a tighter SL than ATR SL and less than entry
+            if structural_sl_pivot > 0 and structural_sl_pivot > atr_sl and structural_sl_pivot < entry:
+                 # FIX v16.0.1: SLをS1から0.5*ATRだけ下にずらす (バッファ)
+                 sl = structural_sl_pivot - atr_val * 0.5 
+                 structural_sl_used = True
+            else:
+                 sl = atr_sl
             
-            # R1より上、またはR1-PPの間に価格がある場合を考慮
-            if price > r1_price:
-                 structural_pivot_bonus = 0.10
-                 score += structural_pivot_bonus
-            elif price > pivot_points.get('pp') and price < r1_price * 1.001: # R1の近く
-                 structural_pivot_bonus = 0.05
-                 score += structural_pivot_bonus
+            # 負の値にならないように保護
+            if sl <= 0: sl = entry * 0.99 
+            
+            tp_dist = abs(entry - sl) * rr_base 
+            tp1 = entry + tp_dist
+            
+        elif side == "ショート":
+            if use_market_entry: 
+                entry = price
+            else: 
+                # Limit Entry (Targeting a high price)
+                entry = max(max(bb_mid, dc_mid), price) 
+            
+            atr_sl = entry + sl_dist_atr
+            
+            # Check if structural_sl_pivot (R1) is a tighter SL than ATR SL and greater than entry
+            if structural_sl_pivot > 0 and structural_sl_pivot < atr_sl and structural_sl_pivot > entry:
+                 # FIX v16.0.1: SLをR1から0.5*ATRだけ上にずらす (バッファ)
+                 sl = structural_sl_pivot + atr_val * 0.5 
+                 structural_sl_used = True
+            else:
+                 sl = atr_sl
                  
-    analysis_result['tech_data']['structural_pivot_bonus'] = structural_pivot_bonus
-
-
-    # 4.7. 資金調達率 (Funding Rate) バイアスフィルター
-    funding_rate_bonus_value = 0.0
-    analysis_result['tech_data']['funding_rate_value'] = funding_rate
-    
-    if abs(funding_rate) >= FUNDING_RATE_THRESHOLD:
-        if funding_rate > 0 and not side_long:
-            # 資金調達率がプラス（ロングの過密）でショートの場合 -> ボーナス
-            funding_rate_bonus_value = FUNDING_RATE_BONUS_PENALTY
-            score += funding_rate_bonus_value
-        elif funding_rate < 0 and side_long:
-            # 資金調達率がマイナス（ショートの過密）でロングの場合 -> ボーナス
-            funding_rate_bonus_value = FUNDING_RATE_BONUS_PENALTY
-            score += funding_rate_bonus_value
-        else:
-            # 資金調達率と方向が一致する場合 -> ペナルティ
-            funding_rate_bonus_value = -FUNDING_RATE_BONUS_PENALTY
-            score -= FUNDING_RATE_BONUS_PENALTY
+            tp_dist = abs(entry - sl) * rr_base 
+            tp1 = entry - tp_dist
             
-    analysis_result['tech_data']['funding_rate_bonus_value'] = funding_rate_bonus_value
-    
-    # 4.8. BTC Dominance Bias フィルター (Altcoinのみ)
-    dominance_trend = macro_context.get('dominance_trend', 'Neutral')
-    dominance_bias_bonus_value = 0.0
-    
-    if symbol != 'BTC-USDT':
-        if dominance_trend == 'Bearish' and side_long:
-            # ドミナンスが下落傾向（アルトに資金流入）でロング -> ボーナス
-            dominance_bias_bonus_value = DOMINANCE_BIAS_BONUS_PENALTY
-            score += dominance_bias_bonus_value
-        elif dominance_trend == 'Bullish' and not side_long:
-            # ドミナンスが上昇傾向（BTCに資金集中）でショート -> ボーナス (相対的な弱さ)
-            dominance_bias_bonus_value = DOMINANCE_BIAS_BONUS_PENALTY
-            score += dominance_bias_bonus_value
         else:
-            # トレンドに逆行している場合 -> ペナルティ
-            dominance_bias_bonus_value = -DOMINANCE_BIAS_BONUS_PENALTY / 2.0 # ペナルティは少し軽め
-            score += dominance_bias_bonus_value
-
-    analysis_result['tech_data']['dominance_trend'] = dominance_trend
-    analysis_result['tech_data']['dominance_bias_bonus_value'] = dominance_bias_bonus_value
-
-    # 5. 結果の決定と取引パラメータの計算
-    
-    # 最終スコアを0.0から1.0に制限
-    score = max(0.01, min(1.0, score))
-    analysis_result['score'] = score
-    
-    if score < SIGNAL_THRESHOLD:
-        analysis_result['side'] = 'Neutral'
-        return analysis_result
-
-    analysis_result['side'] = 'ロング' if side_long else 'ショート'
-    
-    # DTSパラメータ (エントリー、SL) の計算
-    atr_sl_width = atr * ATR_TRAIL_MULTIPLIER
-    
-    # 構造的SL/TPの設定 (Pivot Points S1, R1を考慮)
-    structural_sl_used = False
-    
-    if side_long:
-        # ロングの場合
-        # エントリー: 直近の安値のわずかに上 (Limit Buy)
-        entry_price = last_row.get('low', price) + (atr * 0.5) 
+            entry_type = "N/A"
+            entry, tp1, sl, rr_base = price, 0, 0, 0
         
-        # SL候補: ATR基準
-        sl_candidate_atr = entry_price - atr_sl_width
-        
-        # SL候補: 構造的S/R (S1, S2) を使用
-        s1_price = pivot_points.get('s1')
-        s2_price = pivot_points.get('s2')
-        
-        sl_price = sl_candidate_atr
-        
-        # S1がATR基準のSLよりも深く、かつ妥当な範囲内であればS1付近を使用
-        if s1_price is not None and s1_price < sl_candidate_atr and s1_price > (price * 0.95):
-             sl_price = s1_price - (atr * 0.5) # S1に0.5ATRのバッファを追加
-             structural_sl_used = True
-        elif s2_price is not None and s2_price < sl_candidate_atr and s2_price > (price * 0.95):
-             sl_price = s2_price - (atr * 0.5) # S2に0.5ATRのバッファを追加
-             structural_sl_used = True
+        # 6. 最終的なサイドの決定
+        final_side = side
+        if score < SIGNAL_THRESHOLD: 
+             final_side = "Neutral"
 
-        # TPはDTSの目標RRRに基づいて設定 (あくまで目標)
-        tp_price = entry_price + (abs(entry_price - sl_price) * DTS_RRR_DISPLAY)
-        
-        # エントリータイプは一旦価格を割り込ませてから反発を狙うLimitとする
-        analysis_result['entry_type'] = 'Limit'
+        # 7. tech_dataの構築
+        bb_width_pct_val = (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0
 
-    else:
-        # ショートの場合
-        # エントリー: 直近の高値のわずかに下 (Limit Sell)
-        entry_price = last_row.get('high', price) - (atr * 0.5)
+        tech_data = {
+            "rsi": rsi_val,
+            "macd_hist": macd_hist_val, 
+            "adx": adx_val,
+            "bb_width_pct": bb_width_pct_val,
+            "atr_value": atr_val,
+            "long_term_trend": long_term_trend,
+            "long_term_reversal_penalty": current_long_term_penalty_applied,
+            "macd_cross_valid": macd_valid,
+            "cci": cci_val, 
+            "vwap_consistent": vwap_consistent,
+            "ppo_hist": ppo_hist_val, 
+            "dc_high": dc_high_val,
+            "dc_low": dc_low_val,
+            "stoch_k": stoch_k_val,
+            "stoch_d": df[STOCHRSI_D].iloc[-1] if STOCHRSI_D in df.columns else 50.0,
+            "stoch_filter_penalty": tech_data_defaults["stoch_filter_penalty"], 
+            "volume_confirmation_bonus": volume_confirmation_bonus,
+            "current_volume": current_volume,
+            "average_volume": average_volume,
+            "sentiment_fgi_proxy_bonus": sentiment_bonus,
+            "structural_pivot_bonus": structural_pivot_bonus,
+            "volume_ratio": volume_ratio,
+            "structural_sl_used": structural_sl_used, 
+            "long_term_reversal_penalty_value": penalty_value_lt,
+            "macd_cross_penalty_value": penalty_value_macd,
+            "funding_rate_value": funding_rate_val,
+            "funding_rate_bonus_value": funding_rate_bonus,
+            "dominance_trend": dominance_trend,
+            "dominance_bias_bonus_value": dominance_bonus,
+            "dynamic_exit_strategy": "DTS" 
+        }
         
-        # SL候補: ATR基準
-        sl_candidate_atr = entry_price + atr_sl_width
+    except Exception as e:
+        logging.warning(f"⚠️ {symbol} ({timeframe}) のテクニカル分析中に予期せぬエラーが発生しました: {e}. Neutralとして処理を継続します。")
+        final_side = "Neutral"
+        score = 0.5
+        entry, tp1, sl, rr_base = price, 0, 0, 0 
+        tech_data = tech_data_defaults 
+        entry_type = "N/A"
         
-        # SL候補: 構造的S/R (R1, R2) を使用
-        r1_price = pivot_points.get('r1')
-        r2_price = pivot_points.get('r2')
-        
-        sl_price = sl_candidate_atr
-
-        # R1がATR基準のSLよりも深く、かつ妥当な範囲内であればR1付近を使用
-        if r1_price is not None and r1_price > sl_candidate_atr and r1_price < (price * 1.05):
-             sl_price = r1_price + (atr * 0.5) # R1に0.5ATRのバッファを追加
-             structural_sl_used = True
-        elif r2_price is not None and r2_price > sl_candidate_atr and r2_price < (price * 1.05):
-             sl_price = r2_price + (atr * 0.5) # R2に0.5ATRのバッファを追加
-             structural_sl_used = True
-
-        # TPはDTSの目標RRRに基づいて設定 (あくまで目標)
-        tp_price = entry_price - (abs(entry_price - sl_price) * DTS_RRR_DISPLAY)
-        
-        # エントリータイプは一旦価格を突き抜けさせてから反発を狙うLimitとする
-        analysis_result['entry_type'] = 'Limit'
-
-    # パラメータの更新
-    analysis_result['price'] = price
-    analysis_result['entry'] = entry_price
-    analysis_result['sl'] = sl_price
-    analysis_result['tp1'] = tp_price 
-    analysis_result['rr_ratio'] = DTS_RRR_DISPLAY # RRRはDTSの目標値
-    analysis_result['tech_data']['structural_sl_used'] = structural_sl_used
-    
-    # リスク幅が小さすぎる場合は無効化
-    if abs(entry_price - sl_price) < (atr * 0.5):
-         analysis_result['side'] = 'Neutral'
-         analysis_result['score'] = 0.50
-         
-    return analysis_result
-
-async def fetch_macro_context(monitor_symbols: List[str]) -> Dict:
-    """
-    BTCドミナンスやFGIなどのマクロ環境の情報を取得・分析する
-    """
-    context = {
-        'long_term_trend_4h': 'Neutral', # BTC/USDT 4h足の長期トレンド
-        'dominance_trend': 'Neutral',   # BTC Dominance のトレンド
-        'sentiment_fgi_proxy': 0.0,     # FGIの代理スコア (-1.0 to 1.0)
+    # 8. シグナル辞書を構築
+    signal_candidate = {
+        "symbol": symbol,
+        "side": final_side,
+        "score": score, 
+        "confidence": score,
+        "price": price,
+        "entry": entry,
+        "tp1": tp1, 
+        "sl": sl,   
+        "rr_ratio": rr_base if final_side != "Neutral" else 0.0,
+        "regime": "トレンド" if tech_data['adx'] >= ADX_TREND_THRESHOLD else "レンジ",
+        "macro_context": macro_context,
+        "client": client_used,
+        "timeframe": timeframe,
+        "tech_data": tech_data,
+        "volatility_penalty_applied": tech_data['bb_width_pct'] > VOLATILITY_BB_PENALTY_THRESHOLD,
+        "entry_type": entry_type
     }
-
-    # 1. BTC/USDT 4h足の長期トレンドを取得
-    btc_ohlcv, status, _ = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, 'BTC-USDT', '4h')
     
-    if status == 'Success' and len(btc_ohlcv) >= LONG_TERM_SMA_LENGTH + 1:
-        btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'], unit='ms').dt.tz_localize(timezone.utc).dt.tz_convert(JST)
-        btc_df.set_index('timestamp', inplace=True)
-        
-        # SMAを計算
-        btc_df.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
-        
-        last_row = get_last_row_data(btc_df)
-        btc_price = last_row.get('close')
-        btc_long_sma = last_row.get('long_sma')
-        
-        if btc_price is not None and btc_long_sma is not None and btc_price > 0:
-            if btc_price > btc_long_sma:
-                context['long_term_trend_4h'] = 'Bullish'
-            elif btc_price < btc_long_sma:
-                context['long_term_trend_4h'] = 'Bearish'
+    return signal_candidate
 
-    # 2. BTC Dominanceのトレンドを取得
-    # 現時点では、簡易的なFGIの代理スコア (-1.0 to 1.0) のみを返す（BTCトレンドから仮定）
-    if context['long_term_trend_4h'] == 'Bullish':
-        context['sentiment_fgi_proxy'] = 0.30 # 楽観
-    elif context['long_term_trend_4h'] == 'Bearish':
-        context['sentiment_fgi_proxy'] = -0.30 # 悲観
-    else:
-        context['sentiment_fgi_proxy'] = 0.0
-        
-    # ドミナンスの簡易トレンド (BTC-USDTとALTのパフォーマンス差から暫定的に決定)
-    if context['sentiment_fgi_proxy'] > 0.1:
-         context['dominance_trend'] = 'Bullish'
-    elif context['long_term_trend_4h'] == 'Bullish' and context['sentiment_fgi_proxy'] < 0.1:
-         # BTCが上昇トレンドだがFGI代理スコアが伸びていない = アルトの相対的な強さ (暫定ロジック)
-         context['dominance_trend'] = 'Bearish'
-    elif context['sentiment_fgi_proxy'] < -0.1:
-         context['dominance_trend'] = 'Bearish'
-    else:
-         context['dominance_trend'] = 'Neutral'
-
-    logging.info(f"マクロコンテキストを更新: 4h BTCトレンド={context['long_term_trend_4h']}, ドミナンス={context['dominance_trend']}")
-    return context
-
-
-async def analyze_all_timeframes(symbol: str, macro_context: Dict) -> List[Dict]:
-    """
-    全ての時間軸のOHLCVデータを取得し、分析を統合する
-    """
+async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
     
-    timeframes = ['15m', '1h', '4h']
-    tasks = []
+    # 0. 4hトレンドの事前計算
+    long_term_trend = 'Neutral'
+    ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
+    df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df_4h['close'] = pd.to_numeric(df_4h['close'], errors='coerce').astype('float64')
+    df_4h['timestamp'] = pd.to_datetime(df_4h['timestamp'], unit='ms', utc=True)
+    df_4h.set_index('timestamp', inplace=True)
     
-    # 資金調達率を事前に取得
-    funding_rate = await fetch_funding_rate(symbol)
-    
-    # OHLCVデータの取得タスクを生成
-    for tf in timeframes:
-        tasks.append(fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, symbol, tf))
-
-    ohlcv_results = await asyncio.gather(*tasks)
-    
-    all_signals = []
-    
-    for (ohlcv, status, client), tf in zip(ohlcv_results, timeframes):
-        if status != 'Success':
-            all_signals.append({
-                'symbol': symbol,
-                'timeframe': tf,
-                'side': status,
-                'score': 0.50,
-                'rr_ratio': DTS_RRR_DISPLAY,
-            })
-            continue
-
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize(timezone.utc).dt.tz_convert(JST)
-        df.set_index('timestamp', inplace=True)
-        
-        signal = analyze_single_timeframe(df, symbol, tf, funding_rate, macro_context)
-        all_signals.append(signal)
-
-    return all_signals
-
-# ====================================================================================
-# MAIN LOOP & SIGNAL PROCESSING
-# ====================================================================================
-
-async def process_signals(all_signals: List[Dict]) -> List[Dict]:
-    """
-    全銘柄・全時間軸のシグナルを統合し、最適な取引シグナルをフィルタリングする
-    """
-    
-    # 1. 有効なシグナルのみを抽出
-    valid_signals = [
-        s for s in all_signals 
-        if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]
-        and s.get('score', 0.50) >= SIGNAL_THRESHOLD
-    ]
-
-    # 2. 複数の時間軸で同じ方向のシグナルが出ているものを優先
-    symbol_scores: Dict[str, Dict[str, Any]] = {}
-
-    for signal in valid_signals:
-        symbol = signal['symbol']
-        timeframe = signal['timeframe']
-        score = signal['score']
-        
-        # 銘柄ごとの統合スコアを計算
-        if symbol not in symbol_scores:
-            symbol_scores[symbol] = {
-                'total_score': 0.0,
-                'count': 0,
-                'best_signal': signal,
-            }
-        
-        # 同じ銘柄内で最もスコアの高いシグナルを採用
-        if score > symbol_scores[symbol]['best_signal']['score']:
-             symbol_scores[symbol]['best_signal'] = signal
-
-        # スコアを加算
-        symbol_scores[symbol]['total_score'] += score
-        symbol_scores[symbol]['count'] += 1
-
-    # 3. 統合スコアでランキング
-    ranked_signals = sorted(
-        symbol_scores.values(),
-        key=lambda x: (
-            x['total_score'], 
-            x['count'],
-            x['best_signal']['rr_ratio'] # RRRも考慮
-        ), 
-        reverse=True
-    )
-    
-    final_signals = []
-    
-    for i, item in enumerate(ranked_signals[:TOP_SIGNAL_COUNT]):
-        best_signal_data = item['best_signal']
-        symbol = best_signal_data['symbol']
-        
-        # クールダウン期間のチェック
-        last_notified = TRADE_NOTIFIED_SYMBOLS.get(symbol, 0)
-        if (time.time() - last_notified) < TRADE_SIGNAL_COOLDOWN:
-            logging.info(f"⏰ {symbol} はクールダウン期間中のためスキップします。")
-            continue
-
-        # 4. メッセージを整形して通知
-        rank = i + 1
-        
-        # 該当銘柄の全シグナルを取得
-        integrated_signals = [s for s in all_signals if s['symbol'] == symbol]
-        
-        message = format_integrated_analysis_message(symbol, integrated_signals, rank)
-        
-        if message and send_telegram_html(message):
-            TRADE_NOTIFIED_SYMBOLS[symbol] = time.time()
-            final_signals.append(best_signal_data)
+    if status_4h == "Success" and len(df_4h.dropna(subset=['close'])) >= LONG_TERM_SMA_LENGTH:
+        try:
+            df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
+            df_4h.dropna(subset=['sma'], inplace=True)
+            if not df_4h.empty and 'sma' in df_4h.columns and not pd.isna(df_4h['sma'].iloc[-1]):
+                last_price = df_4h['close'].iloc[-1]
+                last_sma = df_4h['sma'].iloc[-1]
+                if last_price > last_sma:
+                    long_term_trend = 'Long'
+                elif last_price < last_sma:
+                    long_term_trend = 'Short'
+        except Exception:
+            pass 
             
-    return final_signals
+    # 1. 各時間軸の分析を並行して実行
+    tasks = [
+        analyze_single_timeframe(symbol, '15m', macro_context, client_name, long_term_trend, False),
+        analyze_single_timeframe(symbol, '1h', macro_context, client_name, long_term_trend, False),
+        analyze_single_timeframe(symbol, '4h', macro_context, client_name, long_term_trend, False) 
+    ]
+    
+    results = await asyncio.gather(*tasks)
+    
+    # MTF スコアリングブーストロジック
+    signal_1h_item = next((r for r in results if r and r.get('timeframe') == '1h'), None)
+    signal_15m_item = next((r for r in results if r and r.get('timeframe') == '15m'), None)
+
+    if signal_1h_item and signal_15m_item:
+        is_1h_strong_signal = signal_1h_item['score'] >= 0.80 
+        is_direction_matched = signal_1h_item['side'] == signal_15m_item['side']
+        if is_direction_matched and is_1h_strong_signal:
+            signal_15m_item['score'] = min(1.0, signal_15m_item['score'] + 0.05)
+            
+    for result in results:
+        if result and result.get('timeframe') == '4h':
+            result.setdefault('tech_data', {})['long_term_trend'] = long_term_trend
+    
+    return [r for r in results if r is not None]
+
+
+# ====================================================================================
+# TASK SCHEDULER & MAIN LOOP
+# ====================================================================================
 
 async def main_loop():
-    """
-    メインの監視ループ - Stability Fix (v17.0.6)適用
-    """
-    global LAST_UPDATE_TIME, LAST_SUCCESS_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT
-    
-    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == 'YOUR_TELEGRAM_TOKEN':
-        logging.error("❌ Telegram Token が設定されていません。環境変数を確認してください。")
-        return
+    """BOTのメイン実行ループ"""
+    global LAST_ANALYSIS_SIGNALS, LAST_SUCCESS_TIME, CCXT_CLIENT_NAME, GLOBAL_MACRO_CONTEXT
 
     await initialize_ccxt_client()
 
     while True:
         try:
-            logging.info(f"\n--- 🚀 Apex BOT v17.0.6 - 監視ループ開始 (時刻: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST) ---") # バージョン更新
+            current_time = time.time()
             
-            # 1. 銘柄リストの動的更新 (低頻度)
-            if time.time() - LAST_UPDATE_TIME > 60 * 60 * 4: # 4時間に1回
-                 logging.info("📡 出来高に基づいて監視銘柄リストを更新します...")
-                 await update_symbols_by_volume()
-                 LAST_UPDATE_TIME = time.time()
-                 
-            # 2. マクロコンテキストの取得
-            GLOBAL_MACRO_CONTEXT = await fetch_macro_context(CURRENT_MONITOR_SYMBOLS)
+            await update_symbols_by_volume()
+            monitor_symbols = CURRENT_MONITOR_SYMBOLS
             
-            # 3. 全銘柄の分析タスクを作成
-            analysis_tasks = []
-            for symbol in CURRENT_MONITOR_SYMBOLS:
-                 await asyncio.sleep(REQUEST_DELAY_PER_SYMBOL) # 負荷軽減のための遅延
-                 analysis_tasks.append(analyze_all_timeframes(symbol, GLOBAL_MACRO_CONTEXT))
+            # 💡 グローバルマクロコンテキストを更新 (FGI Proxy, BTC/ETHトレンド, Dominance Bias)
+            GLOBAL_MACRO_CONTEXT = await get_crypto_macro_context()
+            
+            log_symbols = [s.replace('-', '/') for s in monitor_symbols[:5]]
+            logging.info(f"🔍 分析開始 (対象銘柄: {len(monitor_symbols)} - 出来高TOP, クライアント: {CCXT_CLIENT_NAME})。監視リスト例: {', '.join(log_symbols)}...")
+            
+            results_list_of_lists = []
+            
+            for symbol in monitor_symbols:
+                result = await generate_integrated_signal(symbol, GLOBAL_MACRO_CONTEXT, CCXT_CLIENT_NAME)
+                results_list_of_lists.append(result)
+                
+                await asyncio.sleep(REQUEST_DELAY_PER_SYMBOL)
 
-            logging.info(f"⏳ {len(analysis_tasks)} 銘柄の分析を開始します...")
-            all_results_nested = await asyncio.gather(*analysis_tasks)
-            
-            # 結果をフラット化
-            all_signals: List[Dict] = [signal for sublist in all_results_nested for signal in sublist]
-            
-            # 4. シグナル処理と通知
-            logging.info("🧠 分析結果を統合し、シグナルを処理します...")
-            notified_signals = await process_signals(all_signals)
-            
+            all_signals = [s for sublist in results_list_of_lists for s in sublist if s is not None] 
             LAST_ANALYSIS_SIGNALS = all_signals
-            LAST_SUCCESS_TIME = time.time()
-            logging.info(f"✅ 監視ループ完了。{len(notified_signals)} 件のシグナルを通知しました。")
             
-            # 5. インターバル待機
-            await asyncio.sleep(LOOP_INTERVAL)
+            best_signals_per_symbol = {}
+            for signal in all_signals:
+                symbol = signal['symbol']
+                score = signal['score']
+                
+                if signal.get('side') == 'Neutral' or signal.get('side') in ["DataShortage", "ExchangeError"]:
+                    continue
+                
+                # Limit Entry の優位性スコアを計算 (EAS)
+                entry_advantage_score = 0.0
+                atr_val = signal.get('tech_data', {}).get('atr_value', 1.0)
+                price = signal.get('price', 0.0)
+                entry_price = signal.get('entry', 0.0)
+                
+                if signal.get('entry_type', 'N/A') == 'Limit' and atr_val > 0 and price > 0 and entry_price > 0:
+                    if signal.get('side') == 'ロング':
+                        entry_advantage_score = (price - entry_price) / atr_val
+                    elif signal.get('side') == 'ショート':
+                        entry_advantage_score = (entry_price - price) / atr_val
 
-        except KeyboardInterrupt:
-            logging.info("メインループを停止します (Keyboard Interrupt)。")
-            break
+
+                if symbol not in best_signals_per_symbol or score > best_signals_per_symbol[symbol]['score']:
+                    all_symbol_signals = [s for s in all_signals if s['symbol'] == symbol]
+                    
+                    best_signals_per_symbol[symbol] = {
+                        'score': score, 
+                        'all_signals': all_symbol_signals,
+                        'rr_ratio': signal.get('rr_ratio', 0.0), 
+                        'adx_val': signal.get('tech_data', {}).get('adx', 0.0), 
+                        'atr_val': atr_val,
+                        'symbol': symbol,
+                        'entry_type': signal.get('entry_type', 'N/A'),
+                        'entry_advantage_score': entry_advantage_score
+                    }
+            
+            # --- Limit Entry ポジションのみをフィルタリングし、ソート基準を優位性スコアに変更 ---
+            limit_entry_signals = [
+                item for item in best_signals_per_symbol.values() 
+                if item['entry_type'] == 'Limit' 
+            ]
+
+            # ソート: Entry Advantage Score (EAS, 優位性) を最優先、次にスコア、RRRの順
+            sorted_best_signals = sorted(
+                limit_entry_signals, 
+                key=lambda x: (
+                    x['entry_advantage_score'], # EASを最優先 (降順)
+                    x['score'],     
+                    x['rr_ratio'],  
+                    x['adx_val'],   
+                    x['symbol']     
+                ), 
+                reverse=True
+            )
+            # --------------------------------------------------------------------------
+            
+            top_signals_to_notify = [
+                item for item in sorted_best_signals 
+                if item['score'] >= SIGNAL_THRESHOLD
+            ][:TOP_SIGNAL_COUNT]
+            
+            notify_tasks = [] 
+            
+            if top_signals_to_notify:
+                logging.info(f"🔔 高スコア/高優位性シグナル {len(top_signals_to_notify)} 銘柄をチェックします。")
+                
+                for i, item in enumerate(top_signals_to_notify):
+                    symbol = item['all_signals'][0]['symbol']
+                    current_time = time.time()
+                    
+                    if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
+                        
+                        msg = format_integrated_analysis_message(symbol, item['all_signals'], i + 1)
+                        
+                        if msg:
+                            log_symbol = symbol.replace('-', '/')
+                            logging.info(f"📰 通知タスクをキューに追加: {log_symbol} (順位: {i+1}位, スコア: {item['score'] * 100:.2f}点, EAS: {item['entry_advantage_score']:.2f})")
+                            TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
+                            
+                            task = asyncio.create_task(asyncio.to_thread(lambda m=msg: send_telegram_html(m)))
+                            notify_tasks.append(task)
+                            
+                    else:
+                        log_symbol = symbol.replace('-', '/')
+                        logging.info(f"🕒 {log_symbol} はクールダウン期間中です。通知をスキップします。")
+                
+            LAST_SUCCESS_TIME = current_time
+            logging.info(f"✅ 分析サイクル完了。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            
+            if notify_tasks:
+                 await asyncio.gather(*notify_tasks, return_exceptions=True)
+
+            await asyncio.sleep(LOOP_INTERVAL) 
+
         except Exception as e:
-            error_name = type(e).__name__
-            logging.error(f"メインループで致命的なエラー: {error_name}")
+            error_message = str(e)
+            error_name = "Unknown Error"
             
-            # --- FIX: Attribute Error または接続関連の致命的なエラーが発生した場合、クライアントを再初期化して回復を試みる ---
-            if error_name in ['AttributeError', 'ConnectionError', 'TimeoutError']:
-                logging.warning("⚠️ クライアントの不安定性を検知しました。再初期化を試行します...")
-                await initialize_ccxt_client() 
-                # NEW FIX 2: クライアント再初期化後、短い待機時間を挿入して、新しい aiohttp セッションが完全に安定するのを待つ
-                await asyncio.sleep(3) 
-            # --------------------------------------------------------------------------------------------------------
-
+            if 'name' in error_message and 'is not defined' in error_message:
+                try:
+                    error_name = error_message.split(' ')[1].strip("'") 
+                except IndexError:
+                    pass 
+            
+            logging.error(f"メインループで致命的なエラー: {error_name}")
             await asyncio.sleep(60)
 
 
@@ -1282,30 +1199,25 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.6 - CCXT Stability Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v16.0.1 - Structural SL Buffer Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.6 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v16.0.1 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global EXCHANGE_CLIENT
     if EXCHANGE_CLIENT:
-        # シャットダウン時にも安全にセッションを閉じる
-        try:
-            await EXCHANGE_CLIENT.close()
-            logging.info("CCXTクライアントをシャットダウンしました。")
-        except Exception:
-            logging.warning("CCXTクライアントのシャットダウン中にエラーが発生しました。")
-
+        await EXCHANGE_CLIENT.close()
+        logging.info("CCXTクライアントをシャットダウンしました。")
 
 @app.get("/status")
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.6 - CCXT Stability Fix", # バージョン更新
+        "bot_version": "v16.0.1 - Structural SL Buffer Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1316,10 +1228,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.6)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v16.0.1, Structural SL Buffer Fix)."}, status_code=200)
 
-if __name__ == "__main__":
-    # 環境変数からポート番号を取得し、uvicornを起動
-    port = int(os.environ.get("PORT", 8000))
-    # Note: main_render:app は、このファイル名:FastAPI変数名
-    uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
+if __name__ == '__main__':
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
