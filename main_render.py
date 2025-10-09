@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.19 - FIX: Robust Indicator Calculation & Final KeyError
-# - FIX: CCXTデータが不完全な場合にpandas_taがカラム生成をスキップする問題を、不完全なOHLCVデータ行を削除することで解決。
-# - FIX: 最終統合シグナルの生成時に'rr_ratio'などのキー欠損によるKeyErrorが発生しないよう、.get()を使用し堅牢化。
-# - 修正: v17.0.18のKeyError SafeGuardロジックを維持。
+# Apex BOT v17.0.20 - FIX: Persistent Indicator Calculation Failure
+# - FIX: OHLCVデータ欠損行削除後、データ量が短すぎる場合に指標計算をスキップし、DataShortageとして処理することで、
+#        「ATR_14, BBL_20_2.0, BBU_20_2.0, VWAPがありません」というエラーログの大量発生を抑制し、安定性を向上させます。
+# - FIX: 最終統合シグナルの生成時に'rr_ratio'などのキー欠損によるKeyErrorが発生しないよう、.get()を使用し堅牢化 (v17.0.19の修正を維持)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -56,6 +56,7 @@ TRADE_SIGNAL_COOLDOWN = 1           # ほぼ無効化 (1秒)
 SIGNAL_THRESHOLD = 0.00             # 閾値を無効化し、常に最高スコアを採用
 TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
+MINIMUM_DATAFRAME_LENGTH = 50 # v17.0.20: クリーンアップ後の最小データ長
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
 LONG_TERM_SMA_LENGTH = 50           
@@ -177,7 +178,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.18対応 - PNLブロック復元)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.20対応 - PNLブロック復元)
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -186,6 +187,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         return "" 
         
     # 最もスコアが高いシグナルを採用
+    # FIX v17.0.19/20: キーの存在チェックを強化
     best_signal = max(
         valid_signals, 
         key=lambda s: (
@@ -431,7 +433,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.19** - FIX_ROBUSTNESS |\n" 
+        f"| ⚙️ **BOT Ver** | **v17.0.20** - FIX_INDICATOR_FAILURE |\n" 
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -725,6 +727,7 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     df['volume_ma'] = df['volume'].rolling(window=20).mean()
 
     # --- 修正 v17.0.18: dropeaの前に必要なカラムが存在するか確認し、存在しない場合は空のDataFrameを返す ---
+    # 必要なコアインジケータのカラム名
     required_cols = ['close', 'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'ATR_14', 'BBL_20_2.0', 'BBU_20_2.0', 'STOCHRSIk_14_14_3_3', 'VWAP', 'volume_ma']
     
     # 欠損しているカラム名を取得
@@ -735,7 +738,7 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         logging.error(f"⚠️ 指標計算失敗 (タイムフレーム: {timeframe}): 以下の必要なカラムがありません: {', '.join(missing_cols)}")
         return pd.DataFrame() # 空のDataFrameを返して、`analyze_symbol_async`で'DataShortage'として処理させる
 
-    # 欠損値を含む行を削除 (これでKeyErrorは発生しない)
+    # 欠損値を含む行を削除 (これにより、後続のロジックでKeyErrorは発生しない)
     return df.dropna(subset=required_cols)
 
 
@@ -1039,8 +1042,20 @@ async def analyze_symbol_async(symbol: str, macro_context: Dict) -> Dict:
             df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True)
             # ---------------------------------------------------------------------------------
 
+            # --- FIX v17.0.20: データフレームが短すぎる場合の早期退出 ---
+            if len(df) < MINIMUM_DATAFRAME_LENGTH: 
+                logging.warning(f"⚠️ {symbol} [{timeframe}] クリーンアップ後のデータが短すぎます ({len(df)}行)。DataShortageとして処理します。")
+                combined_signals.append({'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage', 'score': 0.0, 'signals': [], 'rr_ratio': 0.0})
+                continue
+            # --------------------------------------------------------------------
+
             df = calculate_indicators(df, timeframe)
             
+            # calculate_indicatorsが空のDataFrameを返した場合もDataShortageとして処理
+            if df.empty:
+                combined_signals.append({'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage', 'score': 0.0, 'signals': [], 'rr_ratio': 0.0})
+                continue
+
             # 資金調達率を追加
             df['funding_rate'] = funding_rate
             
@@ -1166,11 +1181,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.19 - FIX_ROBUSTNESS")
+app = FastAPI(title="Apex BOT API", version="v17.0.20 - FIX_INDICATOR_FAILURE")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.19 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.0.20 Startup initializing...") 
     await initialize_ccxt_client()
     asyncio.create_task(main_loop())
 
@@ -1185,7 +1200,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.19 - FIX_ROBUSTNESS",
+        "bot_version": "v17.0.20 - FIX_INDICATOR_FAILURE",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1196,7 +1211,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running on v17.0.19."})
+    return JSONResponse(content={"message": "Apex BOT is running on v17.0.20."})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得。デフォルトは8000
