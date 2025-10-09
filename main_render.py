@@ -53,7 +53,7 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', 'YOUR_TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', 'YOUR_TELEGRAM_CHAT_ID')
 
 # NEW: 損益計算の基準となる想定取引サイズ (USDT建て) - 必要に応じてこの値を変更してください
-TRADE_SIZE_USDT = 5000.0  
+TRADE_SIZE_USDT = 1000.0  
 
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
 SIGNAL_THRESHOLD = 0.77             
