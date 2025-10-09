@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.8 - YF Dominance Fix
-# - FIX: fetch_global_macro_context 関数内で yfinance が MultiIndex の列名を返す場合に 
-#        発生する「'tuple' object has no attribute 'lower'」エラーを解消。
+# Apex BOT v17.0.9 - Fix Dominance SMA KeyError
+# - FIX: fetch_global_macro_context 関数内で発生していた KeyError: 'sma' を解消するため、
+#        SMA列名を明示的に小文字の 'sma' で作成するように修正。
+# - v17.0.8: yfinanceのMultiIndexエラー('tuple' object has no attribute 'lower')対応ロジックを維持。
 # - v17.0.7: 取引所に存在しないシンボルを自動で監視リストから除外するロジックを維持。
 # ====================================================================================
 
@@ -61,7 +62,7 @@ LONG_TERM_SMA_LENGTH = 50
 LONG_TERM_REVERSAL_PENALTY = 0.20   
 MACD_CROSS_PENALTY = 0.15           
 ATR_LENGTH = 14 # 一般的なATRの期間
-SMA_LENGTH = 20 # 一般的なSMAの期間
+SMA_LENGTH = 20 # BTC価格トレンドフィルター用のSMA期間
 
 # Dynamic Trailing Stop (DTS) Parameters
 ATR_TRAIL_MULTIPLIER = 3.0          
@@ -271,10 +272,11 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     else: rank_header = f"🏆 **総合 {rank} 位！**"
 
     market_sentiment_str = ""
-    macro_sentiment = best_signal.get('macro_context', {}).get('sentiment_fgi_proxy', 0.0)
-    if macro_sentiment >= 0.05:
+    # v17.0.9: macro_contextのキー名変更に対応
+    macro_sentiment = best_signal.get('macro_context', {}).get('sentiment_fgi_proxy', 0.0) 
+    if macro_sentiment >= 0.4:
          market_sentiment_str = " (リスクオン傾向)"
-    elif macro_sentiment <= -0.05:
+    elif macro_sentiment <= -0.4:
          market_sentiment_str = " (リスクオフ傾向)"
     
     # 決済戦略の表示をDTSに変更
@@ -366,14 +368,19 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     
     # マクロコンテキスト
     macro_context = best_signal.get('macro_context', {})
-    fr_bias_str = "中立"
-    if macro_context.get('funding_rate_bias') == "LONG_BIAS": fr_bias_str = "⬆️ 資金調達率ロングバイアス"
-    elif macro_context.get('funding_rate_bias') == "SHORT_BIAS": fr_bias_str = "⬇️ 資金調達率ショートバイアス"
     
-    dom_bias_str = "中立"
-    if macro_context.get('dominance_bias') == "BTC_BULL": dom_bias_str = "⬆️ BTCドミナンス上昇バイアス"
-    elif macro_context.get('dominance_bias') == "ALT_BULL": dom_bias_str = "⬇️ BTCドミナンス下落バイアス"
+    # v17.0.9: キー名変更
+    btc_trend = macro_context.get('btc_price_trend', 'Neutral')
+    btc_trend_str = "⬆️ 強気トレンド" if btc_trend.startswith("Strong_Uptrend") else ("⬆️ トレンド" if btc_trend.startswith("Uptrend") else ("⬇️ 弱気トレンド" if btc_trend.startswith("Strong_Downtrend") else ("⬇️ トレンド" if btc_trend.startswith("Downtrend") else "中立")))
     
+    fgi_proxy = macro_context.get('sentiment_fgi_proxy', 0.0)
+    if fgi_proxy > 0.4:
+        fgi_level = "Greed"
+    elif fgi_proxy < -0.4:
+        fgi_level = "Fear"
+    else:
+        fgi_level = "Neutral"
+
     # 総合的なトレンド概要
     trend_summary = (
         f"\n**💡 トレンドとボラティリティの概要**\n"
@@ -390,13 +397,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     # 3. マクロ要因
     macro_summary = (
-        f"\n**🌍 マクロコンテキストフィルター**\n"
+        f"\n**🌍 マクロコンテキストフィルター (v17.0.9)**\n"
         f"----------------------------------\n"
         f"| 要因 | 値 | 評価 |\n"
         f"| :--- | :--- | :--- |\n"
-        f"| **BTC FR** | {macro_context.get('funding_rate', 0.0) * 100:.4f}% | **資金調達率** ({fr_bias_str}) |\n"
-        f"| **BTC Dom**| {macro_context.get('dominance_bias_value', 0.0):.2f} | **ドミナンス動向** ({dom_bias_str}) |\n"
-        f"| **FGI** | {macro_context.get('sentiment_fgi', 0.0):.2f} | **市場心理** ({macro_context.get('sentiment_fgi_level', 'N/A')}) |\n"
+        f"| **BTC Trend**| {btc_trend_str} | **BTC価格動向** (Altcoinバイアス) |\n"
+        f"| **FR Bias** | {macro_context.get('funding_rate', 0.0) * 100:.4f}% | **資金調達率の偏り** ({macro_context.get('funding_rate_bias', 'NEUTRAL')}) |\n"
+        f"| **FGI Proxy**| {fgi_proxy:.2f} | **市場心理** ({fgi_level}) |\n"
         f"----------------------------------\n"
     )
     
@@ -545,15 +552,26 @@ async def fetch_all_available_symbols(limit: int) -> List[str]:
         logging.error(f"利用可能なシンボルリストの取得に失敗: {e}。デフォルトリストを使用します。")
         return [s.replace('/', '-') for s in DEFAULT_SYMBOLS[:limit]]
 
+# ====================================================================================
+# MACRO CONTEXT FETCHING (v17.0.9 FIX APPLIED)
+# ====================================================================================
+
 async def fetch_global_macro_context() -> Dict[str, Any]:
-    """BTCの資金調達率、ドミナンス、FGIを取得する"""
+    """
+    BTCの価格トレンドと資金調達率を取得し、Altcoinのシグナルスコアリングにバイアスをかけるための
+    グローバルマクロコンテキストを構築する。(v17.0.9: BTCドミナンス SMA KeyError修正)
+    """
+    global SMA_LENGTH
+    
     context = {
         'funding_rate': 0.0,
         'funding_rate_bias': 'NEUTRAL',
-        'dominance_bias': 'NEUTRAL',
+        'btc_price_trend': 'Neutral', # SMAの上/下
+        'btc_price_rising': False,    # 1期間前から上昇しているか
+        'dominance_bias': 'NEUTRAL',  # BTC_BULL/ALT_BULL/NEUTRAL
         'dominance_bias_value': 0.00,
-        'sentiment_fgi': -0.10, # デフォルトをリスクオフに設定
-        'sentiment_fgi_level': 'Fear (Default)'
+        'sentiment_fgi_proxy': 0.0,   # FGIの代理値
+        'sentiment_fgi_level': 'Neutral'
     }
     
     # 1. 資金調達率 (Funding Rate)
@@ -569,14 +587,14 @@ async def fetch_global_macro_context() -> Dict[str, Any]:
         logging.info(f"BTC資金調達率: {fr*100:.4f}%")
     except Exception:
         logging.warning("BTC資金調達率の取得に失敗。")
-
-    # 2. BTCドミナンス (BTC Dominance - proxy by BTC-USD trend)
+        
+    # 2. BTC価格トレンド (Yahoo Finance/yfinanceからBTC-USDの4時間足データ)
     try:
         # yfinance (Yahoo Finance) から BTC-USD の過去7日間、4時間足データを取得
         dom_df = yf.download("BTC-USD", period="7d", interval="4h", progress=False)
         
-        if dom_df.empty:
-             raise ValueError("BTC-USDデータの取得が空でした。")
+        if dom_df.empty or len(dom_df) < SMA_LENGTH + 1:
+             raise ValueError("BTC-USDデータの取得が不完全または空でした。")
         
         # v17.0.8 FIX: yfinanceがMultiIndexを返す場合に 'tuple' object has no attribute 'lower' エラーになるのを回避
         if isinstance(dom_df.columns, pd.MultiIndex):
@@ -585,53 +603,75 @@ async def fetch_global_macro_context() -> Dict[str, Any]:
         dom_df.columns = [c.lower() for c in dom_df.columns]
         
         # Simple Moving Average (SMA) を計算
-        dom_df['SMA'] = ta.sma(dom_df['close'], length=SMA_LENGTH)
+        # v17.0.9 FIX: Column nameを明示的に 'sma' (lowercase) に設定
+        dom_df['sma'] = ta.sma(dom_df['close'], length=SMA_LENGTH) 
         
         # 不完全な行を削除
-        dom_df = dom_df.dropna(subset=['close', 'SMA'])
+        # v17.0.9 FIX: 削除対象の列名を 'sma' (lowercase) に修正
+        dom_df = dom_df.dropna(subset=['close', 'sma'])
 
         # 最新行と1つ前の行を取得
         last_row = dom_df.iloc[-1]
         prev_row = dom_df.iloc[-2]
 
         # 終値とSMAの比較によりドミナンス（価格）トレンドを評価
-        # BTC価格がSMAより上 (上昇トレンド) かつ 1期間前から上昇しているかを判定
         btc_price_above_sma = (last_row['close'] > last_row['sma'])
         btc_price_rising = (last_row['close'] > prev_row['close'])
         
+        context['btc_price_rising'] = btc_price_rising
+
         if btc_price_above_sma and btc_price_rising:
-            # 価格がSMAより上で、さらに上昇している -> BTC相場強気 (Altcoinは影響を受ける可能性)
+            context['btc_price_trend'] = "Strong_Uptrend" # SMAより上で上昇中
             context['dominance_bias'] = 'BTC_BULL'
-            context['dominance_bias_value'] = 1.00 # 仮の値
+            context['dominance_bias_value'] = 1.00
+        elif btc_price_above_sma:
+            context['btc_price_trend'] = "Uptrend"        # SMAより上で横ばい/微下げ
+            context['dominance_bias'] = 'BTC_BULL'
+            context['dominance_bias_value'] = 0.50
         elif not btc_price_above_sma and not btc_price_rising:
-            # 価格がSMAより下で、さらに下落している -> BTC相場弱気 (Altcoinに資金が流れる可能性)
+            context['btc_price_trend'] = "Strong_Downtrend" # SMAより下で下降中
             context['dominance_bias'] = 'ALT_BULL'
-            context['dominance_bias_value'] = -1.00 # 仮の値
+            context['dominance_bias_value'] = -1.00
+        elif not btc_price_above_sma:
+            context['btc_price_trend'] = "Downtrend"      # SMAより下で横ばい/微上げ
+            context['dominance_bias'] = 'ALT_BULL'
+            context['dominance_bias_value'] = -0.50
         else:
+            context['btc_price_trend'] = "Neutral"
             context['dominance_bias'] = 'NEUTRAL'
+            context['dominance_bias_value'] = 0.00
+            
+        logging.info(f"BTC価格トレンド: {context['btc_price_trend']} (最新終値: {last_row['close']:.2f}, SMA_{SMA_LENGTH}: {last_row['sma']:.2f})")
+        
+        # 3. Fear & Greed Index 代理値 (BTC価格トレンドを参考に代理値を設定)
+        if context['btc_price_trend'].startswith("Strong_Uptrend"):
+            context['sentiment_fgi_proxy'] = 0.6
+            context['sentiment_fgi_level'] = 'Greed'
+        elif context['btc_price_trend'].startswith("Uptrend"):
+            context['sentiment_fgi_proxy'] = 0.3
+            context['sentiment_fgi_level'] = 'Neutral/Greed'
+        elif context['btc_price_trend'].startswith("Downtrend"):
+            context['sentiment_fgi_proxy'] = -0.3
+            context['sentiment_fgi_level'] = 'Neutral/Fear'
+        elif context['btc_price_trend'].startswith("Strong_Downtrend"):
+            context['sentiment_fgi_proxy'] = -0.6
+            context['sentiment_fgi_level'] = 'Fear'
+        else:
+            context['sentiment_fgi_proxy'] = 0.0
+            context['sentiment_fgi_level'] = 'Neutral'
 
+    except ValueError as e:
+        logging.warning(f"BTC価格データの取得に失敗: {e}")
     except Exception as e:
-        # yfinanceはFutureWarningを出すことがあるが、ここでは無視し、AmbiguousErrorなどの致命的なエラーのみログに出す
         error_name = type(e).__name__
-        if error_name != 'FutureWarning':
-            logging.warning(f"BTCドミナンスデータの取得に失敗: {e}")
+        # v17.0.9: Key Errorの詳細をログに出力
+        if error_name == 'KeyError':
+             logging.warning(f"WARNING - BTCドミナンスデータの取得に失敗: '{e}' (v17.0.9: SMA列名不一致の可能性)")
+        else:
+             logging.warning(f"WARNING - BTCドミナンスデータの取得に失敗: {error_name} {e}")
+        pass # データ取得に失敗しても、他の処理は続行
 
-    # 3. Fear & Greed Index (FGI) - プロキシとして-0.10を使用
-    # NOTE: 実際のFGI APIを使用していないため、固定値。
-    context['sentiment_fgi'] = -0.10 # 仮の値 (Fear: 0.10 - Extreme Fear: -1.00)
-    context['sentiment_fgi_proxy'] = context['sentiment_fgi']
-    if context['sentiment_fgi'] > 0.60:
-        context['sentiment_fgi_level'] = 'Extreme Greed'
-    elif context['sentiment_fgi'] > 0.40:
-        context['sentiment_fgi_level'] = 'Greed'
-    elif context['sentiment_fgi'] > 0.00:
-        context['sentiment_fgi_level'] = 'Neutral'
-    elif context['sentiment_fgi'] > -0.40:
-        context['sentiment_fgi_level'] = 'Fear'
-    else:
-        context['sentiment_fgi_level'] = 'Extreme Fear'
-
-    logging.info(f"グローバルマクロコンテキスト: Dom Bias={context['dominance_bias_value']:.2f}, FR={context['funding_rate']*100:.4f}%, Sentiment={context['sentiment_fgi']:.2f}")
+    logging.info(f"グローバルマクロコンテキスト: Dom Bias={context['dominance_bias_value']:.2f}, FR={context['funding_rate']*100:.4f}%, Sentiment={context['sentiment_fgi_proxy']:.2f}")
     return context
 
 
@@ -936,7 +976,7 @@ def calculate_regime(last_row: pd.Series) -> str:
 
 
 def analyze_single_timeframe(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Dict:
-    """単一の時間足データに対して分析とスコアリングを実行する (v17.0.8)"""
+    """単一の時間足データに対して分析とスコアリングを実行する (v17.0.9)"""
     
     result = {
         'symbol': symbol,
@@ -963,7 +1003,7 @@ def analyze_single_timeframe(df: pd.DataFrame, symbol: str, timeframe: str, macr
     df = calculate_indicators(df)
     
     # 欠損値を含む行を削除し、最新の2行を取得
-    df_cleaned = df.iloc[-max(ATR_LENGTH, LONG_TERM_SMA_LENGTH, SMA_LENGTH):].dropna()
+    df_cleaned = df.iloc[-max(ATR_LENGTH, LONG_TERM_SMA_LENGTH):].dropna()
     if len(df_cleaned) < 2:
         result['side'] = 'DataShortage'
         return result
@@ -1143,7 +1183,7 @@ async def main_loop():
     while True:
         try:
             current_time_j = datetime.now(JST)
-            logging.info(f"🔄 Apex BOT v17.0.8 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
+            logging.info(f"🔄 Apex BOT v17.0.9 実行開始: {current_time_j.strftime('%Y-%m-%d %H:%M:%S JST')}") # バージョン更新
 
             # 1. シンボルリストの更新 (省略: 固定リストを使用)
             # CURRENT_MONITOR_SYMBOLS = await fetch_all_available_symbols(TOP_SYMBOL_LIMIT)
@@ -1260,7 +1300,7 @@ async def main_loop():
             LAST_SUCCESS_TIME = now
             LAST_SUCCESSFUL_MONITOR_SYMBOLS = CURRENT_MONITOR_SYMBOLS.copy()
             logging.info("====================================")
-            logging.info(f"✅ Apex BOT v17.0.8 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
+            logging.info(f"✅ Apex BOT v17.0.9 実行完了。次の実行まで {LOOP_INTERVAL} 秒待機します。") # バージョン更新
             logging.info(f"通知クールダウン中のシンボル: {list(TRADE_NOTIFIED_SYMBOLS.keys())}")
             
             await asyncio.sleep(LOOP_INTERVAL)
@@ -1283,11 +1323,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.8 - YF Dominance Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.9 - Dominance SMA Fix") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.8 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.9 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1301,7 +1341,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.8 - YF Dominance Fix", # バージョン更新
+        "bot_version": "v17.0.9 - Dominance SMA Fix", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1312,7 +1352,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.8)"}) # バージョン更新
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.9)"}) # バージョン更新
 
 # ====================================================================================
 # EXECUTION (If run directly)
