@@ -1,8 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.20 - FIX: Persistent Indicator Calculation Failure
-# - FIX: OHLCVデータ欠損行削除後、データ量が短すぎる場合に指標計算をスキップし、DataShortageとして処理することで、
-#        「ATR_14, BBL_20_2.0, BBU_20_2.0, VWAPがありません」というエラーログの大量発生を抑制し、安定性を向上させます。
-# - FIX: 最終統合シグナルの生成時に'rr_ratio'などのキー欠損によるKeyErrorが発生しないよう、.get()を使用し堅牢化 (v17.0.19の修正を維持)。
+# Apex BOT v17.0.21 - FIX: Persistent Indicator Calculation Failure (VWAP Fallback)
+# - FIX: pandas_taが指標カラム、特にVWAPを生成できない場合に、手動でVWAPを計算するフォールバックロジックを追加し、
+#        「ATR_14, BBL_20_2.0, BBU_20_2.0, VWAPがありません」というエラーログの大量発生をさらに抑制します。
+# - ADD: データクリーンアップ後のDataFrameの長さをログに出力するよう変更しました (DEBUGレベル)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -433,7 +433,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"==================================\n"
         f"| 🔍 **市場環境** | **{regime}** 相場 (ADX: {best_signal.get('tech_data', {}).get('adx', 0.0):.2f}) |\n"
-        f"| ⚙️ **BOT Ver** | **v17.0.20** - FIX_INDICATOR_FAILURE |\n" 
+        f"| ⚙️ **BOT Ver** | **v17.0.21** - VWAP_FALLBACK_FIX |\n" 
         f"==================================\n"
         f"\n<pre>※ Limit注文は、価格が指定水準に到達した際のみ約定します。DTS戦略では、価格が有利な方向に動いた場合、SLが自動的に追跡され利益を最大化します。</pre>"
     )
@@ -714,7 +714,7 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     
     # --- トレンド指標 ---
     df.ta.adx(length=14, append=True)
-    df.ta.vwap(append=True)
+    df.ta.vwap(append=True) # pandas_taによるVWAP計算
     
     # --- 長期トレンドの確認 (4h足のみ) ---
     if timeframe == '4h':
@@ -726,7 +726,21 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     # 出来高の移動平均線
     df['volume_ma'] = df['volume'].rolling(window=20).mean()
 
-    # --- 修正 v17.0.18: dropeaの前に必要なカラムが存在するか確認し、存在しない場合は空のDataFrameを返す ---
+    # --- ADD v17.0.21: VWAPの計算失敗時の手動フォールバック ---
+    # pandas_taがカラムを生成しなかった、または全てNaNだった場合
+    if 'VWAP' not in df.columns or df['VWAP'].isnull().all():
+        logging.warning(f"⚠️ {timeframe} VWAP計算失敗: pandas_taがカラムを生成できませんでした。手動フォールバックを試行します。")
+        # 手動 VWAP 計算 (PV = Price * Volume, CUSUM of PV / CUSUM of Volume)
+        if df['volume'].sum() > 0:
+            df['PV'] = (df['high'] + df['low'] + df['close']) / 3 * df['volume']
+            df['VWAP'] = df['PV'].cumsum() / df['volume'].cumsum()
+            df.drop(columns=['PV'], inplace=True, errors='ignore')
+        else:
+            # 出来高がゼロの場合は、VWAP計算は不可能と判断
+            logging.warning(f"⚠️ {timeframe} VWAP手動計算失敗: 出来高がゼロのため計算できません。")
+            df['VWAP'] = np.nan 
+    # ----------------------------------------------------------
+
     # 必要なコアインジケータのカラム名
     required_cols = ['close', 'RSI_14', 'MACDh_12_26_9', 'ADX_14', 'ATR_14', 'BBL_20_2.0', 'BBU_20_2.0', 'STOCHRSIk_14_14_3_3', 'VWAP', 'volume_ma']
     
@@ -1043,11 +1057,16 @@ async def analyze_symbol_async(symbol: str, macro_context: Dict) -> Dict:
             # ---------------------------------------------------------------------------------
 
             # --- FIX v17.0.20: データフレームが短すぎる場合の早期退出 ---
-            if len(df) < MINIMUM_DATAFRAME_LENGTH: 
-                logging.warning(f"⚠️ {symbol} [{timeframe}] クリーンアップ後のデータが短すぎます ({len(df)}行)。DataShortageとして処理します。")
+            current_len = len(df)
+            if current_len < MINIMUM_DATAFRAME_LENGTH: 
+                logging.warning(f"⚠️ {symbol} [{timeframe}] クリーンアップ後のデータが短すぎます ({current_len}行)。DataShortageとして処理します。")
                 combined_signals.append({'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage', 'score': 0.0, 'signals': [], 'rr_ratio': 0.0})
                 continue
-            # --------------------------------------------------------------------
+            
+            # --- ADD v17.0.21: Post-Cleanup DataFrame Length Log (for troubleshooting) ---
+            # NOTE: デフォルトのロギングレベルがINFOのため、このログを確認するにはロギング設定を変更する必要があります。
+            logging.debug(f"ℹ️ {symbol} [{timeframe}] クリーンアップ後のデータ長: {current_len}行。")
+            # ---------------------------------------------------------------------------------
 
             df = calculate_indicators(df, timeframe)
             
@@ -1181,11 +1200,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.20 - FIX_INDICATOR_FAILURE")
+app = FastAPI(title="Apex BOT API", version="v17.0.21 - VWAP_FALLBACK_FIX")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.0.20 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.0.21 Startup initializing...") 
     await initialize_ccxt_client()
     asyncio.create_task(main_loop())
 
@@ -1200,7 +1219,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.20 - FIX_INDICATOR_FAILURE",
+        "bot_version": "v17.0.21 - VWAP_FALLBACK_FIX",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1211,7 +1230,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running on v17.0.20."})
+    return JSONResponse(content={"message": "Apex BOT is running on v17.0.21."})
 
 if __name__ == "__main__":
     # 環境変数からポート番号を取得。デフォルトは8000
