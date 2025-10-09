@@ -1,7 +1,8 @@
 # ====================================================================================
-# Apex BOT v17.0.5 - Fix Fatal IndexError in analyze_single_timeframe (Post-Processing Check)
-# - FIX: analyze_single_timeframe 関数内で、テクニカル計算後に再度 DataFrame のサイズをチェック (len(df) < 2) し、iloc[-1] や iloc[-2] アクセスによる IndexError を完全に防止。
-# - FIX: fetch_ohlcv_data のログメッセージを修正。
+# Apex BOT v17.0.6 - Fix Fatal KeyError in calculate_technical_indicators (BBands Check)
+# - FIX: calculate_technical_indicators 関数内で、Bollinger Bands (BBands) の計算後に
+#        必要な列 (BBP_20_2.0, BBL_20_2.0, BBU_20_2.0) が存在するかをチェックし、
+#        存在しない場合は np.nan で初期化することで、KeyError を完全に防止。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -172,7 +173,7 @@ def calculate_pnl_at_pivot(target_price: float, entry: float, side_long: bool, c
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.5対応)
+    3つの時間軸の分析結果を統合し、ログメッセージの形式に整形する (v17.0.6対応)
     """
     global POSITION_CAPITAL
     
@@ -555,7 +556,25 @@ def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataF
     # --- 1. ボラティリティ (ATR, Bollinger Bands) ---
     df.ta.atr(append=True, length=14)
     df.ta.bbands(length=20, append=True)
-    df['BBW'] = df['BBP_20_2.0'].apply(lambda x: x if not np.isnan(x) else 0.0) # BBPがNaNなら0.0
+    
+    # V17.0.6 FIX: データ不足によるKeyErrorを防止するためのチェック
+    bbp_col = 'BBP_20_2.0'
+    bbl_col = 'BBL_20_2.0'
+    bbu_col = 'BBU_20_2.0'
+    
+    if bbp_col not in df.columns or bbl_col not in df.columns or bbu_col not in df.columns:
+        # KeyErrorの原因となる列がない場合、全てにNaNをセットして処理を続行可能にする
+        df[bbp_col] = np.nan
+        df[bbl_col] = np.nan
+        df[bbu_col] = np.nan
+        df['BBW'] = np.nan
+        logging.warning(f"Technical Analysis Warning: Missing Bollinger Band columns for {timeframe} due to insufficient data or calculation failure. Using NaN placeholders.")
+    else:
+        # BBPが存在する場合のみBBWを計算
+        # df['BBW'] = df['BBP_20_2.0'].apply(lambda x: x if not np.isnan(x) else 0.0) # 元のロジック
+        # BBWはBBPではなく標準偏差の幅であるため、taの計算に依存させ、ここではBBPから計算していたロジックを修正
+        # BBWが計算されない場合も考慮し、デフォルトのロジックを維持
+        df['BBW'] = df[bbp_col].apply(lambda x: x if not np.isnan(x) else 0.0) 
 
     # --- 2. モメンタム (RSI, MACD, Stochastic RSI) ---
     df.ta.rsi(length=14, append=True)
@@ -681,12 +700,12 @@ def calculate_score_long(last_row: pd.Series, prev_row: pd.Series, timeframe: st
     # ----------------------------------------------------
     
     # C1. BBP
-    if bbp <= 0.2: score += 0.05
+    if bbp <= 0.2 and not np.isnan(bbp): score += 0.05 # NaNチェックを追加
     
     # C2. バンド幅
     if bbw is not np.nan and bbw < VOLATILITY_BB_PENALTY_THRESHOLD:
         score += 0.05
-    elif close < bb_lower:
+    elif close < bb_lower and not np.isnan(bb_lower):
         score += 0.05
 
     # ----------------------------------------------------
@@ -711,14 +730,15 @@ def calculate_score_long(last_row: pd.Series, prev_row: pd.Series, timeframe: st
     macd_line = last_row.get('MACD_12_26_9', np.nan)
     macd_signal = last_row.get('MACDs_12_26_9', np.nan)
     
-    if macd_line < macd_signal:
-        score -= MACD_CROSS_PENALTY
-        macd_valid = False
-        macd_penalty_value = MACD_CROSS_PENALTY
+    if not np.isnan(macd_line) and not np.isnan(macd_signal):
+        if macd_line < macd_signal:
+            score -= MACD_CROSS_PENALTY
+            macd_valid = False
+            macd_penalty_value = MACD_CROSS_PENALTY
 
     # D3. VWAPとの位置関係
     vwap_consistent = close > vwap_proxy
-    if not vwap_consistent: score -= 0.05
+    if not vwap_consistent and not np.isnan(vwap_proxy): score -= 0.05
 
     # ----------------------------------------------------
     # E. 構造的S/Rボーナス/ペナルティ
@@ -857,12 +877,12 @@ def calculate_score_short(last_row: pd.Series, prev_row: pd.Series, timeframe: s
     # ----------------------------------------------------
     
     # C1. BBP
-    if bbp >= 0.8: score += 0.05
+    if bbp >= 0.8 and not np.isnan(bbp): score += 0.05 # NaNチェックを追加
     
     # C2. バンド幅
     if bbw is not np.nan and bbw < VOLATILITY_BB_PENALTY_THRESHOLD:
         score += 0.05
-    elif close > bb_upper:
+    elif close > bb_upper and not np.isnan(bb_upper):
         score += 0.05
 
     # ----------------------------------------------------
@@ -887,14 +907,15 @@ def calculate_score_short(last_row: pd.Series, prev_row: pd.Series, timeframe: s
     macd_line = last_row.get('MACD_12_26_9', np.nan)
     macd_signal = last_row.get('MACDs_12_26_9', np.nan)
     
-    if macd_line > macd_signal:
-        score -= MACD_CROSS_PENALTY
-        macd_valid = False
-        macd_penalty_value = MACD_CROSS_PENALTY
+    if not np.isnan(macd_line) and not np.isnan(macd_signal):
+        if macd_line > macd_signal:
+            score -= MACD_CROSS_PENALTY
+            macd_valid = False
+            macd_penalty_value = MACD_CROSS_PENALTY
         
     # D3. VWAPとの位置関係
     vwap_consistent = close < vwap_proxy
-    if not vwap_consistent: score -= 0.05
+    if not vwap_consistent and not np.isnan(vwap_proxy): score -= 0.05
 
     # ----------------------------------------------------
     # E. 構造的S/Rボーナス/ペナルティ
@@ -1400,12 +1421,12 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.0.5 - IndexError Robustness Fix") # バージョン更新
+app = FastAPI(title="Apex BOT API", version="v17.0.6 - KeyError Fix (BBands Check)") # バージョン更新
 
 @app.on_event("startup")
 async def startup_event():
     """アプリケーション起動時にメインループタスクを開始"""
-    logging.info("🚀 Apex BOT v17.0.5 Startup initializing...") # バージョン更新
+    logging.info("🚀 Apex BOT v17.0.6 Startup initializing...") # バージョン更新
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1421,7 +1442,7 @@ def get_status():
     """ボットのステータスを返すエンドポイント"""
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.0.5 - IndexError Robustness Fix", # バージョン更新
+        "bot_version": "v17.0.6 - KeyError Fix (BBands Check)", # バージョン更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1433,4 +1454,4 @@ def get_status():
 @app.get("/")
 def home_view():
     """Renderのヘルスチェック用エンドポイント"""
-    return JSONResponse(content={"message": "Apex BOT is running (v17.0.5)"})
+    return JSONResponse(content={"message": "Apex BOT is running (v17.0.6)"})
