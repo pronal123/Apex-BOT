@@ -1,7 +1,10 @@
 # ====================================================================================
-# Apex BOT v18.0.0 - Trend/Formation Enhanced (EMA Cross, KC, Candlestick Pattern)
+# Apex BOT v18.0.1 - Trend/Formation Enhanced (Candlestick Pattern Fix)
 # 
-# 強化ポイント:
+# v18.0.0の修正点:
+# - 【バグ修正】Candlestick Pattern検出で発生していた `module 'pandas_ta' has no attribute 'cdl_engulfing'` エラーを修正。
+# - Candlestick Pattern関数 (cdl_engulfing, cdl_hammer, cdl_shootingstar) の呼び出しを、`df.ta.cdl_XXX(append=True)` 形式に変更し、ブール値にマップすることで安定性を向上。
+# 強化ポイント: (v18.0.0から継続)
 # 1. 【トレンド分析強化】短期/中期EMA (8/20) クロスを明確なスコアリング要因として追加。
 # 2. 【トレンド/レンジ分析強化】Keltner Channel (KC) を導入し、トレンドレジーム（強いトレンド、レンジ）に応じてスコアにバイアス。
 # 3. 【フォーメーション分析強化】重要レベル付近でのローソク足反転パターン（エンガルフィング、ハンマーなど）を検出。
@@ -174,7 +177,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    【v18.0.0 改良版】トレンド/フォーメーション分析情報を強化した通知メッセージを生成する
+    【v18.0.1 改良版】トレンド/フォーメーション分析情報を強化した通知メッセージを生成する
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -323,7 +326,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ Limit注文は、指定水準到達時のみ約定します。DTS戦略により、SLは自動的に追跡され利益を最大化します。</pre>"
-        f"<i>Bot Ver: v18.0.0 (Trend/Formation Enhanced)</i>"
+        f"<i>Bot Ver: v18.0.1 (Trend/Formation Enhanced)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -331,7 +334,6 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 # ====================================================================================
 # CCXT & DATA ACQUISITION
-# (変更なし)
 # ====================================================================================
 
 async def initialize_ccxt_client():
@@ -646,7 +648,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v18.0.0)
+    単一の時間軸で分析とシグナル生成を行う関数 (v18.0.1)
     """
     
     # 1. データ取得とFunding Rate/Order Book取得
@@ -739,11 +741,18 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df['ema_fast'] = ta.ema(df['close'], length=SHORT_TERM_EMA_FAST)
         df['ema_slow'] = ta.ema(df['close'], length=SHORT_TERM_EMA_SLOW)
         df.ta.kc(atr_length=20, atr_multiplier=KC_ATR_MULTIPLIER, append=True)
-        # Simplified Candlestick Pattern Detection (Engulfing & Hammer/Shooting Star)
-        df['engulfing_bull'] = ta.cdl_engulfing(df['open'], df['high'], df['low'], df['close'], asbool=True) > 0
-        df['engulfing_bear'] = ta.cdl_engulfing(df['open'], df['high'], df['low'], df['close'], asbool=True) < 0
-        df['hammer_bull'] = ta.cdl_hammer(df['open'], df['high'], df['low'], df['close'], asbool=True)
-        df['shooting_star_bear'] = ta.cdl_shootingstar(df['open'], df['high'], df['low'], df['close'], asbool=True)
+        
+        # 💡 v18.0.1 修正: ローソク足パターンの検出 (pandas_taの呼び出し方法を修正)
+        # Candlestick Pattern Detection
+        df.ta.cdl_engulfing(append=True)
+        df.ta.cdl_hammer(append=True)
+        df.ta.cdl_shootingstar(append=True)
+        
+        # 結果の数値 (例: 100, -100) をブール値に変換 (NaNはFalseとして扱う)
+        df['engulfing_bull'] = (df.get('CDL_ENGULFING', pd.Series(0, index=df.index)) > 0).fillna(False)
+        df['engulfing_bear'] = (df.get('CDL_ENGULFING', pd.Series(0, index=df.index)) < 0).fillna(False)
+        df['hammer_bull'] = (df.get('CDL_HAMMER', pd.Series(0, index=df.index)) > 0).fillna(False)
+        df['shooting_star_bear'] = (df.get('CDL_SHOOTINGSTAR', pd.Series(0, index=df.index)) < 0).fillna(False)
         
         # Pivot Pointの計算 (Structural Analysis)
         pivots = calculate_fib_pivot(df)
@@ -754,6 +763,9 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         if kc_lower_col in df.columns: required_cols.append(kc_lower_col)
         if STOCHRSI_K in df.columns: required_cols.append(STOCHRSI_K)
         if STOCHRSI_D in df.columns: required_cols.append(STOCHRSI_D)
+        
+        # ローソク足パターンの生成カラムはNaNを埋めているため、dropnaから除外
+        
         df.dropna(subset=required_cols, inplace=True)
         
         dc_cols_present = 'DCL_20' in df.columns and 'DCU_20' in df.columns
@@ -868,7 +880,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         
         score = min(1.0, base_score) 
         
-        # 3. **v18.0.0 トレンド/フォーメーション分析強化**
+        # 3. **v18.0.1 トレンド/フォーメーション分析強化 (修正済み)**
         
         # P. 💡【トレンド分析強化】EMA 8/20 クロス (0.08)
         ema_fast_prev = df['ema_fast'].iloc[-2]
@@ -901,11 +913,17 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         is_near_pivot = structural_pivot_bonus > 0 
         
         if is_near_pivot:
-            if df['engulfing_bull'].iloc[-1] or df['hammer_bull'].iloc[-1]:
+            # 💡 v18.0.1: 正しくDataFrameからパターンを取得
+            engulfing_bull = df['engulfing_bull'].iloc[-1]
+            hammer_bull = df['hammer_bull'].iloc[-1]
+            engulfing_bear = df['engulfing_bear'].iloc[-1]
+            shooting_star_bear = df['shooting_star_bear'].iloc[-1]
+            
+            if engulfing_bull or hammer_bull:
                 if side == "ロング":
                     pattern_bonus = CANDLESTICK_PATTERN_BONUS
                     pattern_match = "Bullish Pattern (Engulfing/Hammer)"
-            elif df['engulfing_bear'].iloc[-1] or df['shooting_star_bear'].iloc[-1]:
+            elif engulfing_bear or shooting_star_bear:
                 if side == "ショート":
                     pattern_bonus = CANDLESTICK_PATTERN_BONUS
                     pattern_match = "Bearish Pattern (Engulfing/Shooting Star)"
@@ -1255,7 +1273,6 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 
 # ====================================================================================
 # TASK SCHEDULER & MAIN LOOP
-# (変更なし)
 # ====================================================================================
 
 async def main_loop():
@@ -1404,14 +1421,13 @@ async def main_loop():
 
 # ====================================================================================
 # FASTAPI SETUP
-# (バージョン更新)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v18.0.0 - Trend/Formation Enhanced")
+app = FastAPI(title="Apex BOT API", version="v18.0.1 - Trend/Formation Enhanced (Candlestick Pattern Fix)")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v18.0.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v18.0.1 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1425,7 +1441,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v18.0.0 - Trend/Formation Enhanced",
+        "bot_version": "v18.0.1 - Trend/Formation Enhanced (Candlestick Pattern Fix)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1436,7 +1452,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v18.0.0, Trend/Formation Enhanced)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v18.0.1, Trend/Formation Enhanced)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
