@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v17.1.0 - Smart Money & Liquidity Filter (Clarity Enhanced Notification)
+# Apex BOT v17.1.1 - Market Price Display Enhanced
 # 
 # 強化ポイント:
 # 1. エリオット波動の概念に基づき、フィボナッチ・ピボット近接度を分析に導入
 # 2. 出来高分析を強化し、On-Balance Volume (OBV) によるモメンタム確証を追加
 # 3. 板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入
-# 4. 他トレーダー参考指標としてCCIを強化、累積デルタ（CD）の proxy として利用
-# 5. Telegram通知メッセージの可読性を大幅に向上
-# 6. Structural SL使用時に 0.5 * ATR のバッファを追加し、安全性を向上
+# 4. Telegram通知メッセージに「現在単価 (Market Price)」を追加し、視認性を向上
+# 5. Structural SL使用時に 0.5 * ATR のバッファを追加し、安全性を向上
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -161,10 +160,10 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    【v17.1.0 改良版】可読性を最優先した通知メッセージを生成する
+    【v17.1.1 改良版】可読性・現在単価表示を最優先した通知メッセージを生成する
     """
     
-    valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
+    valid_signals = [s for s in signals if s.get('side') not in ["DataShortorage", "ExchangeError", "Neutral"]]
     if not valid_signals:
         return "" 
         
@@ -225,6 +224,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"{rank_emoji} <b>Apex Signal - Rank {rank}</b> {rank_emoji}\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"{display_symbol} | {direction_emoji} {direction_text}\n"
+        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+        f"  - <b>現在単価 (Market Price)</b>: <code>${format_price_utility(price, symbol)}</code>\n" 
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
     )
 
@@ -288,7 +289,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ Limit注文は、指定水準到達時のみ約定します。DTS戦略により、SLは自動的に追跡され利益を最大化します。</pre>"
-        f"<i>Bot Ver: v17.1.0 (Clarity Enhanced)</i>"
+        f"<i>Bot Ver: v17.1.1 (Market Price Enhanced)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -606,7 +607,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.0)
+    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.1)
     """
     
     # 1. データ取得とFunding Rate/Order Book取得
@@ -1271,11 +1272,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.1.0 - Clarity Enhanced")
+app = FastAPI(title="Apex BOT API", version="v17.1.1 - Market Price Enhanced")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.1.0 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.1.1 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1289,7 +1290,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.1.0 - Clarity Enhanced",
+        "bot_version": "v17.1.1 - Market Price Enhanced",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1300,7 +1301,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.1.0, Clarity Enhanced)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v17.1.1, Market Price Enhanced)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
