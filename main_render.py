@@ -1,12 +1,14 @@
 # ====================================================================================
-# Apex BOT v17.1.1 - Market Price Display Enhanced
+# Apex BOT v17.1.2 - MA/Fundamentals/FGI Enhanced
 # 
 # 強化ポイント:
-# 1. エリオット波動の概念に基づき、フィボナッチ・ピボット近接度を分析に導入
-# 2. 出来高分析を強化し、On-Balance Volume (OBV) によるモメンタム確証を追加
-# 3. 板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入
-# 4. Telegram通知メッセージに「現在単価 (Market Price)」を追加し、視認性を向上
-# 5. Structural SL使用時に 0.5 * ATR のバッファを追加し、安全性を向上
+# 1. 【移動平均線】SMA 50 (4h) を使用し、長期トレンド逆行時に強力なペナルティ (-0.20) を適用。
+# 2. 【ファンダメンタルズ/流動性】板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入。
+# 3. 【ファンダメンタルズ/出来高】OBV (On-Balance Volume) によるモメンタム確証を追加。
+# 4. 【恐怖指数】FGI (Fear & Greed Index) プロキシを導入し、市場センチメントをスコアに反映。
+# 5. エリオット波動の概念に基づき、フィボナッチ・ピボット近接度を分析に導入。
+# 6. Telegram通知メッセージに「現在単価 (Market Price)」を追加。
+# 7. Structural SL使用時に 0.5 * ATR のバッファを追加し、安全性を向上。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -61,7 +63,9 @@ TOP_SIGNAL_COUNT = 3
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} 
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 
 
+# 💡【移動平均線】長期SMAの長さ (4h足で使用)
 LONG_TERM_SMA_LENGTH = 50           
+# 💡【移動平均線】長期トレンド逆行時のペナルティ
 LONG_TERM_REVERSAL_PENALTY = 0.20   
 MACD_CROSS_PENALTY = 0.15           
 
@@ -76,10 +80,12 @@ FUNDING_RATE_BONUS_PENALTY = 0.08
 # Dominance Bias Filter Parameters
 DOMINANCE_BIAS_BONUS_PENALTY = 0.05 # BTCドミナンスの偏りによる最大ボーナス/ペナルティ点
 
-# Liquidity/Smart Money Filter Parameters
+# 💡【ファンダメンタルズ】流動性/スマートマネーフィルター Parameters
 LIQUIDITY_BONUS_POINT = 0.06        # 板の厚みによるボーナス
 ORDER_BOOK_DEPTH_LEVELS = 5         # オーダーブックのチェック深度
 OBV_MOMENTUM_BONUS = 0.04           # OBVトレンド一致によるボーナス
+# 💡【恐怖指数】FGIプロキシボーナス (強いリスクオン/オフの場合)
+FGI_PROXY_BONUS_MAX = 0.07          
 
 # スコアリングロジック用の定数 
 RSI_OVERSOLD = 30
@@ -160,10 +166,10 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    【v17.1.1 改良版】可読性・現在単価表示を最優先した通知メッセージを生成する
+    【v17.1.2 改良版】現在単価、長期トレンド、ファンダ/恐怖指数情報を追加した通知メッセージを生成する
     """
     
-    valid_signals = [s for s in signals if s.get('side') not in ["DataShortorage", "ExchangeError", "Neutral"]]
+    valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
     if not valid_signals:
         return "" 
         
@@ -219,7 +225,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # 2. メッセージの組み立て
     # ----------------------------------------------------
 
-    # --- ヘッダー部 ---
+    # --- ヘッダー部 (現在単価を含む) ---
     header = (
         f"{rank_emoji} <b>Apex Signal - Rank {rank}</b> {rank_emoji}\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
@@ -249,6 +255,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # --- 分析サマリー部 ---
     tech_data = best_signal.get('tech_data', {})
     regime = "トレンド相場" if tech_data.get('adx', 0.0) >= ADX_TREND_THRESHOLD else "レンジ相場"
+    fgi_score = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
+    fgi_sentiment = "リスクオン" if fgi_score > 0 else ("リスクオフ" if fgi_score < 0 else "中立")
     
     summary = (
         f"<b>💡 分析サマリー</b>\n"
@@ -257,28 +265,36 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"  - <b>予測勝率</b>: <code>約 {win_rate:.1f}%</code>\n"
         f"  - <b>時間軸 (メイン)</b>: <code>{timeframe}</code>\n"
         f"  - <b>決済までの目安</b>: {time_to_tp}\n"
-        f"  - <b>市場の状況</b>: {regime} (ADX: {tech_data.get('adx', 0.0):.1f})\n\n"
+        f"  - <b>市場の状況</b>: {regime} (ADX: {tech_data.get('adx', 0.0):.1f})\n"
+        f"  - <b>恐怖指数 (FGI) プロキシ</b>: {fgi_sentiment} ({abs(fgi_score*100):.1f}点影響)\n\n" # 恐怖指数情報を追加
     )
 
     # --- 分析の根拠部 (チェックリスト形式) ---
     long_term_trend_ok = not tech_data.get('long_term_reversal_penalty', False)
     momentum_ok = tech_data.get('macd_cross_valid', True) and not tech_data.get('stoch_filter_penalty', 0) > 0
     structure_ok = tech_data.get('structural_pivot_bonus', 0.0) > 0
-    volume_ok = tech_data.get('volume_confirmation_bonus', 0.0) > 0 or tech_data.get('obv_momentum_bonus_value', 0.0) > 0
+    volume_confirm_ok = tech_data.get('volume_confirmation_bonus', 0.0) > 0
+    obv_confirm_ok = tech_data.get('obv_momentum_bonus_value', 0.0) > 0
     liquidity_ok = tech_data.get('liquidity_bonus_value', 0.0) > 0
     funding_rate_ok = tech_data.get('funding_rate_bonus_value', 0.0) > 0
     dominance_ok = tech_data.get('dominance_bias_bonus_value', 0.0) > 0
     fib_level = tech_data.get('fib_proximity_level', 'N/A')
     
+    # 💡 長期トレンドの表示を強化
+    lt_trend_str = tech_data.get('long_term_trend', 'N/A')
+    lt_trend_check_text = f"長期 ({lt_trend_str}, SMA {LONG_TERM_SMA_LENGTH}) トレンドと一致"
+    lt_trend_check_text_penalty = f"長期トレンド ({lt_trend_str}) と逆行 ({tech_data.get('long_term_reversal_penalty_value', 0.0)*100:.1f}点ペナルティ)"
+    
+    
     analysis_details = (
         f"<b>🔍 分析の根拠</b>\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - <b>トレンド/勢い</b>: \n"
-        f"    {'✅' if long_term_trend_ok else '⚠️'} 長期 ({tech_data.get('long_term_trend', 'N/A')}) トレンドと一致\n"
+        f"    {'✅' if long_term_trend_ok else '❌'} {'<b>' if not long_term_trend_ok else ''}{lt_trend_check_text if long_term_trend_ok else lt_trend_check_text_penalty}{'</b>' if not long_term_trend_ok else ''}\n" # 長期トレンド表示の強化
         f"    {'✅' if momentum_ok else '⚠️'} 短期モメンタム加速 (RSI/MACD/CCI)\n"
-        f"  - <b>価格構造/出来高</b>: \n"
+        f"  - <b>価格構造/ファンダ</b>: \n"
         f"    {'✅' if structure_ok else '❌'} 重要支持/抵抗線に近接 ({fib_level}確認)\n"
-        f"    {'✅' if volume_ok else '❌'} 出来高/OBVの裏付け\n"
+        f"    {'✅' if (volume_confirm_ok or obv_confirm_ok) else '❌'} 出来高/OBVの裏付け\n"
         f"    {'✅' if liquidity_ok else '❌'} 板の厚み (流動性) 優位\n"
         f"  - <b>市場心理/その他</b>: \n"
         f"    {'✅' if funding_rate_ok else '❌'} 資金調達率が有利\n"
@@ -289,7 +305,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ Limit注文は、指定水準到達時のみ約定します。DTS戦略により、SLは自動的に追跡され利益を最大化します。</pre>"
-        f"<i>Bot Ver: v17.1.1 (Market Price Enhanced)</i>"
+        f"<i>Bot Ver: v17.1.2 (MA/Funda/FGI Enhanced)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -422,6 +438,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
     try:
         limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 100)
+        # 💡 instTypeをSWAPで取得
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit, params={'instType': 'SWAP'})
         
         if not ohlcv or len(ohlcv) < 30: 
@@ -433,6 +450,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
         return [], "ExchangeError", client_name
     except ccxt.ExchangeError as e:
         if 'market symbol' in str(e) or 'not found' in str(e):
+             # スワップが見つからない場合は、現物 (SPOT) を試す
              spot_symbol = symbol.replace('-', '/')
              try:
                  ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(spot_symbol, timeframe, limit=limit, params={'instType': 'SPOT'})
@@ -450,7 +468,7 @@ async def fetch_ohlcv_with_fallback(client_name: str, symbol: str, timeframe: st
 
 async def get_crypto_macro_context() -> Dict:
     """
-    マクロ市場コンテキストを取得 (FGI Proxy, BTC/ETH Trend, Dominance Bias)
+    💡【恐怖指数/移動平均線】マクロ市場コンテキストを取得 (FGI Proxy, BTC/ETH Trend, Dominance Bias)
     """
     
     # 1. BTC/USDTとETH/USDTの長期トレンドと直近の価格変化率を取得 (4h足)
@@ -468,7 +486,8 @@ async def get_crypto_macro_context() -> Dict:
     if status_btc == "Success":
         df_btc = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_btc['close'] = pd.to_numeric(df_btc['close'], errors='coerce').astype('float64')
-        df_btc['sma'] = ta.sma(df_btc['close'], length=LONG_TERM_SMA_LENGTH)
+        # 💡 SMA 50で長期トレンドを計算
+        df_btc['sma'] = ta.sma(df_btc['close'], length=LONG_TERM_SMA_LENGTH) 
         df_btc.dropna(subset=['sma'], inplace=True)
         if not df_btc.empty:
             if df_btc['close'].iloc[-1] > df_btc['sma'].iloc[-1]: btc_trend = 1 # Long
@@ -479,6 +498,7 @@ async def get_crypto_macro_context() -> Dict:
     if status_eth == "Success":
         df_eth = pd.DataFrame(eth_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_eth['close'] = pd.to_numeric(df_eth['close'], errors='coerce').astype('float64')
+        # 💡 SMA 50で長期トレンドを計算
         df_eth['sma'] = ta.sma(df_eth['close'], length=LONG_TERM_SMA_LENGTH)
         df_eth.dropna(subset=['sma'], inplace=True)
         if not df_eth.empty:
@@ -487,12 +507,12 @@ async def get_crypto_macro_context() -> Dict:
             if len(df_eth) >= 2:
                 eth_change = (df_eth['close'].iloc[-1] - df_eth['close'].iloc[-2]) / df_eth['close'].iloc[-2]
 
-    # 2. FGI Proxyの計算 (恐怖指数/市場センチメント)
+    # 2. 💡【恐怖指数】FGI Proxyの計算 (恐怖指数/市場センチメント)
     sentiment_score = 0.0
     if btc_trend == 1 and eth_trend == 1:
-        sentiment_score = 0.07 # 強いリスクオン (ボーナス強化)
+        sentiment_score = FGI_PROXY_BONUS_MAX # 強いリスクオン (ボーナス強化)
     elif btc_trend == -1 and eth_trend == -1:
-        sentiment_score = -0.07 # 強いリスクオフ (恐怖) (ボーナス強化)
+        sentiment_score = -FGI_PROXY_BONUS_MAX # 強いリスクオフ (恐怖) (ボーナス強化)
         
     # 3. BTC Dominance Proxyの計算
     dominance_trend = "Neutral"
@@ -607,7 +627,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.1)
+    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.2)
     """
     
     # 1. データ取得とFunding Rate/Order Book取得
@@ -618,6 +638,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     if timeframe == '1h': 
         funding_rate_val = await fetch_funding_rate(symbol)
+        # 💡 オーダーブック深度を取得
         order_book_data = await fetch_order_book_depth(symbol)
     
     
@@ -686,6 +707,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.ppo(append=True) 
         df.ta.donchian(length=20, append=True) 
         df.ta.stochrsi(append=True)
+        # 💡 OBVを追加
         df['obv'] = ta.obv(df['close'], df['volume']) 
         
         # Pivot Pointの計算 (Structural Analysis)
@@ -729,7 +751,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             dc_low_val = df['DCL_20'].iloc[-1]     
             dc_high_val = df['DCU_20'].iloc[-1]
         
-        # A-H スコアリングロジックの実行
+        # A-I スコアリングロジックの実行 (テクニカル)
+        
         # A. MACDに基づく方向性 (0.15)
         if macd_hist_val > 0 and macd_hist_val > macd_hist_val_prev:
             long_score += 0.15 
@@ -789,7 +812,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         elif macd_hist_val < 0 and ppo_hist_val < 0 and rsi_val < 50:
              short_score += 0.05
              
-        # I. CCIに基づくモメンタム加速ボーナス (0.04) (他トレーダー参考指標を意識)
+        # I. CCIに基づくモメンタム加速ボーナス (0.04)
         if cci_val > CCI_OVERBOUGHT and cci_val > df['cci'].iloc[-2]:
              long_score += 0.04
         elif cci_val < CCI_OVERSOLD and cci_val < df['cci'].iloc[-2]:
@@ -807,6 +830,8 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             base_score = BASE_SCORE
         
         score = min(1.0, base_score) 
+
+        # 3. **ファンダメンタルズ/マクロバイアスフィルターの適用**
 
         # J. 資金調達率 (Funding Rate) バイアスフィルター (+/- 0.08点)
         funding_rate_bonus = 0.0
@@ -830,7 +855,6 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         dominance_trend = macro_context.get('dominance_trend', 'Neutral')
         dominance_bias_score_val = macro_context.get('dominance_bias_score', 0.0)
         
-        # BTCシンボル自体にはドミナンスバイアスは適用しない
         if symbol != "BTC-USDT" and dominance_trend != "Neutral":
             
             if dominance_trend == "Increasing": 
@@ -848,7 +872,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = max(BASE_SCORE, min(1.0, score + dominance_bonus))
 
 
-        # L. 市場センチメント (FGI Proxy) の適用 (+/-0.07点)
+        # L. 💡【恐怖指数】市場センチメント (FGI Proxy) の適用 (+/-0.07点)
         sentiment_bonus = macro_context.get('sentiment_fgi_proxy', 0.0)
         if side == "ロング" and sentiment_bonus > 0:
             score = min(1.0, score + sentiment_bonus)
@@ -862,7 +886,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         # N. 出来高/流動性確証 & OBV (Max 0.12 + 0.04)
         volume_confirmation_bonus = 0.0
         
-        # 出来高/流動性確証
+        # 出来高ブレイクアウト確証
         if volume_ratio >= VOLUME_CONFIRMATION_MULTIPLIER: 
             if dc_cols_present and (is_breaking_high or is_breaking_low):
                 volume_confirmation_bonus += 0.06
@@ -871,7 +895,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                 
             score = min(1.0, score + volume_confirmation_bonus)
             
-        # OBVモメンタム一致のボーナス
+        # 💡 OBVモメンタム一致のボーナス
         obv_trend_match = "N/A"
         obv_momentum_bonus = 0.0
         if obv_val > obv_prev_val and side == "ロング":
@@ -883,7 +907,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
              
         score = min(1.0, score + obv_momentum_bonus)
         
-        # O. 流動性/スマートマネーフィルター (板の厚み) (1h足のみで適用)
+        # O. 💡【ファンダメンタルズ】流動性/スマートマネーフィルター (板の厚み) (1h足のみで適用)
         liquidity_bonus = 0.0
         ask_bid_ratio_val = 1.0
         
@@ -902,16 +926,19 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = min(1.0, score + liquidity_bonus)
         
         
-        # 3. 4hトレンドフィルターの適用 (15m, 1hのみ) 
+        # 4. **フィルターによるペナルティ適用**
+        
+        # P. 💡【移動平均線】4hトレンドフィルターの適用 (15m, 1hのみ) 
         penalty_value_lt = 0.0
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
+                # 長期トレンド逆行時に強力なペナルティを適用
                 score = max(BASE_SCORE, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
                 penalty_value_lt = LONG_TERM_REVERSAL_PENALTY
         
-        # 4. MACDクロス確認と減点 (モメンタム反転チェック)
+        # Q. MACDクロス確認と減点 (モメンタム反転チェック)
         macd_valid = True
         penalty_value_macd = 0.0
         if timeframe in ['15m', '1h']:
@@ -1022,20 +1049,20 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "volume_confirmation_bonus": volume_confirmation_bonus,
             "current_volume": current_volume,
             "average_volume": average_volume,
-            "sentiment_fgi_proxy_bonus": sentiment_bonus,
+            "sentiment_fgi_proxy_bonus": sentiment_bonus, # 💡 FGIプロキシボーナス値
             "structural_pivot_bonus": structural_pivot_bonus,
             "volume_ratio": volume_ratio,
             "structural_sl_used": structural_sl_used, 
-            "long_term_reversal_penalty_value": penalty_value_lt,
+            "long_term_reversal_penalty_value": penalty_value_lt, # 💡 長期トレンドペナルティ値
             "macd_cross_penalty_value": penalty_value_macd,
             "funding_rate_value": funding_rate_val,
             "funding_rate_bonus_value": funding_rate_bonus,
             "dominance_trend": dominance_trend,
             "dominance_bias_bonus_value": dominance_bonus,
-            "liquidity_bonus_value": liquidity_bonus, 
+            "liquidity_bonus_value": liquidity_bonus, # 💡 流動性ボーナス値
             "ask_bid_ratio": ask_bid_ratio_val, 
             "obv_trend_match": obv_trend_match, 
-            "obv_momentum_bonus_value": obv_momentum_bonus, 
+            "obv_momentum_bonus_value": obv_momentum_bonus, # 💡 OBVボーナス値
             "fib_proximity_level": fib_level, 
             "dynamic_exit_strategy": "DTS" 
         }
@@ -1072,7 +1099,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
 async def generate_integrated_signal(symbol: str, macro_context: Dict, client_name: str) -> List[Optional[Dict]]:
     
-    # 0. 4hトレンドの事前計算
+    # 0. 💡【移動平均線】4hトレンドの事前計算
     long_term_trend = 'Neutral'
     ohlcv_4h, status_4h, _ = await fetch_ohlcv_with_fallback(client_name, symbol, '4h')
     df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1082,7 +1109,8 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
     
     if status_4h == "Success" and len(df_4h.dropna(subset=['close'])) >= LONG_TERM_SMA_LENGTH:
         try:
-            df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH)
+            # 💡 SMA 50を計算
+            df_4h['sma'] = ta.sma(df_4h['close'], length=LONG_TERM_SMA_LENGTH) 
             df_4h.dropna(subset=['sma'], inplace=True)
             if not df_4h.empty and 'sma' in df_4h.columns and not pd.isna(df_4h['sma'].iloc[-1]):
                 last_price = df_4h['close'].iloc[-1]
@@ -1145,7 +1173,7 @@ async def main_loop():
             
             results_list_of_lists = []
             
-            # オーダーブックを取得するシンボルを抽出 (1h足で利用)
+            # 💡 オーダーブックを取得するシンボルを抽出 (1h足で利用)
             ob_fetch_symbols = [s for s in monitor_symbols]
             ob_tasks = [fetch_order_book_depth(symbol) for symbol in ob_fetch_symbols]
             await asyncio.gather(*ob_tasks) # 並行実行してORDER_BOOK_CACHEを更新
@@ -1272,11 +1300,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.1.1 - Market Price Enhanced")
+app = FastAPI(title="Apex BOT API", version="v17.1.2 - MA/Funda/FGI Enhanced")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.1.1 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.1.2 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1290,7 +1318,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.1.1 - Market Price Enhanced",
+        "bot_version": "v17.1.2 - MA/Funda/FGI Enhanced",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1301,7 +1329,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.1.1, Market Price Enhanced)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v17.1.2, MA/Funda/FGI Enhanced)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
