@@ -1,14 +1,12 @@
 # ====================================================================================
-# Apex BOT v17.1.2 - MA/Fundamentals/FGI Enhanced
+# Apex BOT v17.1.3 - MA/Fundamentals/FGI Enhanced (TP Target Display)
 # 
 # 強化ポイント:
-# 1. 【移動平均線】SMA 50 (4h) を使用し、長期トレンド逆行時に強力なペナルティ (-0.20) を適用。
-# 2. 【ファンダメンタルズ/流動性】板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入。
-# 3. 【ファンダメンタルズ/出来高】OBV (On-Balance Volume) によるモメンタム確証を追加。
-# 4. 【恐怖指数】FGI (Fear & Greed Index) プロキシを導入し、市場センチメントをスコアに反映。
-# 5. エリオット波動の概念に基づき、フィボナッチ・ピボット近接度を分析に導入。
-# 6. Telegram通知メッセージに「現在単価 (Market Price)」を追加。
-# 7. Structural SL使用時に 0.5 * ATR のバッファを追加し、安全性を向上。
+# 1. 【通知メッセージ強化】分析で算出した初期TP価格 (tp1) を通知メッセージに明記。
+# 2. 【移動平均線】SMA 50 (4h) を使用し、長期トレンド逆行時に強力なペナルティ (-0.20) を適用。
+# 3. 【ファンダメンタルズ/流動性】板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入。
+# 4. 【ファンダメンタルズ/出来高】OBV (On-Balance Volume) によるモメンタム確証を追加。
+# 5. 【恐怖指数】FGI (Fear & Greed Index) プロキシを導入し、市場センチメントをスコアに反映。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -166,7 +164,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    【v17.1.2 改良版】現在単価、長期トレンド、ファンダ/恐怖指数情報を追加した通知メッセージを生成する
+    【v17.1.3 改良版】現在単価、長期トレンド、ファンダ/恐怖指数情報に加え、初期TP目標価格を追加した通知メッセージを生成する
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -194,6 +192,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     
     entry_price = best_signal.get('entry', 0.0)
     sl_price = best_signal.get('sl', 0.0)
+    tp1_price = best_signal.get('tp1', 0.0) # 💡 TP1価格の抽出
     entry_type = best_signal.get('entry_type', 'N/A')
     
     display_symbol = symbol.replace('-', '/')
@@ -235,7 +234,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
     )
 
-    # --- 取引計画部 ---
+    # --- 取引計画部 (TP Targetを追加) ---
     sl_width = abs(entry_price - sl_price)
     sl_source_str = "ATR基準"
     if best_signal.get('tech_data', {}).get('structural_sl_used', False):
@@ -248,8 +247,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"  - <b>エントリー価格</b>: <code>${format_price_utility(entry_price, symbol)}</code>\n"
         f"  - <b>損切り (SL)</b>: <code>${format_price_utility(sl_price, symbol)}</code> ({sl_source_str})\n"
         f"  - <b>リスク (SL幅)</b>: <code>${format_price_utility(sl_width, symbol)}</code>\n"
-        f"  - <b>利益確定 (TP)</b>: <code>動的追跡</code> (利益最大化)\n"
-        f"  - <b>目標RRR</b>: 1 : {rr_ratio:.2f}+\n\n"
+        f"  - <b>初期利益目標 (TP Target)</b>: <code>${format_price_utility(tp1_price, symbol)}</code> (動的追跡開始点)\n" # 💡 新規追加
+        f"  - <b>目標RRR (DTS Base)</b>: 1 : {rr_ratio:.2f}+\n\n"
     )
 
     # --- 分析サマリー部 ---
@@ -305,7 +304,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ Limit注文は、指定水準到達時のみ約定します。DTS戦略により、SLは自動的に追跡され利益を最大化します。</pre>"
-        f"<i>Bot Ver: v17.1.2 (MA/Funda/FGI Enhanced)</i>"
+        f"<i>Bot Ver: v17.1.3 (MA/Funda/FGI Enhanced, TP Target)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -313,6 +312,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 # ====================================================================================
 # CCXT & DATA ACQUISITION
+# (変更なし)
 # ====================================================================================
 
 async def initialize_ccxt_client():
@@ -540,6 +540,7 @@ async def get_crypto_macro_context() -> Dict:
 
 # ====================================================================================
 # CORE ANALYSIS LOGIC
+# (変更なし)
 # ====================================================================================
 
 # Fibonacci Pivot Point Calculation Utility (Simplified)
@@ -627,7 +628,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.2)
+    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.3)
     """
     
     # 1. データ取得とFunding Rate/Order Book取得
@@ -1150,6 +1151,7 @@ async def generate_integrated_signal(symbol: str, macro_context: Dict, client_na
 
 # ====================================================================================
 # TASK SCHEDULER & MAIN LOOP
+# (変更なし)
 # ====================================================================================
 
 async def main_loop():
@@ -1298,13 +1300,14 @@ async def main_loop():
 
 # ====================================================================================
 # FASTAPI SETUP
+# (バージョン更新のみ)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.1.2 - MA/Funda/FGI Enhanced")
+app = FastAPI(title="Apex BOT API", version="v17.1.3 - TP Target Display")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.1.2 Startup initializing...") 
+    logging.info("🚀 Apex BOT v17.1.3 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1318,7 +1321,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.1.2 - MA/Funda/FGI Enhanced",
+        "bot_version": "v17.1.3 - TP Target Display",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1329,7 +1332,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.1.2, MA/Funda/FGI Enhanced)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v17.1.3, TP Target Display)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
