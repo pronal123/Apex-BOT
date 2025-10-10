@@ -1,12 +1,11 @@
 # ====================================================================================
-# Apex BOT v17.1.3 - MA/Fundamentals/FGI Enhanced (TP Target Display)
+# Apex BOT v18.0.0 - Trend/Formation Enhanced (EMA Cross, KC, Candlestick Pattern)
 # 
 # 強化ポイント:
-# 1. 【通知メッセージ強化】分析で算出した初期TP価格 (tp1) を通知メッセージに明記。
-# 2. 【移動平均線】SMA 50 (4h) を使用し、長期トレンド逆行時に強力なペナルティ (-0.20) を適用。
-# 3. 【ファンダメンタルズ/流動性】板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入。
-# 4. 【ファンダメンタルズ/出来高】OBV (On-Balance Volume) によるモメンタム確証を追加。
-# 5. 【恐怖指数】FGI (Fear & Greed Index) プロキシを導入し、市場センチメントをスコアに反映。
+# 1. 【トレンド分析強化】短期/中期EMA (8/20) クロスを明確なスコアリング要因として追加。
+# 2. 【トレンド/レンジ分析強化】Keltner Channel (KC) を導入し、トレンドレジーム（強いトレンド、レンジ）に応じてスコアにバイアス。
+# 3. 【フォーメーション分析強化】重要レベル付近でのローソク足反転パターン（エンガルフィング、ハンマーなど）を検出。
+# 4. 【通知メッセージ強化】新しいトレンド/構造分析の結果を取引根拠に詳細に記載。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -67,6 +66,17 @@ LONG_TERM_SMA_LENGTH = 50
 LONG_TERM_REVERSAL_PENALTY = 0.20   
 MACD_CROSS_PENALTY = 0.15           
 
+# 💡【トレンド分析強化】EMAクロス
+SHORT_TERM_EMA_FAST = 8
+SHORT_TERM_EMA_SLOW = 20
+EMA_CROSS_BONUS = 0.08              # EMAクロスボーナス
+# 💡【トレンド/レンジ分析強化】Keltner Channel
+KC_ATR_MULTIPLIER = 2.0             
+KC_REGIME_BONUS_PENALTY = 0.05      # KCトレンドレジームボーナス/ペナルティ
+
+# 💡【フォーメーション分析強化】ローソク足パターン
+CANDLESTICK_PATTERN_BONUS = 0.05    # ローソク足パターンボーナス
+
 # Dynamic Trailing Stop (DTS) Parameters
 ATR_TRAIL_MULTIPLIER = 3.0          
 DTS_RRR_DISPLAY = 5.0               
@@ -78,7 +88,7 @@ FUNDING_RATE_BONUS_PENALTY = 0.08
 # Dominance Bias Filter Parameters
 DOMINANCE_BIAS_BONUS_PENALTY = 0.05 # BTCドミナンスの偏りによる最大ボーナス/ペナルティ点
 
-# 💡【ファンダメンタルズ】流動性/スマートマネーフィルター Parameters
+# 💡【ファンダメンタルズ/流動性】Parameters
 LIQUIDITY_BONUS_POINT = 0.06        # 板の厚みによるボーナス
 ORDER_BOOK_DEPTH_LEVELS = 5         # オーダーブックのチェック深度
 OBV_MOMENTUM_BONUS = 0.04           # OBVトレンド一致によるボーナス
@@ -164,7 +174,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """
-    【v17.1.3 改良版】現在単価、長期トレンド、ファンダ/恐怖指数情報に加え、初期TP目標価格を追加した通知メッセージを生成する
+    【v18.0.0 改良版】トレンド/フォーメーション分析情報を強化した通知メッセージを生成する
     """
     
     valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
@@ -192,7 +202,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     
     entry_price = best_signal.get('entry', 0.0)
     sl_price = best_signal.get('sl', 0.0)
-    tp1_price = best_signal.get('tp1', 0.0) # 💡 TP1価格の抽出
+    tp1_price = best_signal.get('tp1', 0.0) 
     entry_type = best_signal.get('entry_type', 'N/A')
     
     display_symbol = symbol.replace('-', '/')
@@ -237,7 +247,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # --- 取引計画部 (TP Targetを追加) ---
     sl_width = abs(entry_price - sl_price)
     sl_source_str = "ATR基準"
-    if best_signal.get('tech_data', {}).get('structural_sl_used', False):
+    tech_data = best_signal.get('tech_data', {})
+    if tech_data.get('structural_sl_used', False):
         sl_source_str = "構造的 (Pivot/Fib) + 0.5 ATR バッファ"
         
     trade_plan = (
@@ -247,12 +258,11 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"  - <b>エントリー価格</b>: <code>${format_price_utility(entry_price, symbol)}</code>\n"
         f"  - <b>損切り (SL)</b>: <code>${format_price_utility(sl_price, symbol)}</code> ({sl_source_str})\n"
         f"  - <b>リスク (SL幅)</b>: <code>${format_price_utility(sl_width, symbol)}</code>\n"
-        f"  - <b>初期利益目標 (TP Target)</b>: <code>${format_price_utility(tp1_price, symbol)}</code> (動的追跡開始点)\n" # 💡 新規追加
+        f"  - <b>初期利益目標 (TP Target)</b>: <code>${format_price_utility(tp1_price, symbol)}</code> (動的追跡開始点)\n"
         f"  - <b>目標RRR (DTS Base)</b>: 1 : {rr_ratio:.2f}+\n\n"
     )
 
     # --- 分析サマリー部 ---
-    tech_data = best_signal.get('tech_data', {})
     regime = "トレンド相場" if tech_data.get('adx', 0.0) >= ADX_TREND_THRESHOLD else "レンジ相場"
     fgi_score = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
     fgi_sentiment = "リスクオン" if fgi_score > 0 else ("リスクオフ" if fgi_score < 0 else "中立")
@@ -265,7 +275,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"  - <b>時間軸 (メイン)</b>: <code>{timeframe}</code>\n"
         f"  - <b>決済までの目安</b>: {time_to_tp}\n"
         f"  - <b>市場の状況</b>: {regime} (ADX: {tech_data.get('adx', 0.0):.1f})\n"
-        f"  - <b>恐怖指数 (FGI) プロキシ</b>: {fgi_sentiment} ({abs(fgi_score*100):.1f}点影響)\n\n" # 恐怖指数情報を追加
+        f"  - <b>恐怖指数 (FGI) プロキシ</b>: {fgi_sentiment} ({abs(fgi_score*100):.1f}点影響)\n\n" 
     )
 
     # --- 分析の根拠部 (チェックリスト形式) ---
@@ -279,7 +289,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     dominance_ok = tech_data.get('dominance_bias_bonus_value', 0.0) > 0
     fib_level = tech_data.get('fib_proximity_level', 'N/A')
     
-    # 💡 長期トレンドの表示を強化
+    # 💡 トレンド/フォーメーション分析の強化 (v18.0.0)
+    ema_cross_ok = tech_data.get('ema_cross_bonus_value', 0.0) > 0
+    ema_cross_match_str = tech_data.get('ema_cross_match', 'N/A')
+    pattern_ok = tech_data.get('candlestick_pattern_bonus_value', 0.0) > 0
+    pattern_match_str = tech_data.get('candlestick_pattern_match', 'N/A')
+    kc_regime_ok = tech_data.get('kc_regime_bonus_penalty', 0.0) >= 0
+    
     lt_trend_str = tech_data.get('long_term_trend', 'N/A')
     lt_trend_check_text = f"長期 ({lt_trend_str}, SMA {LONG_TERM_SMA_LENGTH}) トレンドと一致"
     lt_trend_check_text_penalty = f"長期トレンド ({lt_trend_str}) と逆行 ({tech_data.get('long_term_reversal_penalty_value', 0.0)*100:.1f}点ペナルティ)"
@@ -289,10 +305,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"<b>🔍 分析の根拠</b>\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - <b>トレンド/勢い</b>: \n"
-        f"    {'✅' if long_term_trend_ok else '❌'} {'<b>' if not long_term_trend_ok else ''}{lt_trend_check_text if long_term_trend_ok else lt_trend_check_text_penalty}{'</b>' if not long_term_trend_ok else ''}\n" # 長期トレンド表示の強化
+        f"    {'✅' if long_term_trend_ok else '❌'} {'<b>' if not long_term_trend_ok else ''}{lt_trend_check_text if long_term_trend_ok else lt_trend_check_text_penalty}{'</b>' if not long_term_trend_ok else ''}\n"
+        f"    {'✅' if ema_cross_ok else '❌'} EMA ({SHORT_TERM_EMA_FAST}/{SHORT_TERM_EMA_SLOW}) クロス ({ema_cross_match_str})\n" # EMA Cross
         f"    {'✅' if momentum_ok else '⚠️'} 短期モメンタム加速 (RSI/MACD/CCI)\n"
+        f"    {'✅' if kc_regime_ok else '❌'} Keltner Channel トレンドレジーム ({tech_data.get('kc_trend_regime', 'Neutral')})\n" # KC Trend
         f"  - <b>価格構造/ファンダ</b>: \n"
         f"    {'✅' if structure_ok else '❌'} 重要支持/抵抗線に近接 ({fib_level}確認)\n"
+        f"    {'✅' if pattern_ok else '❌'} ローソク足パターン出現 ({pattern_match_str})\n" # Candlestick Pattern
         f"    {'✅' if (volume_confirm_ok or obv_confirm_ok) else '❌'} 出来高/OBVの裏付け\n"
         f"    {'✅' if liquidity_ok else '❌'} 板の厚み (流動性) 優位\n"
         f"  - <b>市場心理/その他</b>: \n"
@@ -304,7 +323,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ Limit注文は、指定水準到達時のみ約定します。DTS戦略により、SLは自動的に追跡され利益を最大化します。</pre>"
-        f"<i>Bot Ver: v17.1.3 (MA/Funda/FGI Enhanced, TP Target)</i>"
+        f"<i>Bot Ver: v18.0.0 (Trend/Formation Enhanced)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -540,7 +559,6 @@ async def get_crypto_macro_context() -> Dict:
 
 # ====================================================================================
 # CORE ANALYSIS LOGIC
-# (変更なし)
 # ====================================================================================
 
 # Fibonacci Pivot Point Calculation Utility (Simplified)
@@ -615,7 +633,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
             structural_sl = R1 # R1 is the resistance used as SL
             structural_tp = S1 * 0.99 
         elif price < S1:
-            # Price is below S1 (Breakout scenario). Idea: Target S1 extension, SL S1.
+            # Price is below S1 (Breakout scenario). Idea: Target S1, SL S1.
             bonus = BONUS_POINT
             structural_sl = S1 # S1 is the support used as SL/resistance
             structural_tp = S1 * 0.95 
@@ -628,7 +646,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
     """
-    単一の時間軸で分析とシグナル生成を行う関数 (v17.1.3)
+    単一の時間軸で分析とシグナル生成を行う関数 (v18.0.0)
     """
     
     # 1. データ取得とFunding Rate/Order Book取得
@@ -662,7 +680,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         "ask_bid_ratio": order_book_data.get('ask_bid_ratio', 1.0) if order_book_data else 1.0,
         "obv_trend_match": "N/A", 
         "obv_momentum_bonus_value": 0.0, 
-        "fib_proximity_level": "N/A"
+        "fib_proximity_level": "N/A",
+        # 💡 v18.0.0 追加分
+        "ema_cross_match": "N/A", 
+        "ema_cross_bonus_value": 0.0,
+        "candlestick_pattern_match": "N/A", 
+        "candlestick_pattern_bonus_value": 0.0,
+        "kc_trend_regime": "Neutral", 
+        "kc_regime_bonus_penalty": 0.0,
     }
     
     if status != "Success":
@@ -708,14 +733,25 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         df.ta.ppo(append=True) 
         df.ta.donchian(length=20, append=True) 
         df.ta.stochrsi(append=True)
-        # 💡 OBVを追加
         df['obv'] = ta.obv(df['close'], df['volume']) 
+        
+        # 💡 v18.0.0 追加分
+        df['ema_fast'] = ta.ema(df['close'], length=SHORT_TERM_EMA_FAST)
+        df['ema_slow'] = ta.ema(df['close'], length=SHORT_TERM_EMA_SLOW)
+        df.ta.kc(atr_length=20, atr_multiplier=KC_ATR_MULTIPLIER, append=True)
+        # Simplified Candlestick Pattern Detection (Engulfing & Hammer/Shooting Star)
+        df['engulfing_bull'] = ta.cdl_engulfing(df['open'], df['high'], df['low'], df['close'], asbool=True) > 0
+        df['engulfing_bear'] = ta.cdl_engulfing(df['open'], df['high'], df['low'], df['close'], asbool=True) < 0
+        df['hammer_bull'] = ta.cdl_hammer(df['open'], df['high'], df['low'], df['close'], asbool=True)
+        df['shooting_star_bear'] = ta.cdl_shootingstar(df['open'], df['high'], df['low'], df['close'], asbool=True)
         
         # Pivot Pointの計算 (Structural Analysis)
         pivots = calculate_fib_pivot(df)
         
         # データクリーニング (NaN値の削除)
-        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, 'obv'] 
+        required_cols = ['rsi', MACD_HIST_COL, 'adx', 'atr', 'cci', 'vwap', PPO_HIST_COL, 'obv', 'ema_fast', 'ema_slow'] 
+        kc_lower_col = f'KCL_20_{KC_ATR_MULTIPLIER}'
+        if kc_lower_col in df.columns: required_cols.append(kc_lower_col)
         if STOCHRSI_K in df.columns: required_cols.append(STOCHRSI_K)
         if STOCHRSI_D in df.columns: required_cols.append(STOCHRSI_D)
         df.dropna(subset=required_cols, inplace=True)
@@ -831,10 +867,83 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             base_score = BASE_SCORE
         
         score = min(1.0, base_score) 
+        
+        # 3. **v18.0.0 トレンド/フォーメーション分析強化**
+        
+        # P. 💡【トレンド分析強化】EMA 8/20 クロス (0.08)
+        ema_fast_prev = df['ema_fast'].iloc[-2]
+        ema_slow_prev = df['ema_slow'].iloc[-2]
+        ema_fast_curr = df['ema_fast'].iloc[-1]
+        ema_slow_curr = df['ema_slow'].iloc[-1]
+        
+        ema_cross_bonus = 0.0
+        ema_cross_match = "N/A"
+        
+        if ema_fast_prev <= ema_slow_prev and ema_fast_curr > ema_slow_curr:
+            # Bullish Cross (Fast over Slow)
+            if side == "ロング":
+                ema_cross_bonus = EMA_CROSS_BONUS
+                ema_cross_match = "Bullish Cross (EMA 8/20)"
+        elif ema_fast_prev >= ema_slow_prev and ema_fast_curr < ema_slow_curr:
+            # Bearish Cross (Slow over Fast)
+            if side == "ショート":
+                ema_cross_bonus = EMA_CROSS_BONUS
+                ema_cross_match = "Bearish Cross (EMA 8/20)"
+            
+        score = max(BASE_SCORE, min(1.0, score + ema_cross_bonus))
+        
+        # Q. 💡【フォーメーション分析強化】ローソク足パターン (0.05)
+        pattern_bonus = 0.0
+        pattern_match = "N/A"
+        
+        # 直近のローソク足が形成されており、かつPivot/Fibレベルに近い場合のみ適用
+        structural_pivot_bonus, structural_sl_pivot, structural_tp_pivot, fib_level = analyze_structural_proximity(price, pivots, side, atr_val)
+        is_near_pivot = structural_pivot_bonus > 0 
+        
+        if is_near_pivot:
+            if df['engulfing_bull'].iloc[-1] or df['hammer_bull'].iloc[-1]:
+                if side == "ロング":
+                    pattern_bonus = CANDLESTICK_PATTERN_BONUS
+                    pattern_match = "Bullish Pattern (Engulfing/Hammer)"
+            elif df['engulfing_bear'].iloc[-1] or df['shooting_star_bear'].iloc[-1]:
+                if side == "ショート":
+                    pattern_bonus = CANDLESTICK_PATTERN_BONUS
+                    pattern_match = "Bearish Pattern (Engulfing/Shooting Star)"
 
-        # 3. **ファンダメンタルズ/マクロバイアスフィルターの適用**
+        score = max(BASE_SCORE, min(1.0, score + pattern_bonus))
+        
+        # R. 💡【トレンド/レンジ分析強化】Keltner Channelによるトレンド/レンジ判定
+        kc_lower_col = f'KCL_20_{KC_ATR_MULTIPLIER}'
+        kc_upper_col = f'KCU_20_{KC_ATR_MULTIPLIER}'
+        kc_mid_col = f'KCM_20_{KC_ATR_MULTIPLIER}'
+        
+        kc_trend_regime = "Neutral"
+        kc_penalty_bonus = 0.0
+        
+        if kc_lower_col in df.columns:
+            kc_lower = df[kc_lower_col].iloc[-1]
+            kc_upper = df[kc_upper_col].iloc[-1]
+            kc_mid = df[kc_mid_col].iloc[-1]
 
-        # J. 資金調達率 (Funding Rate) バイアスフィルター (+/- 0.08点)
+            if price > kc_upper:
+                kc_trend_regime = "Strong Trend Up"
+                if side == "ロング": kc_penalty_bonus = KC_REGIME_BONUS_PENALTY 
+            elif price < kc_lower:
+                kc_trend_regime = "Strong Trend Down"
+                if side == "ショート": kc_penalty_bonus = KC_REGIME_BONUS_PENALTY 
+            elif price < kc_mid and side == "ロング":
+                kc_penalty_bonus = -KC_REGIME_BONUS_PENALTY
+            elif price > kc_mid and side == "ショート":
+                 kc_penalty_bonus = -KC_REGIME_BONUS_PENALTY
+
+            score = max(BASE_SCORE, min(1.0, score + kc_penalty_bonus))
+        
+        # 構造的Pivotボーナスを再適用
+        score = min(1.0, score + structural_pivot_bonus)
+        
+        # 4. **ファンダメンタルズ/マクロバイアスフィルターの適用**
+
+        # S. 資金調達率 (Funding Rate) バイアスフィルター (+/- 0.08点)
         funding_rate_bonus = 0.0
         
         if timeframe == '1h': 
@@ -851,7 +960,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
 
         score = max(BASE_SCORE, min(1.0, score + funding_rate_bonus))
 
-        # K. BTCドミナンスバイアスフィルター (Altcoinのみ) (+/- 0.05点)
+        # T. BTCドミナンスバイアスフィルター (Altcoinのみ) (+/- 0.05点)
         dominance_bonus = 0.0
         dominance_trend = macro_context.get('dominance_trend', 'Neutral')
         dominance_bias_score_val = macro_context.get('dominance_bias_score', 0.0)
@@ -873,18 +982,14 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             score = max(BASE_SCORE, min(1.0, score + dominance_bonus))
 
 
-        # L. 💡【恐怖指数】市場センチメント (FGI Proxy) の適用 (+/-0.07点)
+        # U. 💡【恐怖指数】市場センチメント (FGI Proxy) の適用 (+/-0.07点)
         sentiment_bonus = macro_context.get('sentiment_fgi_proxy', 0.0)
         if side == "ロング" and sentiment_bonus > 0:
             score = min(1.0, score + sentiment_bonus)
         elif side == "ショート" and sentiment_bonus < 0:
             score = min(1.0, score + abs(sentiment_bonus))
         
-        # M. Structural/Pivot/Fib Analysis (0.07点 + Fib強化)
-        structural_pivot_bonus, structural_sl_pivot, structural_tp_pivot, fib_level = analyze_structural_proximity(price, pivots, side, atr_val)
-        score = min(1.0, score + structural_pivot_bonus)
-        
-        # N. 出来高/流動性確証 & OBV (Max 0.12 + 0.04)
+        # V. 出来高/流動性確証 & OBV (Max 0.12 + 0.04)
         volume_confirmation_bonus = 0.0
         
         # 出来高ブレイクアウト確証
@@ -908,7 +1013,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
              
         score = min(1.0, score + obv_momentum_bonus)
         
-        # O. 💡【ファンダメンタルズ】流動性/スマートマネーフィルター (板の厚み) (1h足のみで適用)
+        # W. 💡【ファンダメンタルズ】流動性/スマートマネーフィルター (板の厚み) (1h足のみで適用)
         liquidity_bonus = 0.0
         ask_bid_ratio_val = 1.0
         
@@ -916,30 +1021,27 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             ask_bid_ratio_val = order_book_data.get('ask_bid_ratio', 1.0)
             
             if side == "ロング":
-                # Bid側が厚い (買い圧力/流動性あり)
                 if ask_bid_ratio_val < 0.9:
                     liquidity_bonus = LIQUIDITY_BONUS_POINT
             elif side == "ショート":
-                # Ask側が厚い (売り圧力/流動性あり)
                 if ask_bid_ratio_val > 1.1:
                     liquidity_bonus = LIQUIDITY_BONUS_POINT
             
             score = min(1.0, score + liquidity_bonus)
         
         
-        # 4. **フィルターによるペナルティ適用**
+        # 5. **フィルターによるペナルティ適用**
         
-        # P. 💡【移動平均線】4hトレンドフィルターの適用 (15m, 1hのみ) 
+        # X. 💡【移動平均線】4hトレンドフィルターの適用 (15m, 1hのみ) 
         penalty_value_lt = 0.0
         if timeframe in ['15m', '1h']:
             if (side == "ロング" and long_term_trend == "Short") or \
                (side == "ショート" and long_term_trend == "Long"):
-                # 長期トレンド逆行時に強力なペナルティを適用
                 score = max(BASE_SCORE, score - LONG_TERM_REVERSAL_PENALTY) 
                 current_long_term_penalty_applied = True
                 penalty_value_lt = LONG_TERM_REVERSAL_PENALTY
         
-        # Q. MACDクロス確認と減点 (モメンタム反転チェック)
+        # Y. MACDクロス確認と減点 (モメンタム反転チェック)
         macd_valid = True
         penalty_value_macd = 0.0
         if timeframe in ['15m', '1h']:
@@ -952,7 +1054,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
                  penalty_value_macd = MACD_CROSS_PENALTY
              
         
-        # 5. TP/SLとRRRの決定 (Dynamic Trailing Stop & Structural SL)
+        # 6. TP/SLとRRRの決定 (Dynamic Trailing Stop & Structural SL)
         
         rr_base = DTS_RRR_DISPLAY 
         
@@ -977,21 +1079,18 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             if use_market_entry: 
                 entry = price
             else: 
-                # Limit Entry (Targeting a low price / Midpoint / Fibonacci Support)
                 entry_candidates = [price, bb_mid, dc_mid]
                 if fib_level in ['S1', 'S2']: entry_candidates.append(pivots[fib_level])
                 entry = min(entry_candidates) 
             
             atr_sl = entry - sl_dist_atr
             
-            # Structural SL (S1) を使用する場合は、0.5*ATRだけバッファを下にずらす
             if structural_sl_pivot > 0 and structural_sl_pivot > atr_sl and structural_sl_pivot < entry:
                  sl = structural_sl_pivot - atr_val * 0.5 
                  structural_sl_used = True
             else:
                  sl = atr_sl
             
-            # 負の値にならないように保護
             if sl <= 0: sl = entry * 0.99 
             
             tp_dist = abs(entry - sl) * rr_base 
@@ -1001,14 +1100,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             if use_market_entry: 
                 entry = price
             else: 
-                # Limit Entry (Targeting a high price / Midpoint / Fibonacci Resistance)
                 entry_candidates = [price, bb_mid, dc_mid]
                 if fib_level in ['R1', 'R2']: entry_candidates.append(pivots[fib_level])
                 entry = max(entry_candidates) 
             
             atr_sl = entry + sl_dist_atr
             
-            # Structural SL (R1) を使用する場合は、0.5*ATRだけバッファを上にずらす
             if structural_sl_pivot > 0 and structural_sl_pivot < atr_sl and structural_sl_pivot > entry:
                  sl = structural_sl_pivot + atr_val * 0.5 
                  structural_sl_used = True
@@ -1022,12 +1119,12 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             entry_type = "N/A"
             entry, tp1, sl, rr_base = price, 0, 0, 0
         
-        # 6. 最終的なサイドの決定
+        # 7. 最終的なサイドの決定
         final_side = side
         if score < SIGNAL_THRESHOLD: 
              final_side = "Neutral"
 
-        # 7. tech_dataの構築
+        # 8. tech_dataの構築
         bb_width_pct_val = (df['BBU_20_2.0'].iloc[-1] - df['BBL_20_2.0'].iloc[-1]) / df['close'].iloc[-1] * 100 if 'BBU_20_2.0' in df.columns else 0.0
 
         tech_data = {
@@ -1050,22 +1147,29 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
             "volume_confirmation_bonus": volume_confirmation_bonus,
             "current_volume": current_volume,
             "average_volume": average_volume,
-            "sentiment_fgi_proxy_bonus": sentiment_bonus, # 💡 FGIプロキシボーナス値
+            "sentiment_fgi_proxy_bonus": sentiment_bonus, 
             "structural_pivot_bonus": structural_pivot_bonus,
             "volume_ratio": volume_ratio,
             "structural_sl_used": structural_sl_used, 
-            "long_term_reversal_penalty_value": penalty_value_lt, # 💡 長期トレンドペナルティ値
+            "long_term_reversal_penalty_value": penalty_value_lt, 
             "macd_cross_penalty_value": penalty_value_macd,
             "funding_rate_value": funding_rate_val,
             "funding_rate_bonus_value": funding_rate_bonus,
             "dominance_trend": dominance_trend,
             "dominance_bias_bonus_value": dominance_bonus,
-            "liquidity_bonus_value": liquidity_bonus, # 💡 流動性ボーナス値
+            "liquidity_bonus_value": liquidity_bonus, 
             "ask_bid_ratio": ask_bid_ratio_val, 
             "obv_trend_match": obv_trend_match, 
-            "obv_momentum_bonus_value": obv_momentum_bonus, # 💡 OBVボーナス値
+            "obv_momentum_bonus_value": obv_momentum_bonus, 
             "fib_proximity_level": fib_level, 
-            "dynamic_exit_strategy": "DTS" 
+            "dynamic_exit_strategy": "DTS",
+            # 💡 v18.0.0 追加分
+            "ema_cross_match": ema_cross_match, 
+            "ema_cross_bonus_value": ema_cross_bonus,
+            "candlestick_pattern_match": pattern_match, 
+            "candlestick_pattern_bonus_value": pattern_bonus,
+            "kc_trend_regime": kc_trend_regime, 
+            "kc_regime_bonus_penalty": kc_penalty_bonus,
         }
         
     except Exception as e:
@@ -1076,7 +1180,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
         tech_data = tech_data_defaults 
         entry_type = "N/A"
         
-    # 8. シグナル辞書を構築
+    # 9. シグナル辞書を構築
     signal_candidate = {
         "symbol": symbol,
         "side": final_side,
@@ -1197,7 +1301,7 @@ async def main_loop():
                 if signal.get('side') == 'Neutral' or signal.get('side') in ["DataShortage", "ExchangeError"]:
                     continue
                 
-                # Limit Entry の優位性スコアを計算 (EAS)
+                # Limit Entry ポジションの優位性スコアを計算 (EAS)
                 entry_advantage_score = 0.0
                 atr_val = signal.get('tech_data', {}).get('atr_value', 1.0)
                 price = signal.get('price', 0.0)
@@ -1300,14 +1404,14 @@ async def main_loop():
 
 # ====================================================================================
 # FASTAPI SETUP
-# (バージョン更新のみ)
+# (バージョン更新)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v17.1.3 - TP Target Display")
+app = FastAPI(title="Apex BOT API", version="v18.0.0 - Trend/Formation Enhanced")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v17.1.3 Startup initializing...") 
+    logging.info("🚀 Apex BOT v18.0.0 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1321,7 +1425,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v17.1.3 - TP Target Display",
+        "bot_version": "v18.0.0 - Trend/Formation Enhanced",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1332,7 +1436,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running (v17.1.3, TP Target Display)."}, status_code=200)
+    return JSONResponse(content={"message": "Apex BOT is running (v18.0.0, Trend/Formation Enhanced)."}, status_code=200)
 
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
