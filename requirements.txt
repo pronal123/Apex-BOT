@@ -1,4 +1,7 @@
-# Python Webフレームワークとサーバー
+# requirements.txt
+# 実行に必要なライブラリリスト
+
+# Webフレームワーク/サーバー
 fastapi
 uvicorn
 
@@ -15,11 +18,8 @@ pandas-ta
 # 仮想通貨取引所API (非同期サポートを有効化)
 ccxt[async]
 
-# HTTPクライアント
+# HTTPクライアント (Telegram通知用など)
 requests
 
-# 株価/金融データ取得 (コードでyfとしてインポートされているため必須)
+# 株価/金融データ取得 (為替/マクロ指標取得用)
 yfinance
-
-matplotlib
-seaborn
