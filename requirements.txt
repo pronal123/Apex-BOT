@@ -1,5 +1,5 @@
 # requirements.txt
-# 実行に必要なライブラリリスト
+# Coinglass API対応のためrequestsライブラリを使用
 
 # Webフレームワーク/サーバー
 fastapi
@@ -18,7 +18,7 @@ pandas-ta
 # 仮想通貨取引所API (非同期サポートを有効化)
 ccxt[async]
 
-# HTTPクライアント (Telegram通知用など)
+# HTTPクライアント (Telegram通知、Coinglass API用)
 requests
 
 # 株価/金融データ取得 (為替/マクロ指標取得用)
