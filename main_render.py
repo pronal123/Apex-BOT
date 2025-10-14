@@ -1,9 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.19 - Real Balance Impl (実残高取得実装)
+# Apex BOT v19.0.20 - Bug Fix (BB/CCXT 451) for MEXC/General Exchanges
 #
 # 修正ポイント:
-# 1. 【Balance Impl】fetch_current_balance_usdt 関数内のロジックを、
-#    CCXTのfetch_balance()を呼び出してUSDT現物残高の実数値を取得するように修正。
+# 1. 【Bug Fix: BBANDS】calculate_indicators関数で、pandas_taのBollinger Bandsが
+#    'BBL_5_2.0'ではなく'BBL_5_2.0_2.0'を返す環境に対応し、KeyErrorを解消。（必須修正）
+# 2. 【Bug Fix: CCXT 451】fetch_current_balance_usdt関数に、取引所の地理的制限
+#    エラー(451)を特定してキャッチするロジックを維持。実行を継続可能に。（堅牢性向上）
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -118,7 +120,10 @@ CURRENT_USDT_BALANCE: float = 0.0
 FX_MACRO_CONTEXT: Dict = {} 
 
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
-CCXT_CLIENT_NAME: str = os.environ.get('CCXT_EXCHANGE', 'binance')
+
+# 💡 MEXCユーザー向け: 環境変数 CCXT_EXCHANGE に 'mexc' が設定されていることを確認してください。
+# 設定がない場合はデフォルトの 'binance' になります。
+CCXT_CLIENT_NAME: str = os.environ.get('CCXT_EXCHANGE', 'binance') 
 CCXT_API_KEY: str = os.environ.get('CCXT_API_KEY', 'YOUR_API_KEY')
 CCXT_SECRET: str = os.environ.get('CCXT_SECRET', 'YOUR_SECRET')
 
@@ -182,7 +187,7 @@ def send_position_status_notification(message: str):
     send_telegram_html(message)
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
-    """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.19修正版)"""
+    """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.20修正版)"""
 
     valid_signals = [s for s in signals if s.get('side') == 'ロング']
     if not valid_signals:
@@ -303,7 +308,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         plus_factors.append(f"出来高による裏付け (+{tech_data.get('volume_confirmation_bonus', 0.0)*100:.1f}点)")
         
     if tech_data.get('liquidity_bonus_value', 0.0) > 0:
-        plus_factors.append(f"板の厚み (流動性) 優位 (+{tech_data.get('liquidity_bonus_value', 0.0)*100:.1f}点)")
+        plus_factors.append(f"板の厚み (流動性) 優位 (+{LIQUIDITY_BONUS_POINT*100:.1f}点)")
         
     if tech_data.get('vwap_confirm_ok', False):
         plus_factors.append(f"価格がVWAPよりも上 (買い圧力優位)")
@@ -314,7 +319,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
     # 復元: RRRボーナス
     if tech_data.get('rrr_bonus_value', 0.0) > 0:
-        plus_factors.append(f"優秀なRRR ({rr_ratio:.2f}+) (+{tech_data.get('rrr_bonus_value', 0.0)*100:.1f}点)")
+        plus_factors.append(f"優秀なRRR ({rr_ratio:.2f}+) (+{RRR_BONUS_MULTIPLIER*100:.1f}点)")
 
     if tech_data.get('whale_imbalance_bonus', 0.0) > 0:
         plus_factors.append(f"🐋 **クジラ**の買い圧力優位 (+{WHALE_IMBALANCE_BONUS*100:.1f}点)")
@@ -323,7 +328,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         plus_factors.append(f"💸 **FX市場**の安定 (+{FX_MACRO_STABILITY_BONUS*100:.1f}点)")
 
     if fgi_score > 0:
-        plus_factors.append(f"😨 FGIプロキシがリスクオンを示唆 (+{fgi_score*100:.1f}点)")
+        plus_factors.append(f"😨 FGIプロキシがリスクオンを示唆 (+{FGI_PROXY_BONUS_MAX*100:.1f}点)")
 
 
     # --- マイナス要因の評価 ---
@@ -392,7 +397,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の{'対象です。' if is_tradable else '対象外です。'}</pre>"
-        f"<i>Bot Ver: v19.0.19 (Real Balance Impl)</i>"
+        f"<i>Bot Ver: v19.0.20 (Bug Fix)</i>"
     )
 
     return header + trade_plan + summary + plus_section + minus_section + footer
@@ -406,6 +411,11 @@ async def initialize_ccxt_client():
     """CCXTクライアントを初期化する"""
     global EXCHANGE_CLIENT, CCXT_CLIENT_NAME
     
+    # CCXT_CLIENT_NAME (e.g., 'mexc')に基づいてクライアントを初期化
+    if CCXT_CLIENT_NAME.lower() not in ccxt_async.exchanges:
+        logging.error(f"CCXTで指定された取引所 '{CCXT_CLIENT_NAME}' はサポートされていません。")
+        sys.exit(1)
+
     exchange_class = getattr(ccxt_async, CCXT_CLIENT_NAME)
     EXCHANGE_CLIENT = exchange_class({
         'apiKey': CCXT_API_KEY,
@@ -422,7 +432,6 @@ async def fetch_current_balance_usdt(client: ccxt_async.Exchange) -> float:
             logging.warning("CCXTクライアントが未初期化です。")
             return 0.0
 
-        # 🌟 実際にはCCXTのfetch_balanceを呼び出し、実残高を取得
         balance = await client.fetch_balance()
         
         # 'USDT'の残高情報があるか確認
@@ -436,6 +445,11 @@ async def fetch_current_balance_usdt(client: ccxt_async.Exchange) -> float:
         logging.warning("CCXTからのUSDT残高取得に失敗しました。残高が見つかりません。")
         return 0.0
         
+    except ccxt.base.errors.ExchangeNotAvailable as e:
+        # Binanceの地理的制限(451)を含む、取引所の接続エラーを特定してキャッチ
+        # MEXCの場合、通常このエラーは出ないが、サーバー障害時などに備えて維持
+        logging.error(f"USDT残高取得エラー (CCXT client: {client.id}): 取引所の接続エラー(451など)。APIキーのアクセス制限を確認してください。詳細: {e.args[0]}")
+        return 0.0
     except Exception as e:
         logging.error(f"USDT残高取得エラー (CCXT client: {client.id if client else 'N/A'}): {e}", exc_info=True)
         # エラー時は残高を0として処理を継続
@@ -557,11 +571,11 @@ async def get_fx_macro_context() -> Dict:
 
 
 # ====================================================================================
-# ANALYSIS CORE (v19.0.19 強化版)
+# ANALYSIS CORE (v19.0.20 強化版)
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """テクニカル指標を計算する (v19.0.18)"""
+    """テクニカル指標を計算する (v19.0.20 - BBANDS Key Error Fix)"""
     df = df.copy()
 
     # SMA/EMA
@@ -581,10 +595,18 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['STOCHd_14_3_3'] = stoch['STOCHd_14_3_3']
 
     # BBANDS
-    # 修正: length=5を明示的に指定し、KeyErrorを解消
+    # 🌟 修正: ログで確認された Key Errorに対応するため、カラム名を変更
     bbands = df.ta.bbands(length=5, append=False)
-    df['BBL_5_2.0'] = bbands['BBL_5_2.0']
-    df['BBU_5_2.0'] = bbands['BBU_5_2.0']
+    # BBL_5_2.0 を BBL_5_2.0_2.0 に修正してアクセス (v19.0.20での重要修正)
+    try:
+        df['BBL_5_2.0'] = bbands['BBL_5_2.0_2.0'] 
+        df['BBU_5_2.0'] = bbands['BBU_5_2.0_2.0']
+    except KeyError:
+        # もしライブラリ側で名前が戻った場合に備えて、オリジナルの名前も試す
+        df['BBL_5_2.0'] = bbands['BBL_5_2.0']
+        df['BBU_5_2.0'] = bbands['BBU_5_2.0']
+        logging.warning("BBANDSのKeyErrorフォールバックロジックが実行されました。")
+
 
     # VWAP 
     df['VWAP'] = df.ta.vwap(append=False)
@@ -716,7 +738,7 @@ def get_whale_bias_score(symbol: str, price: float, side: str) -> Tuple[float, f
     return score_impact, whale_imbalance_penalty_value
 
 def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Optional[Dict]:
-    """単一の時間足と銘柄に対して分析を実行する (v19.0.19)"""
+    """単一の時間足と銘柄に対して分析を実行する (v19.0.20)"""
 
     if df is None or len(df) < 50: 
         return None
@@ -1077,6 +1099,7 @@ async def main_loop():
             logging.info(f"--- メインループ完了。次回の実行まで {LOOP_INTERVAL} 秒待機 ---")
 
         except Exception as e:
+            # BBANDSのKeyErrorはここでキャッチされ、次のループで回復します
             logging.error(f"メインループで致命的なエラーが発生: {e}", exc_info=True)
             await asyncio.sleep(LOOP_INTERVAL * 2)
 
@@ -1086,16 +1109,16 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.19 - Real Balance Impl")
+app = FastAPI(title="Apex BOT API", version="v19.0.20 - Bug Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.19 Startup initializing (Real Balance Impl)...")
+    logging.info("🚀 Apex BOT v19.0.20 Startup initializing (Bug Fix)...")
 
     await initialize_ccxt_client()
 
-    # 修正済み: send_position_status_notification は同期関数なのでawaitを削除
-    send_position_status_notification("🤖 BOT v19.0.19 初回起動通知")
+    # send_position_status_notification は同期関数なのでawaitを削除 (v19.0.19の修正を反映)
+    await asyncio.to_thread(send_position_status_notification, "🤖 BOT v19.0.20 初回起動通知 (Bug Fix: BB/CCXT 451)")
 
     global LAST_HOURLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
@@ -1114,7 +1137,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.19 - Real Balance Impl",
+        "bot_version": "v19.0.20 - Bug Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1127,7 +1150,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.19 - Real Balance Impl"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.20 - Bug Fix"})
 
 if __name__ == "__main__":
     pass
