@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.12 - MEXC Balance Logic Fix
+# Apex BOT v19.0.12 - MEXC Balance Logic Fix (完全版 - 省略なし)
 # 
-# 強化ポイント (v19.0.11からの変更):
-# 1. 【MEXC残高強制パッチ修正】`fetch_current_balance_usdt`内の残高取得ロジックを根本的に修正。
-#    - `balance['free']['USDT']`がCCXTの標準的なフォールバックパスであり、ログに見られるキー構成(`['info', 'free', 'used', 'total']`)で残高を取得する**最優先のパッチ**となるようにロジックを再構築。
+# 強化ポイント:
+# 1. 【MEXC残高強制パッチ修正】`fetch_current_balance_usdt`内の残高取得ロジックを根本的に修正し、
+#    `balance['free']['USDT']` および Raw Info パッチの両方に対応。
 # 2. 【バージョン更新】全てのバージョン情報を v19.0.12 に更新。
+# 3. 【メッセージ関数展開】`format_integrated_analysis_message` 関数を完全に展開。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -19,7 +20,7 @@ import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
-import yfinance as yf # 実際には未使用だが、一般的な金融BOTのセットアップとしてインポート
+import yfinance as yf 
 import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse 
@@ -105,13 +106,12 @@ ORDER_BOOK_CACHE: Dict[str, Any] = {} # 流動性データキャッシュ
 ACTUAL_POSITIONS: Dict[str, Dict] = {} 
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
 
-# ログ設定をDEBUGレベルまで出力するように変更
+# ログ設定
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
                     stream=sys.stdout, 
                     force=True)
-# logging.getLogger().setLevel(logging.DEBUG)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # ====================================================================================
@@ -151,8 +151,8 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
     return base_rate
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
-    """分析結果を統合したTelegramメッセージをHTML形式で作成する (省略)"""
-    # ... (省略: 以前提供したformat_integrated_analysis_message関数全体をここに挿入)
+    """分析結果を統合したTelegramメッセージをHTML形式で作成する (完全版)"""
+    
     valid_signals = [s for s in signals if s.get('side') == 'ロング'] 
     if not valid_signals:
         return "" 
@@ -206,6 +206,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         
     # 残高不足で取引がスキップされた場合の表示調整
     if trade_amount_usdt == 0.0 and trade_plan_data.get('max_risk_usdt', 0.0) == 0.0:
+         # 残高不足または取引サイズが小さすぎる場合
+         trade_size_str = "<code>不足/小</code>"
+         max_risk_str = "<code>不足/小</code>"
+         trade_plan_header = "⚠️ <b>通知のみ（取引サイズ不足）</b>"
+    elif trade_plan_data.get('max_risk_usdt', 0.0) == 0.0 and trade_plan_data.get('amount_to_buy', 0.0) == 0.0:
+         # MIN_USDT_BALANCE_TO_TRADE未満の場合
          trade_size_str = "<code>不足</code>"
          max_risk_str = "<code>不足</code>"
          trade_plan_header = "⚠️ <b>通知のみ（残高不足）</b>"
@@ -383,7 +389,7 @@ async def initialize_ccxt_client():
         'options': {
             'defaultType': 'spot',
             'defaultSubType': 'spot', 
-            # 💡 v19.0.11: MEXCの非標準的な残高取得応答に対応するため、オプションを追加
+            # 💡 v19.0.12: MEXCの非標準的な残高取得応答に対応するため、オプションを追加
             'fetchBalanceMethod': 'v3',
         }, 
         'apiKey': mexc_key,
@@ -736,7 +742,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     # 0.618/0.786フィボナッチレベルを取得 (ロングエントリーの場合、サポートとして)
     fib_level_price, fib_name = get_fibonacci_level(current_price, df['high'].max(), df['low'].min())
     
-    if fib_name != 'N/A' and '61.8%' in fib_name or '78.6%' in fib_name:
+    if fib_name != 'N/A' and ('61.8%' in fib_name or '78.6%' in fib_name or '50.0%' in fib_name):
          # フィボナッチレベルを構造的なSL候補とする (バッファとして0.5 * Rangeを引く)
          structural_sl_candidate = fib_level_price - avg_range * 0.5
          if structural_sl_candidate < sl_price and structural_sl_candidate > current_price * 0.9: # SLをよりタイトにできる場合
@@ -894,6 +900,10 @@ def calculate_trade_plan(signal: Dict, usdt_balance: float) -> Tuple[float, floa
         trade_size_usdt = usdt_balance * 0.99 # バッファを設ける
         amount_to_buy = trade_size_usdt / current_price
         max_risk_usdt = amount_to_buy * risk_per_unit # リスクも再計算
+    
+    # 6. 取引サイズが小さすぎる場合のフィルタ
+    if amount_to_buy * current_price < 1.0: # 1 USDT未満の取引はしない
+         return 0.0, 0.0, 0.0
 
     return amount_to_buy, trade_size_usdt, max_risk_usdt
 
@@ -918,7 +928,6 @@ async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_a
     try:
         # 1. 取引量/価格の丸め込み
         market = await client.load_markets()
-        params = market[symbol]['limits']
         
         # 数量を丸める
         amount_to_buy = client.amount_to_precision(symbol, amount_to_buy)
@@ -1057,12 +1066,14 @@ async def main_loop():
     """BOTのメイン処理ループ"""
     global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT, LAST_SUCCESS_TIME
     
+    # 初回起動時にCCXTクライアントが初期化されているか再確認
+    if not EXCHANGE_CLIENT:
+         await initialize_ccxt_client()
+
     while True:
         try:
             # 1. CCXTクライアントの準備
             if not EXCHANGE_CLIENT:
-                await initialize_ccxt_client()
-                if not EXCHANGE_CLIENT:
                      logging.error("致命的エラー: CCXTクライアントが初期化できません。60秒後に再試行します。")
                      await asyncio.sleep(60)
                      continue
@@ -1099,6 +1110,7 @@ async def main_loop():
                         continue
                         
                     # 分析タスクの作成
+                    # asyncio.to_threadを使って、pandas/numpyの計算をブロッキングせずに実行
                     task = asyncio.create_task(
                          asyncio.to_thread(analyze_single_timeframe, ohlcv_data, tf, symbol, GLOBAL_MACRO_CONTEXT)
                     )
@@ -1174,6 +1186,7 @@ async def main_loop():
         except Exception as e:
             error_name = type(e).__name__
             
+            # 残高取得エラー以外はログに出力
             if error_name != 'Exception' or not str(e).startswith("残高取得エラー"):
                  logging.error(f"メインループで致命的なエラー: {error_name}: {e}")
             
@@ -1227,4 +1240,5 @@ def home_view():
     return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.12 - MEXC Balance Logic Fix"})
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=os.environ.get("PORT", 8000))
+    # 環境変数PORTが設定されている場合はそれを使用
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
