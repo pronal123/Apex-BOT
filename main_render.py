@@ -1,10 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.11 - MEXC Balance Force Patch
+# Apex BOT v19.0.12 - MEXC Balance Logic Fix
 # 
-# 強化ポイント (v19.0.10からの変更):
-# 1. 【MEXC残高強制パッチ】`fetch_current_balance_usdt`に、MEXCの非標準的なAPI応答（通貨ごとのキーがない）から、USDT残高を強制的に抽出するロジックを追加。
-# 2. 【CCXTオプション調整】MEXCクライアントの初期化時に、残高取得のオプションを調整し、特定のバグを回避。
-# 3. 【バージョン更新】全てのバージョン情報を v19.0.11 に更新。
+# 強化ポイント (v19.0.11からの変更):
+# 1. 【MEXC残高強制パッチ修正】`fetch_current_balance_usdt`内の残高取得ロジックを根本的に修正。
+#    - `balance['free']['USDT']`がCCXTの標準的なフォールバックパスであり、ログに見られるキー構成(`['info', 'free', 'used', 'total']`)で残高を取得する**最優先のパッチ**となるようにロジックを再構築。
+# 2. 【バージョン更新】全てのバージョン情報を v19.0.12 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -279,7 +279,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.11 (MEXC Balance Force Patch)</i>" 
+        f"<i>Bot Ver: v19.0.12 (MEXC Balance Logic Fix)</i>" 
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -317,7 +317,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict) ->
         
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.11</i>"
+        f"<i>Bot Ver: v19.0.12</i>"
     )
     
     return header + details + footer
@@ -335,7 +335,7 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS)
     
     if header_msg == "🤖 初回起動通知":
-        full_message = f"🤖 **Apex BOT v19.0.11 起動完了**\n\n{message}"
+        full_message = f"🤖 **Apex BOT v19.0.12 起動完了**\n\n{message}"
     else:
         full_message = f"{header_msg}\n\n{message}"
         
@@ -400,7 +400,7 @@ async def initialize_ccxt_client():
 
 
 async def fetch_current_balance_usdt() -> float:
-    """CCXTから現在のUSDT残高を取得する。"""
+    """CCXTから現在のUSDT残高を取得する。(v19.0.12 ロジック修正)"""
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0
@@ -412,66 +412,57 @@ async def fetch_current_balance_usdt() -> float:
         
         logging.info("💡 DEBUG (Balance): fetch_balance() が応答を返しました。パースを開始します。")
         
-        # 1. CCXT標準形式 (通貨キーあり) でUSDT残高を取得
-        usdt_free = balance.get('USDT', {}).get('free', 0.0)
+        usdt_free = 0.0
         
-        # 💡 v19.0.11: CCXT標準形式でUSDT残高が取得できたかチェック
-        if 'USDT' in balance:
-            # 正常にUSDT残高が取得できた場合
-            if usdt_free == 0.0:
-                 logging.warning(f"⚠️ USDT残高 (free) は0.0です。取引は監視のみとなります。")
-            
-            # 💡 DEBUG (Success): 正常な取得パスをログ
-            logging.info(f"✅ DEBUG (Balance Success): CCXT標準形式でUSDT残高 {usdt_free} を取得しました。")
-            return usdt_free
+        # 1. CCXT標準の Unified Balance 構造から残高を取得 (最も信頼性の高い方法)
+        
+        # 1.1. 通貨キーがトップレベルにある場合 (例: balance['USDT']['free'])
+        if 'USDT' in balance and isinstance(balance['USDT'], dict):
+             usdt_free = balance['USDT'].get('free', 0.0)
+             if usdt_free > 0.0:
+                  logging.info(f"✅ DEBUG (Balance Success - Top Key): CCXT標準形式 (トップキー) でUSDT残高 {usdt_free} を取得しました。")
+                  return usdt_free
+                  
+        # 1.2. Unifiedオブジェクトの 'free' ディクショナリにある場合 (例: balance['free']['USDT'])
+        # 💡 ログに見られたキー構成 (['info', 'free', 'used', 'total']) の場合の標準的な取得パスです。
+        patch_free_unified = balance.get('free', {}).get('USDT', 0.0)
+        if patch_free_unified > 0.0:
+             logging.warning(f"⚠️ DEBUG (Patch 1/2 - Unified Free): 'free' オブジェクトからUSDT残高 {patch_free_unified} を取得しました。")
+             return patch_free_unified
+             
+        # 2. Raw Info 強制パッチ (MEXC固有の対応 - 最終手段)
+        try:
+            raw_info = balance.get('info', {})
+            # MEXCの現物資産リスト (例: "assets": [{"currency": "USDT", "availableBalance": "123.45", ...}])
+            if isinstance(raw_info.get('assets'), list):
+                for asset in raw_info['assets']:
+                    if asset.get('currency') == 'USDT':
+                        available_balance = float(asset.get('availableBalance', 0.0))
+                        if available_balance > 0.0:
+                            logging.warning(f"⚠️ DEBUG (Patch 2/2 - Raw Info): 'info' -> 'assets' からUSDT残高 {available_balance} を強制的に取得しました。")
+                            return available_balance
+                            
+        except Exception as e:
+            logging.warning(f"⚠️ DEBUG (Patch Info Error): MEXC Raw Info パッチでエラー発生: {e}")
+            pass
 
-        # 2. CCXT標準形式でUSDTキーが存在しない場合の強制パッチロジック
+        # 3. 取得失敗時のログ出力と終了
+        logging.error(f"❌ 残高取得エラー: USDT残高が取得できませんでした。")
+        logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**、あるいは**MEXCのCCXT形式**を再度確認してください。")
+        
+        available_currencies = list(balance.keys())
+        logging.error(f"🚨🚨 DEBUG (Balance): CCXTから返されたRaw Balance Objectのキー: {available_currencies}")
+        
+        if available_currencies and len(available_currencies) > 3: 
+             other_count = max(0, len(available_currencies) - 5)
+             logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies[:5]}... (他 {other_count} 通貨)")
+             logging.info(f"もしUSDTが見当たらない場合、MEXCの**サブアカウント**または**その他のウォレットタイプ**の残高になっている可能性があります。APIキーの設定を確認してください。")
+        elif available_currencies:
+             logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies}")
         else:
-            logging.error(f"❌ 残高取得エラー: `fetch_balance`の結果に'USDT'キーが見つかりませんでした。")
-            logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**、あるいは**MEXCのCCXT形式**を再度確認してください。")
-            
-            available_currencies = list(balance.keys())
-            logging.error(f"🚨🚨 DEBUG (Balance): CCXTから返されたRaw Balance Objectのキー: {available_currencies}")
-            
-            # --- 強制パッチ開始 ---
-            # MEXCが 'info', 'free', 'used', 'total' のキーのみを返した場合、'free' または 'total' の下に通貨情報があるか試す
-            
-            # 2.1. 'free' の下に USDT があるかチェック (一部の非標準的な取引所の形式)
-            patch_free = balance.get('free', {}).get('USDT', 0.0)
-            if patch_free > 0.0:
-                 logging.warning(f"⚠️ DEBUG (Patch 1/2): 'free' オブジェクトからUSDT残高 {patch_free} を強制的に取得しました。API設定を確認してください。")
-                 return patch_free
-                 
-            # 2.2. 'info' の中を探す (MEXCのRawなAPI応答を直接探す)
-            try:
-                raw_info = balance.get('info', {})
-                # MEXCの現物資産リスト (例: "assets": [{"currency": "USDT", "availableBalance": "123.45", ...}])
-                if isinstance(raw_info.get('assets'), list):
-                    for asset in raw_info['assets']:
-                        if asset.get('currency') == 'USDT':
-                            available_balance = float(asset.get('availableBalance', 0.0))
-                            if available_balance > 0.0:
-                                logging.warning(f"⚠️ DEBUG (Patch 2/2): 'info' -> 'assets' からUSDT残高 {available_balance} を強制的に取得しました。")
-                                return available_balance
-                                
-            except Exception as e:
-                logging.warning(f"⚠️ DEBUG (Patch Info Error): MEXC Raw Info パッチでエラー発生: {e}")
-                pass
-            
-            # --- 強制パッチ終了 ---
+             logging.info(f"💡 DEBUG: CCXT balance objectが空か、残高情報自体が取得できていません。")
 
-            # パッチも失敗した場合、v19.0.10のログを出力して終了
-            if available_currencies and len(available_currencies) > 3: 
-                 other_count = max(0, len(available_currencies) - 5)
-                 logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies[:5]}... (他 {other_count} 通貨)")
-                 logging.info(f"もしUSDTが見当たらない場合、MEXCの**サブアカウント**または**その他のウォレットタイプ**の残高になっている可能性があります。APIキーの設定を確認してください。")
-            elif available_currencies:
-                 logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies}")
-            else:
-                 logging.info(f"💡 DEBUG: CCXT balance objectが空か、残高情報自体が取得できていません。")
-
-            return 0.0 # 0.0を返してBOTは継続させる。
-
+        return 0.0 
         
     except ccxt.AuthenticationError:
         logging.error("❌ 残高取得エラー: APIキー/Secretが不正です (AuthenticationError)。")
@@ -1022,19 +1013,12 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
         
     price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
     
-    for _, result in zip(symbols_to_check, price_results):
+    # 取得結果から価格をキャッシュに格納 (シンボル名を適切に取得するロジックを簡略化)
+    for symbol, result in zip(symbols_to_check, price_results):
         if isinstance(result, Tuple) and result[1] == "Success":
             _, _, price = result
-            symbol = result[0]['symbol'].iloc[0] # DataFrameからシンボルを抽出 (ここは修正が必要)
-            
-            # 簡略化のため、シンボル名がOHLCVのタプルに含まれるという前提で進めます
-            # 実際には、タスクとシンボルを対応させる辞書が必要です
-            # ここでは便宜上、シンボルをキーとして価格をキャッシュします
             if price is not None:
-                # シンボル名を適切に取得する必要がありますが、一旦ここはログで代用
-                # 正しいシンボル名を取得するためには、タスク作成時にシンボル名を紐づける必要があります。
-                # 簡略化のため、ACTUAL_POSITIONSのキーと価格を対応させるという前提で続行します。
-                price_cache[symbols_to_check[price_results.index(result)]] = price
+                price_cache[symbol] = price
     
     
     # 決済ロジック
@@ -1183,7 +1167,7 @@ async def main_loop():
             # 10. ループの完了
             LAST_UPDATE_TIME = time.time()
             LAST_SUCCESS_TIME = time.time()
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.11)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.12)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1200,11 +1184,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.11 - MEXC Balance Force Patch")
+app = FastAPI(title="Apex BOT API", version="v19.0.12 - MEXC Balance Logic Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.11 Startup initializing (MEXC Balance Force Patch)...") 
+    logging.info("🚀 Apex BOT v19.0.12 Startup initializing (MEXC Balance Logic Fix)...") 
     
     # CCXT初期化
     await initialize_ccxt_client()
@@ -1228,7 +1212,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.11 - MEXC Balance Force Patch",
+        "bot_version": "v19.0.12 - MEXC Balance Logic Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1240,7 +1224,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.11 - MEXC Balance Force Patch"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.12 - MEXC Balance Logic Fix"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=os.environ.get("PORT", 8000))
