@@ -1,10 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.3 - MEXC Spot Trading Implementation (Balance Re-Hotfix)
+# Apex BOT v19.0.4 - MEXC Balance Fetch Robustness & Log Enhancement
 # 
 # 修正ポイント:
-# 1. 🚨【致命的な再修正】CCXTのfetch_balanceエラー 'mexc fetchBalance() not support self method' に対応。
-#    fetch_current_balance_usdt から params={'type': 'SPOT'} の指定を削除し、
-#    クライアント初期化時の defaultType: 'spot' に依存するように変更。
+# 1. 🚨【ログ強化】fetch_current_balance_usdt内のエラーロジックを改善。
+#    USDTキーがない場合に、他の通貨の残高があるかどうかをチェックし、
+#    エラーメッセージを「権限不足」か「キー入力ミス」かを示唆するように詳細化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -114,7 +114,7 @@ def format_price_utility(price: float, symbol: str) -> str:
     if price < 0.0001: return f"{price:.8f}"
     if price < 0.01: return f"{price:.6f}"
     if price < 1.0: return f"{price:.4f}"
-    if price < 100.0: return f"{price:.2f}"
+    if price < 100.0: return f"{price:,.2f}"
     return f"{price:,.2f}"
 
 def format_usdt(amount: float) -> str:
@@ -288,7 +288,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ 成行買いを実行し、SL/TP指値売り注文を自動設定します。</pre>"
-        f"<i>Bot Ver: v19.0.3 (Balance Re-Hotfix)</i>" 
+        f"<i>Bot Ver: v19.0.4 (Log Enhancement)</i>" 
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -308,7 +308,7 @@ async def send_position_status_notification(event_type: str, new_order_info: Opt
             f"  - <b>オープンポジション</b>: <code>なし</code>\n"
             f"  - <b>取引所</b>: <code>{CCXT_CLIENT_NAME} Spot</code>\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"<i>Bot Ver: v19.0.3 (Balance Re-Hotfix)</i>" 
+            f"<i>Bot Ver: v19.0.4 (Log Enhancement)</i>" 
         )
         send_telegram_html(message)
         return
@@ -357,7 +357,7 @@ async def send_position_status_notification(event_type: str, new_order_info: Opt
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - <b>合計未実現損益</b>: {format_pnl(total_unrealized_pnl)}\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.3 (Balance Re-Hotfix)</i>" 
+        f"<i>Bot Ver: v19.0.4 (Log Enhancement)</i>" 
     )
     
     send_telegram_html(message)
@@ -394,7 +394,7 @@ async def initialize_ccxt_client():
         logging.error("CCXTクライアントの初期化に失敗しました。")
 
 
-# 💡 修正後の fetch_current_balance_usdt (params削除)
+# 💡 修正後の fetch_current_balance_usdt (エラーログ詳細化)
 async def fetch_current_balance_usdt() -> float:
     """CCXTから現在のUSDT残高を取得する。失敗した場合は0を返す。"""
     global EXCHANGE_CLIENT
@@ -402,26 +402,33 @@ async def fetch_current_balance_usdt() -> float:
         return 0.0
         
     try:
-        # 🚨 再修正: params={'type': 'SPOT'} の指定を削除。
-        #           クライアント初期化時の defaultType: 'spot' に依存する
         balance = await EXCHANGE_CLIENT.fetch_balance()
         
-        # USDT残高の存在をチェックする
-        if 'USDT' not in balance:
-            if any(v.get('total', 0) > 0 for k, v in balance.items()):
-                 logging.warning(f"残高取得エラー: 残高情報に'USDT'キーが見つかりません。他の通貨に残高があるか、API権限設定を確認してください。")
+        usdt_info = balance.get('USDT')
+        
+        if not usdt_info:
+            # 💡 USDTが見つからない場合のより詳細なチェック
+            # 'info'キーやゼロ残高の通貨を除外し、他の通貨の残高があるか確認
+            has_any_balance = any(
+                (v.get('total', 0) > 0 and k not in ['info']) for k, v in balance.items() if isinstance(v, dict)
+            )
+            
+            if has_any_balance:
+                 # USDT以外の残高はあるが、USDTがない場合
+                 logging.warning(f"残高取得エラー（USDT不足）: 他の通貨の**残高は確認されました**が、USDT残高が取得できません。取引所側のAPIキーの**Spot残高読み取り権限**、または**アカウントのUSDT残高状況**を確認してください。")
             else:
-                 logging.error(f"残高取得エラー: 残高情報に'USDT'キーが見つかりません。APIキー/権限設定を確認してください。")
+                 # どの通貨の残高もない場合
+                 logging.error(f"残高取得エラー（キー/権限不備）: 残高情報に'USDT'キーが見つからず、他のどの通貨の残高も確認できません。APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を再度確認してください。")
             return 0.0
             
-        # SpotアカウントのUSDT残高を取得 (freeまたはtotalを使用)
-        usdt_free = balance['USDT'].get('free', 0.0) 
+        # SpotアカウントのUSDT残高を取得 (freeを使用)
+        usdt_free = usdt_info.get('free', 0.0) 
         
         return usdt_free
         
     except Exception as e:
-        # APIキーがない/エラーの場合は残高0として処理
-        logging.error(f"残高取得エラー（APIキー未設定/通信エラーの可能性）: {e}")
+        # APIキーがない/通信エラーの場合は残高0として処理
+        logging.error(f"残高取得エラー（通信エラーの可能性）: {e}")
         return 0.0
 
 
@@ -511,9 +518,9 @@ async def get_crypto_macro_context() -> Dict:
         
         if not df_eth.empty:
             if df_eth['close'].iloc[-1] > df_eth['sma'].iloc[-1]:
-                eth_trend = 1
+                btc_trend = 1
             elif df_eth['close'].iloc[-1] < df_eth['sma'].iloc[-1]:
-                eth_trend = -1
+                btc_trend = -1
 
     sentiment_score = 0.0
     if btc_trend == 1 and eth_trend == 1:
@@ -1056,11 +1063,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.3 - Balance Re-Hotfix") 
+app = FastAPI(title="Apex BOT API", version="v19.0.4 - Log Enhancement") 
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.3 Startup initializing (Balance Re-Hotfix)...") 
+    logging.info("🚀 Apex BOT v19.0.4 Startup initializing (Log Enhancement)...") 
     
     await initialize_ccxt_client()
     
@@ -1084,7 +1091,7 @@ def get_status(request: Request):
     
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.3 - Balance Re-Hotfix", 
+        "bot_version": "v19.0.4 - Log Enhancement", 
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1101,7 +1108,7 @@ def home_view(request: Request):
     logging.info(f"API Access - IP: {client_ip}") 
     
     return JSONResponse(content={
-        "message": f"Apex BOT API is running. Version: v19.0.3 - Balance Re-Hotfix",
+        "message": f"Apex BOT API is running. Version: v19.0.4 - Log Enhancement",
         "client_ip": client_ip 
     })
 
