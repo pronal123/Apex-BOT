@@ -1,11 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.12 - MEXC Balance Logic Fix (完全版 - 省略なし)
+# Apex BOT v19.0.13 - Balance Logic Final Debug (完全版 - 省略なし)
 # 
 # 強化ポイント:
-# 1. 【MEXC残高強制パッチ修正】`fetch_current_balance_usdt`内の残高取得ロジックを根本的に修正し、
-#    `balance['free']['USDT']` および Raw Info パッチの両方に対応。
-# 2. 【バージョン更新】全てのバージョン情報を v19.0.12 に更新。
-# 3. 【メッセージ関数展開】`format_integrated_analysis_message` 関数を完全に展開。
+# 1. 【最終デバッグログ追加】CCXT Unified Balance の 'free' および 'total' オブジェクトの
+#    中身（通貨キー）をログに出力し、残高取得失敗の原因を特定しやすくしました。
+# 2. 【バージョン更新】全てのバージョン情報を v19.0.13 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -285,7 +284,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.12 (MEXC Balance Logic Fix)</i>" 
+        f"<i>Bot Ver: v19.0.13 (Balance Logic Final Debug)</i>" 
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -323,7 +322,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict) ->
         
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.12</i>"
+        f"<i>Bot Ver: v19.0.13</i>"
     )
     
     return header + details + footer
@@ -341,7 +340,7 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS)
     
     if header_msg == "🤖 初回起動通知":
-        full_message = f"🤖 **Apex BOT v19.0.12 起動完了**\n\n{message}"
+        full_message = f"🤖 **Apex BOT v19.0.13 起動完了**\n\n{message}"
     else:
         full_message = f"{header_msg}\n\n{message}"
         
@@ -406,7 +405,7 @@ async def initialize_ccxt_client():
 
 
 async def fetch_current_balance_usdt() -> float:
-    """CCXTから現在のUSDT残高を取得する。(v19.0.12 ロジック修正)"""
+    """CCXTから現在のUSDT残高を取得する。(v19.0.13 デバッグログ強化)"""
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0
@@ -454,10 +453,17 @@ async def fetch_current_balance_usdt() -> float:
 
         # 3. 取得失敗時のログ出力と終了
         logging.error(f"❌ 残高取得エラー: USDT残高が取得できませんでした。")
+        
+        # 💡 V19.0.13: デバッグログの強化
+        free_keys = list(balance.get('free', {}).keys())
+        total_keys = list(balance.get('total', {}).keys())
+        logging.error(f"🚨🚨 DEBUG (Free Keys): CCXT Unified 'free' オブジェクト内の通貨キー: {free_keys}")
+        logging.error(f"🚨🚨 DEBUG (Total Keys): CCXT Unified 'total' オブジェクト内の通貨キー: {total_keys}")
+        
         logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**、あるいは**MEXCのCCXT形式**を再度確認してください。")
         
         available_currencies = list(balance.keys())
-        logging.error(f"🚨🚨 DEBUG (Balance): CCXTから返されたRaw Balance Objectのキー: {available_currencies}")
+        logging.error(f"🚨🚨 DEBUG (Raw Balance Keys): CCXTから返されたRaw Balance Objectのトップレベルキー: {available_currencies}")
         
         if available_currencies and len(available_currencies) > 3: 
              other_count = max(0, len(available_currencies) - 5)
@@ -1179,7 +1185,7 @@ async def main_loop():
             # 10. ループの完了
             LAST_UPDATE_TIME = time.time()
             LAST_SUCCESS_TIME = time.time()
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.12)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.13)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1197,11 +1203,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.12 - MEXC Balance Logic Fix")
+app = FastAPI(title="Apex BOT API", version="v19.0.13 - Balance Logic Final Debug")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.12 Startup initializing (MEXC Balance Logic Fix)...") 
+    logging.info("🚀 Apex BOT v19.0.13 Startup initializing (Balance Logic Final Debug)...") 
     
     # CCXT初期化
     await initialize_ccxt_client()
@@ -1225,7 +1231,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.12 - MEXC Balance Logic Fix",
+        "bot_version": "v19.0.13 - Balance Logic Final Debug",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1237,7 +1243,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.12 - MEXC Balance Logic Fix"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.13 - Balance Logic Final Debug"})
 
 if __name__ == "__main__":
     # 環境変数PORTが設定されている場合はそれを使用
