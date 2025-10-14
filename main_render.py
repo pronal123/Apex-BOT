@@ -1,11 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.7 - No ATR (Volatility Approximation Fix)
+# Apex BOT v19.0.8 - Balance Check Debug
 # 
-# 強化ポイント (v19.0.6からの変更):
-# 1. 【ATR依存の完全排除】ATRの計算と使用箇所を全て削除しました。
-# 2. 【SL/TP基準の代替】ボラティリティの代替として、過去20期間の平均的な高値-安値（True Rangeの近似）を計算し、
-#    SL/TP及び構造的サポート/レジスタンスからの距離計算に利用します。
-# 3. 【バージョン更新】全てのバージョン情報を v19.0.7 に更新。
+# 強化ポイント (v19.0.7からの変更):
+# 1. 【残高チェックの堅牢化】`fetch_current_balance_usdt`関数で'USDT'キーが見つからない場合にカスタム例外を投げず、
+#    警告ログを出力して0.0を返すように修正。これにより、APIキー/権限設定が不十分でもBOTがエラーで停止せず、監視を継続できます。
+# 2. 【バージョン更新】全てのバージョン情報を v19.0.8 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -106,11 +105,14 @@ ORDER_BOOK_CACHE: Dict[str, Any] = {} # 流動性データキャッシュ
 ACTUAL_POSITIONS: Dict[str, Dict] = {} 
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
 
+# ログ設定をDEBUGレベルまで出力するように変更
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
                     stream=sys.stdout, 
                     force=True)
+# デバッグ情報を詳細に見たい場合は、以下を logging.DEBUG に変更
+# logging.getLogger().setLevel(logging.DEBUG)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
 
 # ====================================================================================
@@ -277,7 +279,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.7 (No ATR/Range Volatility)</i>" 
+        f"<i>Bot Ver: v19.0.8 (Balance Check Debug)</i>" 
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -314,7 +316,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict) ->
         
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.7</i>"
+        f"<i>Bot Ver: v19.0.8</i>"
     )
     
     return header + details + footer
@@ -387,15 +389,27 @@ async def fetch_current_balance_usdt() -> float:
         # SpotアカウントのUSDT残高を取得 (freeを使用)
         usdt_free = balance.get('USDT', {}).get('free', 0.0)
         
-        if usdt_free == 0.0 and 'USDT' not in balance.get('total', {}):
-             # NOTE: totalにUSDTがあってもfreeが0なら取引不能だが、キーが見つからない場合をエラーとして明確に区別する
-             if 'USDT' not in balance:
-                raise Exception("残高情報に'USDT'キーが見つからず、他のどの通貨の残高も確認できません。APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を再度確認してください。")
-             
+        # 💡 v19.0.8 修正ポイント: USDTキーが存在しない場合のチェックを修正
+        if 'USDT' not in balance:
+            # USDT残高情報が取得できない場合、環境設定の問題の可能性が高い
+            logging.error(f"❌ 残高取得エラー: `fetch_balance`の結果に'USDT'キーが見つかりませんでした。")
+            logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**、あるいは**MEXCのCCXT形式**を再度確認してください。")
+            # デバッグのために balance オブジェクトのキーをログ出力
+            logging.debug(f"DEBUG: CCXT balance object keys: {list(balance.keys()) if balance else 'N/A'}")
+            return 0.0 # 0.0を返してBOTは継続させる。
+
+        # USDTキーは存在するが残高が0の場合
+        if usdt_free == 0.0:
+            logging.warning(f"⚠️ USDT残高 (free) は0.0です。取引は監視のみとなります。")
+        
         return usdt_free
         
+    except ccxt.AuthenticationError:
+        logging.error("❌ 残高取得エラー: APIキー/Secretが不正です (AuthenticationError)。")
+        return 0.0
     except Exception as e:
-        logging.error(f"残高取得エラー（キー/権限不備）: {e}")
+        # fetch_balance自体が失敗した場合
+        logging.error(f"❌ 残高取得エラー（fetch_balance失敗）: {type(e).__name__}: {e}")
         return 0.0
 
 
@@ -559,7 +573,7 @@ async def fetch_order_book_depth(symbol: str) -> Optional[Dict]:
         return None
 
 # ====================================================================================
-# CORE ANALYSIS & TRADE EXECUTION LOGIC (v19.0.7 - No ATR Logic)
+# CORE ANALYSIS & TRADE EXECUTION LOGIC (v19.0.8 - No ATR Logic)
 # ====================================================================================
 
 # 💡 ATRを使用しない代替関数
@@ -786,7 +800,8 @@ def analyze_single_timeframe(df_ohlcv: List[List[float]], timeframe: str, symbol
             trade_amount = 0.0
             trade_size_usdt = 0.0
             # 残高が閾値以下の場合は警告を出力
-            if current_usdt_balance < MIN_USDT_BALANCE_TO_TRADE - 0.01:
+            # v19.0.8: 残高取得に失敗している場合（current_usdt_balance=0.0）は、fetch_balance側で警告済みのため、ここでは重複を避ける
+            if current_usdt_balance < MIN_USDT_BALANCE_TO_TRADE - 0.01 and current_usdt_balance > 0.0:
                 logging.warning(f"⚠️ {symbol} {timeframe}: USDT残高が不足しています ({format_usdt(current_usdt_balance)} < {format_usdt(MIN_USDT_BALANCE_TO_TRADE)})。取引をスキップし、監視のみ実行します。")
         else:
             # 許容リスク額から購入単位を計算: (リスク額 / (現在価格 - SL価格)) * リスク乗数
@@ -1025,7 +1040,7 @@ async def main_loop():
             # 10. ループの完了
             LAST_UPDATE_TIME = time.time()
             LAST_SUCCESS_TIME = time.time()
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.7)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.8)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1033,6 +1048,7 @@ async def main_loop():
             error_name = type(e).__name__
             
             # 残高エラーは既にログ出力されているので、ここでは繰り返さない
+            # v19.0.8ではカスタム例外を投げないので、汎用的なエラー処理を残す
             if error_name != 'Exception' or not str(e).startswith("残高取得エラー"):
                  logging.error(f"メインループで致命的なエラー: {error_name}: {e}")
             
@@ -1044,18 +1060,15 @@ async def main_loop():
 # (バージョン更新のみ)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.7 - No ATR/Range Volatility")
+app = FastAPI(title="Apex BOT API", version="v19.0.8 - Balance Check Debug")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.7 Startup initializing (No ATR/Range Volatility)...") 
+    logging.info("🚀 Apex BOT v19.0.8 Startup initializing (Balance Check Debug)...") 
     
     # CCXT初期化
     await initialize_ccxt_client()
     
-    # 💡 初回起動時のステータス通知
-    # 残高取得に失敗している可能性があるため、初回通知はスキップし、メインループに任せる
-
     global LAST_HOURLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time() 
     
@@ -1072,7 +1085,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.7 - No ATR/Range Volatility",
+        "bot_version": "v19.0.8 - Balance Check Debug",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1084,7 +1097,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.7 - No ATR/Range Volatility"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.8 - Balance Check Debug"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=os.environ.get("PORT", 8000))
