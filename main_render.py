@@ -1,11 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.18 - FX-Macro-Sensitivity Patch (完全版 - 表示ロジック＆デプロイ修正)
+# Apex BOT v19.0.19 - Real Balance Impl (実残高取得実装)
 #
 # 修正ポイント:
-# 1. 【表示ロジック復元】format_integrated_analysis_message関数内で、v19.0.17に存在した
-#    プラス/マイナス要因の表示ロジックを完全に復元しました。
-# 2. 【デプロイ修正】startup_event関数内で、同期関数send_position_status_notification()
-#    への不要な 'await' 呼び出しを削除し、デプロイ時のTypeErrorを解消しました。
+# 1. 【Balance Impl】fetch_current_balance_usdt 関数内のロジックを、
+#    CCXTのfetch_balance()を呼び出してUSDT現物残高の実数値を取得するように修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -184,7 +182,7 @@ def send_position_status_notification(message: str):
     send_telegram_html(message)
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
-    """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.18修正版)"""
+    """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.19修正版)"""
 
     valid_signals = [s for s in signals if s.get('side') == 'ロング']
     if not valid_signals:
@@ -394,7 +392,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の{'対象です。' if is_tradable else '対象外です。'}</pre>"
-        f"<i>Bot Ver: v19.0.18 (FX-Macro-Sensitivity Patch)</i>"
+        f"<i>Bot Ver: v19.0.19 (Real Balance Impl)</i>"
     )
 
     return header + trade_plan + summary + plus_section + minus_section + footer
@@ -418,13 +416,29 @@ async def initialize_ccxt_client():
     logging.info(f"CCXTクライアントを {CCXT_CLIENT_NAME} で初期化しました。")
 
 async def fetch_current_balance_usdt(client: ccxt_async.Exchange) -> float:
-    """現在のUSDT現物残高を取得する (シミュレーション)"""
+    """現在のUSDT現物残高を取得する (CCXTによる実残高取得)"""
     try:
-        if not client: return 0.0
-        # 実際にはCCXTのfetch_balanceを呼び出す。ここではシミュレーション値を返す
-        return 10000.0 
+        if not client:
+            logging.warning("CCXTクライアントが未初期化です。")
+            return 0.0
+
+        # 🌟 実際にはCCXTのfetch_balanceを呼び出し、実残高を取得
+        balance = await client.fetch_balance()
+        
+        # 'USDT'の残高情報があるか確認
+        if 'USDT' in balance['free'] and balance['free']['USDT'] is not None:
+            # 現物取引における利用可能残高 (free) を返す
+            return float(balance['free']['USDT'])
+        elif 'USDT' in balance['total'] and balance['total']['USDT'] is not None:
+            # freeがない場合、totalを返す
+            return float(balance['total']['USDT'])
+            
+        logging.warning("CCXTからのUSDT残高取得に失敗しました。残高が見つかりません。")
+        return 0.0
+        
     except Exception as e:
-        logging.error(f"USDT残高取得エラー: {e}")
+        logging.error(f"USDT残高取得エラー (CCXT client: {client.id if client else 'N/A'}): {e}", exc_info=True)
+        # エラー時は残高を0として処理を継続
         return 0.0
 
 async def update_symbols_by_volume(client: ccxt_async.Exchange):
@@ -523,7 +537,8 @@ async def get_fx_macro_context() -> Dict:
 
 
     except Exception as e:
-        logging.warning(f"FXデータ (yfinance) 取得エラー: {e}")
+        # DXYデータ取得エラーの可能性 (ログに出ていた $^DXY: possibly delisted のケース)
+        logging.error(f"FXデータ (yfinance) 取得エラー: {e}")
         # エラー時は中立と判断
         pass 
 
@@ -542,7 +557,7 @@ async def get_fx_macro_context() -> Dict:
 
 
 # ====================================================================================
-# ANALYSIS CORE (v19.0.18 強化版)
+# ANALYSIS CORE (v19.0.19 強化版)
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -566,7 +581,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['STOCHd_14_3_3'] = stoch['STOCHd_14_3_3']
 
     # BBANDS
-    bbands = df.ta.bbands(append=True)
+    # 修正: length=5を明示的に指定し、KeyErrorを解消
+    bbands = df.ta.bbands(length=5, append=False)
     df['BBL_5_2.0'] = bbands['BBL_5_2.0']
     df['BBU_5_2.0'] = bbands['BBU_5_2.0']
 
@@ -700,7 +716,7 @@ def get_whale_bias_score(symbol: str, price: float, side: str) -> Tuple[float, f
     return score_impact, whale_imbalance_penalty_value
 
 def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Optional[Dict]:
-    """単一の時間足と銘柄に対して分析を実行する (v19.0.18)"""
+    """単一の時間足と銘柄に対して分析を実行する (v19.0.19)"""
 
     if df is None or len(df) < 50: 
         return None
@@ -1006,7 +1022,7 @@ async def main_loop():
         try:
             logging.info("--- メインループ開始 ---")
             
-            # 1. 資産残高の更新
+            # 1. 資産残高の更新 (実残高取得)
             CURRENT_USDT_BALANCE = await fetch_current_balance_usdt(EXCHANGE_CLIENT)
             logging.info(f"現在のUSDT残高: ${format_usdt(CURRENT_USDT_BALANCE)}")
             
@@ -1070,16 +1086,16 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.18 - FX-Macro-Sensitivity Patch")
+app = FastAPI(title="Apex BOT API", version="v19.0.19 - Real Balance Impl")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.18 Startup initializing (FX-Macro-Sensitivity Patch)...")
+    logging.info("🚀 Apex BOT v19.0.19 Startup initializing (Real Balance Impl)...")
 
     await initialize_ccxt_client()
 
-    # ★ 修正箇所: send_position_status_notification は同期関数なのでawaitを削除
-    send_position_status_notification("🤖 BOT v19.0.18 初回起動通知")
+    # 修正済み: send_position_status_notification は同期関数なのでawaitを削除
+    send_position_status_notification("🤖 BOT v19.0.19 初回起動通知")
 
     global LAST_HOURLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
@@ -1098,7 +1114,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.18 - FX-Macro-Sensitivity Patch",
+        "bot_version": "v19.0.19 - Real Balance Impl",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1111,10 +1127,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.18 - FX-Macro-Sensitivity Patch"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.19 - Real Balance Impl"})
 
 if __name__ == "__main__":
-    # Renderのデプロイ環境に合わせてmain_render.pyというファイル名で実行されることを想定
-    # (FastAPIの起動ファイル名に合わせる必要があるため、ここではuvicorn.runはコメントアウトまたは環境に合わせて調整してください)
-    # uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
     pass
