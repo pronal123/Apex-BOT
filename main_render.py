@@ -1,13 +1,9 @@
 # ====================================================================================
-# Apex BOT v18.0.4 - Telegram Log/Timeout Fix
+# Apex BOT v18.0.5 - MACD/Macro Stability Fix
 # 
-# 強化ポイント:
-# 1. 【通知メッセージ強化】分析で算出した初期TP価格 (tp1) を通知メッセージに明記。
-# 2. 【移動平均線】SMA 50 (4h) を使用し、長期トレンド逆行時に強力なペナルティ (-0.20) を適用。
-# 3. 【ファンダメンタルズ/流動性】板の厚み（オーダーブック深度）を取得し、流動性フィルターとしてスコアリングに導入。
-# 4. 【ファンダメンタルズ/出来高】OBV (On-Balance Volume) によるモメンタム確証を追加。
-# 5. 【恐怖指数】FGI (Fear & Greed Index) プロキシを導入し、市場センチメントをスコアに反映。
-# 6. 【ログ安定化】Telegram通知にタイムアウト(10秒)を設定し、応答がない場合のハングアップとログ欠落を防止。
+# 修正ポイント:
+# 1. 【MACD KeyError修正】analyze_single_timeframe関数内でMACDHの列が存在しない場合にKeyErrorが発生する問題を修正。
+# 2. 【yfinance安定化】yfinance呼び出しから、エラーの原因となっていたXAUUSD=Xを除外。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -175,7 +171,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     【v17.1.3 改良版】現在単価、長期トレンド、ファンダ/恐怖指数情報に加え、初期TP目標価格を追加した通知メッセージを生成する
     """
     
-    valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral"]]
+    valid_signals = [s for s in signals if s.get('side') not in ["DataShortage", "ExchangeError", "Neutral", "DataShortage (MACD)"]] # 💡 MACDエラーも除外
     if not valid_signals:
         return "" 
         
@@ -312,7 +308,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ Limit注文は、指定水準到達時のみ約定します。DTS戦略により、SLは自動的に追跡され利益を最大化します。</pre>"
-        f"<i>Bot Ver: v18.0.4 (Telegram Log/Timeout Fix)</i>"
+        f"<i>Bot Ver: v18.0.5 (MACD/Macro Stability Fix)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -630,7 +626,7 @@ def analyze_structural_proximity(price: float, pivots: Dict, side: str, atr_val:
 
 
 async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: Dict, client_name: str, long_term_trend: str, long_term_penalty_applied: bool) -> Optional[Dict]:
-    """ 単一の時間軸で分析とシグナル生成を行う関数 (v17.1.3) """
+    """ 単一の時間軸で分析とシグナル生成を行う関数 (v18.0.5) """
     
     # 1. データ取得とFunding Rate/Order Book取得
     ohlcv, status, client_used = await fetch_ohlcv_with_fallback(client_name, symbol, timeframe)
@@ -679,9 +675,20 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     
     # MACDクロス
     macd_data = ta.macd(df['close'])
-    df['MACD'] = macd_data['MACD_12_26_9']
-    df['MACDH'] = macd_data['MACDH_12_26_9']
-    df['MACD_SIG'] = macd_data['MACDS_12_26_9']
+    
+    # 💡 修正: MACDH_12_26_9 の KeyError 対策
+    macd_key = 'MACD_12_26_9'
+    macdh_key = 'MACDH_12_26_9'
+    macds_key = 'MACDS_12_26_9'
+    
+    if macd_key not in macd_data.columns or macdh_key not in macd_data.columns or macds_key not in macd_data.columns:
+        # MACDデータが不完全な場合は、この時間軸の分析をスキップする
+        return {'symbol': symbol, 'timeframe': timeframe, 'side': 'DataShortage (MACD)', 'score': 0.00, 'rrr_net': 0.00}
+
+    df['MACD'] = macd_data[macd_key]
+    df['MACDH'] = macd_data[macdh_key]
+    df['MACD_SIG'] = macd_data[macds_key]
+    
     df['MACD_CROSS_UP'] = (df['MACD'].shift(1) < df['MACD_SIG'].shift(1)) & (df['MACD'] >= df['MACD_SIG'])
     df['MACD_CROSS_DOWN'] = (df['MACD'].shift(1) > df['MACD_SIG'].shift(1)) & (df['MACD'] <= df['MACD_SIG'])
 
@@ -737,7 +744,7 @@ async def analyze_single_timeframe(symbol: str, timeframe: str, macro_context: D
     elif last_row['close'] < last_row['SMA50']:
         current_trend_str = "Short"
     
-    if long_term_trend_ok and long_term_trend != 'Neutral' and current_trend_str != long_term_trend:
+    if long_term_trend != 'Neutral' and current_trend_str != long_term_trend:
          # 長期足で上昇、短期足で下降トレンドなど、逆行している場合は強力なペナルティ
          score -= LONG_TERM_REVERSAL_PENALTY 
          long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY
@@ -948,7 +955,7 @@ async def run_multi_timeframe_analysis(symbol: str, macro_context: Dict) -> List
     results = await asyncio.gather(*tasks)
     
     for result in results:
-        if result and result.get('side') not in ["DataShortage", "ExchangeError", "Neutral"] and result.get('score', 0.0) >= BASE_SCORE:
+        if result and result.get('side') not in ["DataShortage", "ExchangeError", "Neutral", "DataShortage (MACD)"]:
             signals.append(result)
 
     return signals
@@ -1018,7 +1025,8 @@ async def main_loop():
     # 為替/マクロコンテキストの初期化 (yfinanceによる為替データ取得を含む)
     try:
         # 💡 yfinanceによるFXデータ取得
-        tickers = ['JPY=X', 'EURUSD=X', 'XAUUSD=X'] 
+        # 修正: XAUUSD=X はデータ欠落エラーが頻発するため除外
+        tickers = ['JPY=X', 'EURUSD=X'] 
         FX_DATA_PERIOD = "5d"
         FX_DATA_INTERVAL = "1h"
         # yfinanceのFutureWarningを回避
@@ -1028,7 +1036,7 @@ async def main_loop():
         macro_bias = 0.0
         macro_text = "Neutral"
         
-        if not fx_data_multi.empty:
+        if not fx_data_multi.empty and 'JPY=X' in fx_data_multi.columns:
              jpy_change = (fx_data_multi['JPY=X'].iloc[-1] - fx_data_multi['JPY=X'].iloc[-2]) / fx_data_multi['JPY=X'].iloc[-2]
              
              if jpy_change > 0.005: # 円安 (リスクオン)
@@ -1043,7 +1051,9 @@ async def main_loop():
         logging.info(f"🌎 為替/マクロコンテキスト: {macro_text} (Bias: {macro_bias:.4f})")
         
     except Exception as e:
-        logging.error(f"yfinanceによるFXデータ取得エラー: {e}")
+        error_name = type(e).__name__
+        if error_name != 'HTTPError': # yfinanceのエラーコードを抑制
+             logging.error(f"yfinanceによるFXデータ取得エラー: {e}")
         GLOBAL_MACRO_CONTEXT['fx_bias'] = 0.0
 
     while True:
@@ -1112,11 +1122,11 @@ async def main_loop():
 # (バージョン更新のみ)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v18.0.4 - Telegram Log/Timeout Fix")
+app = FastAPI(title="Apex BOT API", version="v18.0.5 - MACD/Macro Stability Fix")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v18.0.4 Startup initializing...") 
+    logging.info("🚀 Apex BOT v18.0.5 Startup initializing...") 
     asyncio.create_task(main_loop())
 
 @app.on_event("shutdown")
@@ -1130,7 +1140,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v18.0.4 - Telegram Log/Timeout Fix",
+        "bot_version": "v18.0.5 - MACD/Macro Stability Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1141,7 +1151,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": f"Apex BOT API is running. Version: v18.0.4"})
+    return JSONResponse(content={"message": f"Apex BOT API is running. Version: v18.0.5"})
 
 if __name__ == '__main__':
     # 環境変数からポートを取得し、デフォルトは10000とする
