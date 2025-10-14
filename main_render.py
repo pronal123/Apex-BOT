@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.2 - MEXC Spot Trading Implementation (IP Logging Enhancement)
+# Apex BOT v19.0.2 - MEXC Spot Trading Implementation (IP Logging & Balance Hotfix)
 # 
 # 修正ポイント:
 # 1. FastAPIエンドポイントにRequestオブジェクトを追加し、クライアントIPアドレスを取得。
-# 2. IPアドレスをログと/ (root) エンドポイント、/statusの応答に含めるように改良。
-# 3. バージョン情報を v19.0.2 に更新。
+# 2. IPアドレスをログとAPI応答に含めるように改良。
+# 3. 🚨【致命的な修正】CCXTのfetch_balanceエラー（'USDT'キーが見つからない）に対応するため、
+#    Spotアカウントの残高を明示的に要求するようロジックを強化。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -334,7 +335,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ 成行買いを実行し、SL/TP指値売り注文を自動設定します。</pre>"
-        f"<i>Bot Ver: v19.0.2 (IP Logging Enhancement)</i>" # 💡 修正
+        f"<i>Bot Ver: v19.0.2 (IP Logging & Balance Hotfix)</i>" # 💡 修正
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -360,7 +361,7 @@ async def send_position_status_notification(event_type: str, new_order_info: Opt
             f"  - <b>オープンポジション</b>: <code>なし</code>\n"
             f"  - <b>取引所</b>: <code>{CCXT_CLIENT_NAME} Spot</code>\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"<i>Bot Ver: v19.0.2 (IP Logging Enhancement)</i>" # 💡 修正
+            f"<i>Bot Ver: v19.0.2 (IP Logging & Balance Hotfix)</i>" # 💡 修正
         )
         send_telegram_html(message)
         return
@@ -416,7 +417,7 @@ async def send_position_status_notification(event_type: str, new_order_info: Opt
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - <b>合計未実現損益</b>: {format_pnl(total_unrealized_pnl)}\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.2 (IP Logging Enhancement)</i>" # 💡 修正
+        f"<i>Bot Ver: v19.0.2 (IP Logging & Balance Hotfix)</i>" # 💡 修正
     )
     
     send_telegram_html(message)
@@ -426,6 +427,7 @@ async def send_position_status_notification(event_type: str, new_order_info: Opt
 # CCXT & DATA ACQUISITION
 # ====================================================================================
 
+# 💡 修正後の initialize_ccxt_client
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (MEXC)"""
     global EXCHANGE_CLIENT
@@ -436,7 +438,11 @@ async def initialize_ccxt_client():
     config = {
         'timeout': 30000, 
         'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}, 
+        'options': {
+            'defaultType': 'spot',
+            # 💡 修正: CCXTが使用するMEXCのAPIバージョンを指定（安全のため）
+            'defaultSubType': 'spot', 
+        }, 
         'apiKey': mexc_key,
         'secret': mexc_secret,
     }
@@ -449,6 +455,8 @@ async def initialize_ccxt_client():
     else:
         logging.error("CCXTクライアントの初期化に失敗しました。")
 
+
+# 💡 修正後の fetch_current_balance_usdt
 async def fetch_current_balance_usdt() -> float:
     """CCXTから現在のUSDT残高を取得する。失敗した場合は0を返す。"""
     global EXCHANGE_CLIENT
@@ -456,14 +464,28 @@ async def fetch_current_balance_usdt() -> float:
         return 0.0
         
     try:
-        balance = await EXCHANGE_CLIENT.fetch_balance()
-        # SpotアカウントのUSDT残高を取得
-        usdt_free = balance['USDT']['free']
+        # 💡 修正: paramsに明示的に'SPOT'タイプを指定して残高を取得
+        balance = await EXCHANGE_CLIENT.fetch_balance(params={'type': 'SPOT'})
+        
+        # 修正: USDT残高の存在をチェックする
+        if 'USDT' not in balance:
+            # USDTがない場合は、他の残高があるか警告を出す
+            if any(v.get('total', 0) > 0 for k, v in balance.items()):
+                 logging.warning(f"残高取得エラー: 残高情報に'USDT'キーが見つかりません。他の通貨に残高があるか、API権限設定を確認してください。")
+            else:
+                 logging.error(f"残高取得エラー: 残高情報に'USDT'キーが見つかりません。APIキー/権限設定を確認してください。")
+            return 0.0
+            
+        # SpotアカウントのUSDT残高を取得 (freeまたはtotalを使用)
+        usdt_free = balance['USDT'].get('free', 0.0) 
+        
         return usdt_free
+        
     except Exception as e:
         # APIキーがない/エラーの場合は残高0として処理
-        logging.error(f"残高取得エラー（APIキー未設定/エラーの可能性）: {e}")
+        logging.error(f"残高取得エラー（APIキー未設定/通信エラーの可能性）: {e}")
         return 0.0
+
 
 async def update_symbols_by_volume():
     """CCXTを使用してMEXCの出来高トップ30のUSDTペア銘柄を動的に取得・更新する"""
@@ -891,7 +913,9 @@ async def get_open_spot_position() -> Tuple[float, Dict[str, Dict]]:
     """
     global EXCHANGE_CLIENT, ACTUAL_POSITIONS
     
+    # 1. 残高取得 (修正済み関数を呼び出す)
     balance = await fetch_current_balance_usdt()
+    
     open_orders: List = []
     try:
         # Mexcのfetch_open_ordersはシンボル指定が必要なため、既存ポジションのシンボルをチェック
@@ -903,7 +927,8 @@ async def get_open_spot_position() -> Tuple[float, Dict[str, Dict]]:
         # 実際にはすべてのオープンオーダーを取得（ccxt.fetchOpenOrders）
         # ただし、MEXCは全オーダー取得が困難な場合があるため、一旦既存ポジションのシンボルのみ確認 (v19.0.1のホットフィックスに倣う)
         for symbol in symbols_to_check:
-             orders = await EXCHANGE_CLIENT.fetch_open_orders(symbol)
+             # 💡 Spot注文のみを取得
+             orders = await EXCHANGE_CLIENT.fetch_open_orders(symbol, params={'type': 'SPOT'})
              open_orders.extend(orders)
              await asyncio.sleep(0.5) 
              
@@ -974,7 +999,7 @@ async def execute_spot_order(symbol: str, side: str, amount_coin: float, entry_p
                 side='sell',
                 amount=filled_amount,
                 price=sl_price,
-                params={'timeInForce': 'GTC'} 
+                params={'timeInForce': 'GTC', 'type': 'SPOT'} # 💡 SPOTを明示
             )
         
         if tp1_price > 0:
@@ -985,7 +1010,7 @@ async def execute_spot_order(symbol: str, side: str, amount_coin: float, entry_p
                 side='sell',
                 amount=filled_amount,
                 price=tp1_price,
-                params={'timeInForce': 'GTC'} 
+                params={'timeInForce': 'GTC', 'type': 'SPOT'} # 💡 SPOTを明示
             )
 
         # 3. ポジション情報を更新
@@ -1029,7 +1054,7 @@ async def close_spot_position(symbol: str, close_type: str = 'market') -> bool:
         for order in pos['open_orders']:
             try:
                 # CCXTのオーダーIDを使用してキャンセル
-                cancel_tasks.append(EXCHANGE_CLIENT.cancel_order(order['id'], symbol=symbol))
+                cancel_tasks.append(EXCHANGE_CLIENT.cancel_order(order['id'], symbol=symbol, params={'type': 'SPOT'})) # 💡 SPOTを明示
             except Exception as e:
                 logging.warning(f"{symbol}: 注文ID {order['id']} のキャンセルエラー: {e}")
                 
@@ -1045,7 +1070,8 @@ async def close_spot_position(symbol: str, close_type: str = 'market') -> bool:
                 symbol=symbol,
                 type='market',
                 side='sell',
-                amount=amount_to_sell
+                amount=amount_to_sell,
+                params={'type': 'SPOT'} # 💡 SPOTを明示
             )
             logging.info(f"✅ {symbol}: 成行決済注文成功。約定量: {close_order.get('filled', 0):.4f}")
         else:
@@ -1086,7 +1112,7 @@ async def check_and_handle_spot_orders():
         if not tp_open and not sl_open:
             
             # 手動キャンセルを防ぐため、取引履歴で確認するのが確実だが、ここではシンプルに処理する
-            # 💡 どちらかが約定した場合（つまり両方消えた）と見なす
+            # 💡 どちらかが約定した時点で、残りの注文もキャンセルされ、ポジションはクローズしているはず
             
             # どちらかが約定した時点で、残りの注文もキャンセルされ、ポジションはクローズしているはず
             symbols_to_delete.append(symbol)
@@ -1241,11 +1267,11 @@ async def main_loop():
 # (💡 IPアドレス表示のために修正)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.2 - IP Logging Enhancement") # 💡 修正
+app = FastAPI(title="Apex BOT API", version="v19.0.2 - IP Logging & Balance Hotfix") # 💡 修正
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.2 Startup initializing (IP Logging Enhancement)...") # 💡 修正
+    logging.info("🚀 Apex BOT v19.0.2 Startup initializing (IP Logging & Balance Hotfix)...") # 💡 修正
     
     # CCXT初期化
     await initialize_ccxt_client()
@@ -1271,7 +1297,7 @@ def get_status(request: Request): # 💡 修正: Requestオブジェクトを追
     
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.2 - IP Logging Enhancement", # 💡 修正
+        "bot_version": "v19.0.2 - IP Logging & Balance Hotfix", # 💡 修正
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1288,7 +1314,7 @@ def home_view(request: Request): # 💡 修正: Requestオブジェクトを追�
     logging.info(f"API Access - IP: {client_ip}") # 💡 追記
     
     return JSONResponse(content={
-        "message": f"Apex BOT API is running. Version: v19.0.2 - IP Logging Enhancement",
+        "message": f"Apex BOT API is running. Version: v19.0.2 - IP Logging & Balance Hotfix",
         "client_ip": client_ip # 💡 追記
     })
 
