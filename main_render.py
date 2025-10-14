@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.4 - Spot Trading & Position Management Implementation (Logic Safety Fix)
+# Apex BOT v19.0.5 - Spot Trading & Position Management Implementation (Data Integrity Fix)
 # 
-# 強化ポイント (v18.0.3からの変更):
-# 1. 【安全性の向上】テクニカル指標（特にATR）が計算できなかった場合の KeyError を防ぐための安全チェックを実装。
-# 2. 【ロジック修正】analyze_structural_proximity内で不要なATR再計算を削除し、一貫したデータアクセスを保証。
-# 3. 【バージョン更新】全てのバージョン情報を v19.0.4 に更新。
+# 強化ポイント (v19.0.4からの変更):
+# 1. 【データ完全性チェック】analyze_single_timeframe内で、テクニカル指標計算後の df.dropna() 処理後に、
+#    データフレームの行数が30本未満になった場合に警告を出し、分析をスキップするチェックを追加。
+#    これにより、データ不足によるATR_14計算失敗の警告をより明確に処理します。
+# 2. 【バージョン更新】全てのバージョン情報を v19.0.5 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -263,7 +264,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.4 (Logic Safety Fix)</i>" 
+        f"<i>Bot Ver: v19.0.5 (Data Integrity Fix)</i>" 
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -300,7 +301,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict) ->
         
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.4</i>"
+        f"<i>Bot Ver: v19.0.5</i>"
     )
     
     return header + details + footer
@@ -374,7 +375,9 @@ async def fetch_current_balance_usdt() -> float:
         usdt_free = balance.get('USDT', {}).get('free', 0.0)
         
         if usdt_free == 0.0 and 'USDT' not in balance.get('total', {}):
-             raise Exception("残高情報に'USDT'キーが見つからず、他のどの通貨の残高も確認できません。APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を再度確認してください。")
+             # NOTE: totalにUSDTがあってもfreeが0なら取引不能だが、キーが見つからない場合をエラーとして明確に区別する
+             if 'USDT' not in balance:
+                raise Exception("残高情報に'USDT'キーが見つからず、他のどの通貨の残高も確認できません。APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を再度確認してください。")
              
         return usdt_free
         
@@ -396,7 +399,6 @@ async def update_symbols_by_volume():
         usdt_tickers = {}
         # NOTE: 出来高ベースでの銘柄選定は、銘柄数が多いため`fetch_tickers`で一括取得するのが効率的だが、
         # MEXCのレート制限を避けるため、ここでは`fetch_ticker`をシンボルごとに実行する簡易版を採用
-        # 実際には、`fetch_tickers`で全市場を取得するのが望ましい
         
         spot_usdt_symbols = [
              symbol for symbol, market in EXCHANGE_CLIENT.markets.items()
@@ -535,7 +537,7 @@ async def fetch_order_book_depth(symbol: str) -> Optional[Dict]:
         return None
 
 # ====================================================================================
-# CORE ANALYSIS & TRADE EXECUTION LOGIC (v19.0.4 - Safety Fixes applied)
+# CORE ANALYSIS & TRADE EXECUTION LOGIC (v19.0.5 - Data Integrity Fix applied)
 # ====================================================================================
 
 def analyze_structural_proximity(df: pd.DataFrame, price: float, side: str) -> Tuple[float, float, bool, str]:
@@ -616,12 +618,18 @@ def analyze_single_timeframe(df_ohlcv: List[List[float]], timeframe: str, symbol
     df['sma'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH) 
     
     df.dropna(inplace=True)
-    if df.empty:
+    
+    # 🌟 v19.0.5 修正ポイント: dropna後の行数チェックを強化 🌟
+    # ATRなどの計算に最低限必要なデータ行数をチェック
+    REQUIRED_ROWS_AFTER_NAN = 30 
+    if len(df) < REQUIRED_ROWS_AFTER_NAN:
+        logging.warning(f"⚠️ {symbol} {timeframe}: dropna後にデータが{len(df)}行しか残りませんでした。分析をスキップします。")
         return None
         
-    # 💡 v19.0.4 修正: ATR_14の存在と有効性をチェック (KeyError防止)
+    # ATR_14の存在と有効性をチェック (v19.0.4の修正箇所)
     if 'ATR_14' not in df.columns or df['ATR_14'].iloc[-1] <= 0 or df['ATR_14'].isna().iloc[-1]:
-        logging.warning(f"⚠️ {symbol} {timeframe}: ATR_14の計算に失敗しました。この時間足の分析をスキップします。")
+        # この警告が出た場合、データフレームは存在するがATR_14の計算が失敗したことを意味する
+        logging.warning(f"⚠️ {symbol} {timeframe}: ATR_14の計算に失敗しました (有効なデータフレームあり)。この時間足の分析をスキップします。")
         return None
 
     latest = df.iloc[-1]
@@ -1052,7 +1060,7 @@ async def main_loop():
                  LAST_HOURLY_NOTIFICATION_TIME = now
 
             LAST_SUCCESS_TIME = now
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.4)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.5)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1078,11 +1086,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.4 - Logic Safety Fix") 
+app = FastAPI(title="Apex BOT API", version="v19.0.5 - Data Integrity Fix") 
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.4 Startup initializing (Logic Safety Fix)...") 
+    logging.info("🚀 Apex BOT v19.0.5 Startup initializing (Data Integrity Fix)...") 
     
     await initialize_ccxt_client()
     
@@ -1105,7 +1113,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.4 - Logic Safety Fix",
+        "bot_version": "v19.0.5 - Data Integrity Fix",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1117,7 +1125,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": f"Apex BOT API is running. Version: v19.0.4 - Logic Safety Fix"})
+    return JSONResponse(content={"message": f"Apex BOT API is running. Version: v19.0.5 - Data Integrity Fix"})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
