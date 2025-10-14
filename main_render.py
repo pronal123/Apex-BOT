@@ -1,11 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.9 - Balance Debug V2
+# Apex BOT v19.0.10 - Extreme Balance Debug
 # 
-# 強化ポイント (v19.0.8からの変更):
-# 1. 【残高デバッグ強化】`fetch_current_balance_usdt`関数で'USDT'キーが見つからない場合に、
-#    実際にCCXTから返された通貨キーのリストを`logging.info`で出力するように変更。
-#    これにより、APIキーが現物口座以外の残高（例：先物/サブ口座）を参照していないかをユーザーが確認できるようにする。
-# 2. 【バージョン更新】全てのバージョン情報を v19.0.9 に更新。
+# 強化ポイント (v19.0.9からの変更):
+# 1. 【残高デバッグログの極限強化】`fetch_current_balance_usdt`関数に、API呼び出し前、呼び出し後のRawキー、認証エラー時、一般エラー時の詳細なデバッグログ（🚨🚨 DEBUG）を追加し、エラー箇所の特定を支援する。
+# 2. 【バージョン更新】全てのバージョン情報を v19.0.10 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -280,7 +278,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.9 (Balance Debug V2)</i>" 
+        f"<i>Bot Ver: v19.0.10 (Extreme Balance Debug)</i>" 
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -317,7 +315,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict) ->
         
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.9</i>"
+        f"<i>Bot Ver: v19.0.10</i>"
     )
     
     return header + details + footer
@@ -384,13 +382,18 @@ async def fetch_current_balance_usdt() -> float:
         return 0.0
         
     try:
-        # 認証情報がない場合、この呼び出しは失敗する
+        # 💡 DEBUG 1: API呼び出し直前にログを挿入
+        logging.info("💡 DEBUG (Balance): CCXT fetch_balance() を呼び出します...")
+        
         balance = await EXCHANGE_CLIENT.fetch_balance()
+        
+        # 💡 DEBUG 2: API呼び出しが成功し、残高オブジェクトを取得したことを確認
+        logging.info("💡 DEBUG (Balance): fetch_balance() が応答を返しました。パースを開始します。")
         
         # SpotアカウントのUSDT残高を取得 (freeを使用)
         usdt_free = balance.get('USDT', {}).get('free', 0.0)
         
-        # 💡 v19.0.9 修正ポイント: USDTキーが存在しない場合のチェックとデバッグログを強化
+        # 💡 USDTキーが存在しない場合のチェックとデバッグログを強化
         if 'USDT' not in balance:
             # USDT残高情報が取得できない場合、環境設定の問題の可能性が高い
             logging.error(f"❌ 残高取得エラー: `fetch_balance`の結果に'USDT'キーが見つかりませんでした。")
@@ -398,8 +401,15 @@ async def fetch_current_balance_usdt() -> float:
             
             # デバッグのために balance オブジェクトのキーをログ出力
             available_currencies = list(balance.keys())
+            
+            # 🚨🚨 DEBUG ログ (最重要): 返されたRaw Balance Objectのトップレベルのキーを出力
+            logging.error(f"🚨🚨 DEBUG (Balance): CCXTから返されたRaw Balance Objectのキー: {available_currencies}")
+            
+            # v19.0.9の既存のログ
             if available_currencies and len(available_currencies) > 3: # 複数の通貨が返されている場合
-                 logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies[:5]}... (他 {len(available_currencies) - 5} 通貨)")
+                 # -1通貨のエラーを回避するため、表示ロジックを修正
+                 other_count = max(0, len(available_currencies) - 5)
+                 logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies[:5]}... (他 {other_count} 通貨)")
                  logging.info(f"もしUSDTが見当たらない場合、MEXCの**サブアカウント**または**その他のウォレットタイプ**の残高になっている可能性があります。APIキーの設定を確認してください。")
             elif available_currencies:
                  logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies}")
@@ -416,10 +426,14 @@ async def fetch_current_balance_usdt() -> float:
         
     except ccxt.AuthenticationError:
         logging.error("❌ 残高取得エラー: APIキー/Secretが不正です (AuthenticationError)。")
+        # 🚨🚨 DEBUG ログ 3: 認証エラー時にログ
+        logging.error("🚨🚨 DEBUG (AuthError): 認証エラーが発生しました。APIキー/Secretを確認してください。")
         return 0.0
     except Exception as e:
         # fetch_balance自体が失敗した場合
         logging.error(f"❌ 残高取得エラー（fetch_balance失敗）: {type(e).__name__}: {e}")
+        # 🚨🚨 DEBUG ログ 4: その他のエラー時にログ
+        logging.error(f"🚨🚨 DEBUG (OtherError): CCXT呼び出し中に予期せぬエラーが発生しました。詳細: {e}")
         return 0.0
 
 
@@ -583,7 +597,7 @@ async def fetch_order_book_depth(symbol: str) -> Optional[Dict]:
         return None
 
 # ====================================================================================
-# CORE ANALYSIS & TRADE EXECUTION LOGIC (v19.0.9 - No ATR Logic)
+# CORE ANALYSIS & TRADE EXECUTION LOGIC (v19.0.10 - No ATR Logic)
 # ====================================================================================
 
 # 💡 ATRを使用しない代替関数
@@ -1050,7 +1064,7 @@ async def main_loop():
             # 10. ループの完了
             LAST_UPDATE_TIME = time.time()
             LAST_SUCCESS_TIME = time.time()
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.9)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.10)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1058,7 +1072,6 @@ async def main_loop():
             error_name = type(e).__name__
             
             # 残高エラーは既にログ出力されているので、ここでは繰り返さない
-            # v19.0.8ではカスタム例外を投げないので、汎用的なエラー処理を残す
             if error_name != 'Exception' or not str(e).startswith("残高取得エラー"):
                  logging.error(f"メインループで致命的なエラー: {error_name}: {e}")
             
@@ -1070,11 +1083,11 @@ async def main_loop():
 # (バージョン更新のみ)
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.9 - Balance Debug V2")
+app = FastAPI(title="Apex BOT API", version="v19.0.10 - Extreme Balance Debug")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.9 Startup initializing (Balance Debug V2)...") 
+    logging.info("🚀 Apex BOT v19.0.10 Startup initializing (Extreme Balance Debug)...") 
     
     # CCXT初期化
     await initialize_ccxt_client()
@@ -1095,7 +1108,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.9 - Balance Debug V2",
+        "bot_version": "v19.0.10 - Extreme Balance Debug",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1107,7 +1120,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.9 - Balance Debug V2"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.10 - Extreme Balance Debug"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=os.environ.get("PORT", 8000))
