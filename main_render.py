@@ -1,11 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 12: 分析レポート初回送信の確実化)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 13: Eventベースの初回同期)
 #
 # 修正ポイント:
-# 1. 【機能修正】analysis_only_notification_loop() のロジックを修正し、メインループの初回完了後、
-#    グローバル変数の競合による遅延を避けるため、即座に初回レポート送信をトリガーするように修正。
-# 2. 【ロジック強化】analysis_only_notification_loop() のメイン待機ループを削除し、よりロバストな定期実行ロジックに修正。
-# 3. 【バージョン更新】全てのバージョン情報を Patch 12 に更新。
+# 1. 【機能修正】analysis_only_notification_loop() の初回待機ロジックを、
+#    グローバル変数 (LAST_SUCCESS_TIME) のポーリングから、より信頼性の高い
+#    asyncio.Event() を使用した待機に変更。
+# 2. 【同期強化】main_loop() の最後に Event を設定 (set()) し、確実に初回完了を通知。
+# 3. 【バージョン更新】全てのバージョン情報を Patch 13 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -108,8 +109,8 @@ ACTUAL_POSITIONS: Dict[str, Dict] = {}
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0 # 💡 定期ポジションステータス通知用
 LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0 # 💡 分析専用通知用
 
-# 💡 Patch 12: 初回分析レポート即時送信フラグ (analysis_only_notification_loop内で使用)
-FIRST_ANALYSIS_DONE: bool = False
+# 💡 Patch 13: 初回分析レポート即時送信のための非同期イベント
+FIRST_ANALYSIS_EVENT = asyncio.Event() 
 
 # ログ設定
 logging.basicConfig(level=logging.INFO,
@@ -303,7 +304,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 12)</i>" # 💡 バージョンをPatch 12に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 13)</i>" # 💡 バージョンをPatch 13に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -382,7 +383,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 12)</i>" # 💡 バージョンをPatch 12に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 13)</i>" # 💡 バージョンをPatch 13に更新
     )
 
     return header + macro_section + signal_section + footer
@@ -456,7 +457,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 12)</i>" # 💡 バージョンをPatch 12に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 13)</i>" # 💡 バージョンをPatch 13に更新
     )
 
     return header + details + footer
@@ -1079,7 +1080,8 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
 async def send_analysis_report(macro_context: Dict, top_signals: List[Dict]):
     """分析レポートの生成と送信を行うヘルパー関数"""
     
-    if not macro_context:
+    # イベントによる初回送信時、マクロコンテキストが空であることはないが、念のためチェック
+    if not macro_context and not FIRST_ANALYSIS_EVENT.is_set():
          logging.info("🔔 分析レポート送信試行: マクロコンテキストデータがありません。スキップします。")
          return 
 
@@ -1094,34 +1096,30 @@ async def send_analysis_report(macro_context: Dict, top_signals: List[Dict]):
 
 
 # ====================================================================================
-# ANALYSIS ONLY LOOP (Patch 12 - ロバスト性強化)
+# ANALYSIS ONLY LOOP (Patch 13 - Eventベースの初回同期)
 # ====================================================================================
 
 async def analysis_only_notification_loop():
-    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 12: 初回即時送信強化)"""
-    global LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SUCCESS_TIME, FIRST_ANALYSIS_DONE
+    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 13: Eventベースの初回同期)"""
+    global LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SUCCESS_TIME
     
-    # 1. メインループの初回完了まで待機（ポーリング）
-    # 💡 以前の無限ループを削除し、初回完了をチェック
-    while LAST_SUCCESS_TIME == 0.0:
-         logging.info("⚠️ 分析レポート送信準備: メインループの初回分析完了を待機中...")
-         await asyncio.sleep(10) # 10秒に短縮し、メインループの完了を早くキャッチ
-
+    # 1. メインループの初回完了まで待機（asyncio.Eventを使用）
+    logging.info("⚠️ 分析レポート送信準備: メインループの初回分析完了を待機中...")
+    # 💡 Patch 13: イベントがセットされるまで信頼性高く待機。警告の繰り返し出力はここでブロックされる。
+    await FIRST_ANALYSIS_EVENT.wait() 
+    
     # 2. メインループ初回完了後の即時レポート送信
-    if not FIRST_ANALYSIS_DONE:
-        try:
-             # 確実に最新のデータを取得
-             macro_context = GLOBAL_MACRO_CONTEXT
-             top_signals = LAST_ANALYSIS_SIGNALS 
-             
-             await send_analysis_report(macro_context, top_signals)
-             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time()
-             FIRST_ANALYSIS_DONE = True # 最初のレポート送信フラグを立てる
-             logging.info(f"✅ 分析レポート初回送信完了。次の定期分析まで {ANALYSIS_ONLY_INTERVAL} 秒待機。")
-        except Exception as e:
-             logging.error(f"❌ 分析レポート初回送信中にエラーが発生: {type(e).__name__}: {e}")
-             FIRST_ANALYSIS_DONE = True 
-             
+    try:
+         # イベントによって待機が解除されたら、確実に最新のデータを取得
+         macro_context = GLOBAL_MACRO_CONTEXT
+         top_signals = LAST_ANALYSIS_SIGNALS 
+         
+         await send_analysis_report(macro_context, top_signals)
+         LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time()
+         logging.info(f"✅ 分析レポート初回送信完了。次の定期分析まで {ANALYSIS_ONLY_INTERVAL} 秒待機。")
+    except Exception as e:
+         logging.error(f"❌ 分析レポート初回送信中にエラーが発生: {type(e).__name__}: {e}")
+         
     
     # 3. 1時間ごとの定期実行サイクル (初回送信完了後に実行)
     while True:
@@ -1131,6 +1129,7 @@ async def analysis_only_notification_loop():
             # 定期実行間隔の計算と待機
             wait_time = ANALYSIS_ONLY_INTERVAL - (now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME)
             if wait_time > 0:
+                # 定期実行の間隔が残っている場合は待機
                 await asyncio.sleep(wait_time)
             
             # 待機後に最新の時刻とデータを取得
@@ -1274,11 +1273,15 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
             
-            # 💡 Patch 12: 生成されたシグナル数を明示的にログ出力
+            # 💡 Patch 13: 初回分析が完了したらイベントを設定
+            if not FIRST_ANALYSIS_EVENT.is_set():
+                 FIRST_ANALYSIS_EVENT.set()
+            
+            # 💡 Patch 13: 生成されたシグナル数を明示的にログ出力
             logging.info(f"💡 分析完了 - 生成シグナル数 (全スコア): {len(LAST_ANALYSIS_SIGNALS)} 件")
 
-            # 💡 バージョン表示をPatch 12に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 12))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 13に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 13))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1294,7 +1297,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 12)") # 💡 バージョンをPatch 12に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 13)") # 💡 バージョンをPatch 13に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1328,7 +1331,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 12)", # 💡 バージョンをPatch 12に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 13)", # 💡 バージョンをPatch 13に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1340,7 +1343,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 12)"}) # 💡 バージョンをPatch 12に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 13)"}) # 💡 バージョンをPatch 13に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
