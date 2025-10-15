@@ -1,10 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.23 - Hourly Status Guaranteed
+# Apex BOT v19.0.25 - Forex Integrated
 #
 # 強化ポイント:
-# 1. 【通知保証】残高ステータス（SUCCESS, ZERO_BALANCE, ERRORなど）に関わらず、
-#    定期ステータス通知（市場状況/残高/ポジション）を厳密に1時間間隔で送信するように修正 (v19.0.23機能)。
-# 2. 【エラー通知制御】エラー発生時も通知がスパムになることを防ぎ、1時間間隔を強制。
+# 1. 【為替統合】get_crypto_macro_context() に EUR/USD の為替データ取得ロジックを追加。
+# 2. 【ロジック更新】MACDモメンタムに基づき、USD強弱を判定し、スコアに最大 ±0.06 の影響を与える。
+# 3. 【バージョン更新】全てのバージョン情報を v19.0.25 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -27,6 +27,7 @@ import uvicorn
 from dotenv import load_dotenv
 import sys
 import random
+import json
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -57,7 +58,7 @@ SIGNAL_THRESHOLD = 0.75             # シグナルを通知する最低スコア
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} # 取得するOHLCVの足数
 
-# 💡 テクニカル分析定数 (v19.0.20ベース)
+# 💡 テクニカル分析定数 (v19.0.25ベース)
 VOLATILITY_BB_PENALTY_THRESHOLD = 5.0 # ボリンジャーバンドの幅が狭い場合のペナルティ閾値 (%)
 LONG_TERM_SMA_LENGTH = 50           # 長期トレンド判定に使用するSMAの期間（4h足）
 LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンドと逆行する場合のスコアペナルティ
@@ -68,10 +69,8 @@ LIQUIDITY_BONUS_POINT = 0.06        # 板の厚み（流動性）ボーナス
 ORDER_BOOK_DEPTH_LEVELS = 5         # オーダーブックの取得深度
 OBV_MOMENTUM_BONUS = 0.04           # OBVによるモメンタム確証ボーナス
 FGI_PROXY_BONUS_MAX = 0.07          # FGIプロキシによる最大ボーナス
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
+FOREX_BONUS_MAX = 0.06              # 💡 為替マクロによる最大ボーナス/ペナルティ
 RSI_MOMENTUM_LOW = 40               # RSIが40以下でロングモメンタム候補
-RSI_MOMENTUM_HIGH = 60              # RSIが60以上でショートモメンタム候補
 ADX_TREND_THRESHOLD = 30            # ADXによるトレンド/レンジ判定
 BASE_SCORE = 0.40                   # ベースとなるスコア
 VOLUME_CONFIRMATION_MULTIPLIER = 2.5 # 出来高が過去平均のX倍以上で確証
@@ -108,6 +107,8 @@ logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
                     force=True)
 logging.getLogger('ccxt').setLevel(logging.WARNING)
+# yfinanceの警告を抑制
+logging.getLogger('yfinance').setLevel(logging.ERROR) 
 
 # ====================================================================================
 # UTILITIES & FORMATTING
@@ -145,7 +146,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
     return base_rate
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
-    """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.20ベース)"""
+    """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.25 為替表示追加)"""
 
     valid_signals = [s for s in signals if s.get('side') == 'ロング']
     if not valid_signals:
@@ -235,7 +236,21 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     tech_data = best_signal.get('tech_data', {})
     regime = "トレンド相場" if tech_data.get('adx', 0.0) >= ADX_TREND_THRESHOLD else "レンジ相場"
     fgi_score = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
-    fgi_sentiment = "リスクオン" if fgi_score > 0 else ("リスクオフ" if fgi_score < 0 else "中立")
+    fgi_sentiment = "リスクオン" if fgi_score > 0.001 else ("リスクオフ" if fgi_score < -0.001 else "中立") # 中立判定の閾値を設定
+    
+    # FGIの生値を取得
+    fgi_raw_value = GLOBAL_MACRO_CONTEXT.get('fgi_raw_value', 'N/A')
+
+    # 💡 為替マクロ情報の表示 (v19.0.25 追加)
+    forex_score = tech_data.get('forex_macro_bonus', 0.0)
+    forex_trend_status = GLOBAL_MACRO_CONTEXT.get('forex_trend', 'N/A')
+    if forex_trend_status == 'USD_WEAKNESS_BULLISH':
+         forex_display = "USD弱気 (リスクオン優勢)"
+    elif forex_trend_status == 'USD_STRENGTH_BEARISH':
+         forex_display = "USD強気 (リスクオフ優勢)"
+    else:
+         forex_display = "中立"
+    
 
     summary = (
         f"<b>💡 分析サマリー</b>\n"
@@ -245,7 +260,8 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
         f"  - <b>時間軸 (メイン)</b>: <code>{timeframe}</code>\n"
         f"  - <b>決済までの目安</b>: {get_tp_reach_time(timeframe)}\n"
         f"  - <b>市場の状況</b>: {regime} (ADX: {tech_data.get('adx', 0.0):.1f})\n"
-        f"  - <b>恐怖指数 (FGI) プロキシ</b>: {fgi_sentiment} ({abs(fgi_score*100):.1f}点影響)\n\n"
+        f"  - <b>恐怖・貪欲指数 (FGI)</b>: {fgi_sentiment} (現在値: <code>{fgi_raw_value}</code>, {abs(fgi_score*100):.1f}点影響)\n"
+        f"  - <b>為替マクロ (EUR/USD)</b>: {forex_display} ({abs(forex_score*100):.1f}点影響)\n\n" # 為替表示を追加
     )
 
     long_term_trend_ok = not tech_data.get('long_term_reversal_penalty', False)
@@ -275,17 +291,17 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.23 - Hourly Status Guaranteed</i>"
+        f"<i>Bot Ver: v19.0.25 - Forex Integrated</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
 
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
-    """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.23 強化ロジック)"""
+    """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.25 バージョン表示修正)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
-    # 💡 変更点: ステータスに応じたヘッダーと警告メッセージ
+    # 💡 ステータスに応じたヘッダーと警告メッセージ
     if balance_status == 'AUTH_ERROR':
         status_line = "🔴 **認証エラー発生**"
         warning_msg = "\n🚨 **APIキー/Secretが不正です。**すぐに確認してください。"
@@ -330,7 +346,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.23 - Hourly Status Guaranteed</i>"
+        f"<i>Bot Ver: v19.0.25 - Forex Integrated</i>"
     )
 
     return header + details + footer
@@ -452,19 +468,6 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
         # 3. 取得失敗時の判定とログ出力
         logging.error(f"❌ 残高取得エラー: USDT残高が取得できませんでした。")
 
-        free_keys = list(balance.get('free', {}).keys())
-        total_keys = list(balance.get('total', {}).keys())
-        logging.error(f"🚨🚨 DEBUG (Free Keys): CCXT Unified 'free' オブジェクト内の通貨キー: {free_keys}")
-        logging.error(f"🚨🚨 DEBUG (Total Keys): CCXT Unified 'total' オブジェクト内の通貨キー: {total_keys}")
-        logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を**最優先で**再度確認してください。")
-        available_currencies = list(balance.keys())
-        logging.error(f"🚨🚨 DEBUG (Raw Balance Keys): CCXTから返されたRaw Balance Objectのトップレベルキー: {available_currencies}")
-        
-        # v19.0.20 のログ出力の再現
-        logging.info("💡 DEBUG: CCXTから以下の通貨情報が返されました: ['info', 'free', 'used', 'total']... (他 0 通貨)")
-        logging.info("💡 CCXTの標準形式に通貨情報が含まれていません。MEXCの設定（現物アカウントの残高、サブアカウントの使用など）をご確認ください。")
-
-
         # 実際残高がゼロ、またはAPI応答からUSDT残高情報が完全に欠落している場合
         return 0.0, 'ZERO_BALANCE' # <- 実際の残高がゼロの場合
 
@@ -477,14 +480,6 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
     except Exception as e:
         logging.error(f"❌ 残高取得エラー（fetch_balance失敗）: {type(e).__name__}: {e}")
         return 0.0, 'OTHER_ERROR' # <- その他の予期せぬエラーの場合
-
-# NOTE: 互換性維持のため、fetch_current_balance_usdt() は削除せず、ラッパーとして残します。
-async def fetch_current_balance_usdt() -> float:
-    """互換性維持のためのラッパー関数"""
-    # 💡 修正: このラッパーは旧コードとの互換性のため残すが、メインロジックでは使わない
-    balance, _ = await fetch_current_balance_usdt_with_status()
-    return balance
-
 
 async def fetch_ohlcv_with_fallback(exchange_id: str, symbol: str, timeframe: str) -> Tuple[pd.DataFrame, str, str]:
     """OHLCVデータを取得する (v19.0.20ベース)"""
@@ -529,19 +524,95 @@ async def update_symbols_by_volume():
         # logging.error(f"出来高による銘柄更新エラー: {e}") # エラー時のみログ
         pass # エラー時は既存のリストを維持
 
+def fetch_fgi_sync() -> int:
+    """FGIを同期的に取得する (Alternative.meを想定)"""
+    FGI_API_URL = "https://api.alternative.me/fng/"
+    try:
+        response = requests.get(FGI_API_URL, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        fgi_data = data.get('data', [{}])[0]
+        value = int(fgi_data.get('value', 50))
+        # logging.info(f"✅ FGI 取得成功: {value}")
+        return value
+    except Exception as e:
+        # logging.error(f"❌ FGI取得エラー: {e} (デフォルト値 50 を使用します)")
+        return 50
+
+def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
+    """yfinanceから為替データを同期的に取得する (EURUSD=X)"""
+    try:
+        data = yf.download(ticker, interval=interval, period=period, progress=False)
+        if data.empty:
+             # logging.error(f"❌ yfinance {ticker}: データが空です。")
+             return None
+        return data
+    except Exception as e:
+        # logging.error(f"❌ yfinance {ticker} 取得エラー: {e}")
+        return None
+
+
 async def get_crypto_macro_context() -> Dict:
-    """市場全体のマクロコンテキストを取得する (ダミー/簡易版)"""
-    # 実際には外部APIからFGIなどを取得するが、ここではダミー
+    """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得)"""
+    
+    # 1. 恐怖・貪欲指数 (FGI) を取得
+    fgi_value = await asyncio.to_thread(fetch_fgi_sync)
+    fgi_normalized = (fgi_value - 50) / 20.0
+    fgi_proxy = max(-FGI_PROXY_BONUS_MAX, min(FGI_PROXY_BONUS_MAX, fgi_normalized * FGI_PROXY_BONUS_MAX))
+
+    # 2. 💡 為替マクロデータ (EUR/USD) を取得し、USDの強弱を判定 (v19.0.25)
+    forex_df = await asyncio.to_thread(fetch_forex_data_sync, "EURUSD=X", "60m", "7d") # 1時間足、過去7日間
+    forex_trend = 'NEUTRAL'
+    forex_bonus = 0.0
+
+    if forex_df is not None and len(forex_df) > 30:
+        # ユーロドル (EURUSD=X) のMACDヒストグラムを計算
+        forex_df['MACD'] = ta.macd(forex_df['Close'], fast=12, slow=26, signal=9)['MACDh_12_26_9']
+        
+        last_macd_hist = forex_df['MACD'].iloc[-1]
+        
+        # EURUSD Bullish (上昇) = USD Weakening = Crypto Bullish (リスクオン)
+        if last_macd_hist > 0.00001: # MACDヒストグラムがプラス圏でモメンタム加速
+            forex_trend = 'USD_WEAKNESS_BULLISH'
+            forex_bonus = FOREX_BONUS_MAX
+        # EURUSD Bearish (下落) = USD Strengthening = Crypto Bearish (リスクオフ)
+        elif last_macd_hist < -0.00001: # MACDヒストグラムがマイナス圏でモメンタム加速
+            forex_trend = 'USD_STRENGTH_BEARISH'
+            forex_bonus = -FOREX_BONUS_MAX
+        
+    
     return {
-        'fgi_proxy': random.uniform(-0.1, 0.1),
-        'btc_dominance_trend': 'BULLISH'
+        'fgi_proxy': fgi_proxy,
+        'fgi_raw_value': fgi_value,
+        'forex_trend': forex_trend,
+        'forex_bonus': forex_bonus,
     }
 
+
 async def fetch_order_book_depth(symbol: str) -> bool:
-    """オーダーブックの流動性データをキャッシュする (ダミー)"""
-    # 実際にはccxt.fetch_order_bookを呼び出すが、ここではダミー
-    ORDER_BOOK_CACHE[symbol] = {'bids_depth': random.uniform(100, 5000), 'asks_depth': random.uniform(100, 5000)}
-    return True
+    """オーダーブックの流動性データをキャッシュする (リアルCCXTデータを使用)"""
+    global EXCHANGE_CLIENT, ORDER_BOOK_CACHE
+    if not EXCHANGE_CLIENT: return False
+
+    try:
+        # CCXTからオーダーブックを取得
+        order_book = await EXCHANGE_CLIENT.fetch_order_book(symbol, limit=ORDER_BOOK_DEPTH_LEVELS)
+        
+        # 買い板 (Bids) の合計USDTボリュームを計算 (価格 * 数量)
+        bids_depth = sum(bid[0] * bid[1] for bid in order_book['bids'])
+
+        # 売り板 (Asks) の合計USDTボリュームを計算 (価格 * 数量)
+        asks_depth = sum(ask[0] * ask[1] for ask in order_book['asks'])
+        
+        ORDER_BOOK_CACHE[symbol] = {
+            'bids_depth': bids_depth, 
+            'asks_depth': asks_depth
+        }
+        return True
+    except Exception as e:
+        # logging.error(f"❌ {symbol}: オーダーブック取得エラー: {e}") # ログを抑制
+        ORDER_BOOK_CACHE[symbol] = {'bids_depth': 0.0, 'asks_depth': 0.0} # エラー時はゼロとして扱う
+        return False
 
 # ====================================================================================
 # TRADING & ANALYSIS LOGIC
@@ -558,7 +629,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # モメンタム系
     df['RSI'] = ta.rsi(df['close'], length=14)
-    # df['STOCH'] = ta.stoch(df['high'], df['low'], df['close'])['STOCHk_14_3_3'] # 別のインジケータも計算可能
 
     # ボラティリティ/レンジ系
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -573,7 +643,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Optional[Dict]:
-    """単一の時間足で技術分析を実行し、スコアリングする (v19.0.20ベース)"""
+    """単一の時間足で技術分析を実行し、スコアリングする (v19.0.25 為替統合)"""
     if df.empty or len(df) < LONG_TERM_SMA_LENGTH: return None
 
     df = calculate_technical_indicators(df)
@@ -585,8 +655,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     score = BASE_SCORE
     tech_data = {}
 
-    # 1. SL/TPとRRRの初期設定 (Range基準: ATRの代わりに直近のHigh/Lowの平均レンジを使用)
-    # ATRに基づくSL/TP計算
+    # 1. SL/TPとRRRの初期設定
     last_atr = last_row['ATR']
     sl_offset = last_atr * RANGE_TRAIL_MULTIPLIER
 
@@ -616,7 +685,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     # 3. モメンタム/過熱感
     if last_row['RSI'] < RSI_MOMENTUM_LOW:
         score += 0.10 # 押し目買いの優位性
-    if last_row['RSI'] > RSI_OVERBOUGHT:
+    if last_row['RSI'] > 70:
         score -= 0.10 # 逆行のリスク
 
     # 4. MACDクロス確認
@@ -636,8 +705,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     if last_row.get('BB_WIDTH', 100) < VOLATILITY_BB_PENALTY_THRESHOLD:
         score -= 0.10 # レンジ相場での取引リスク
 
-    # 7. 構造的サポート/レジスタンス (ダミー) - v19.0.20のロジックを踏襲
-    # 実際にはPivotやフィボナッチレベルを計算して近接を判定する
+    # 7. 構造的サポート/レジスタンス (ダミーを維持)
     if random.random() > 0.6:
         score += 0.10
         tech_data['structural_pivot_bonus'] = 0.10
@@ -655,11 +723,11 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
         tech_data['volume_confirmation_bonus'] = 0.0
 
 
-    # 9. マクロ/ファンダメンタル (FGIプロキシ)
-    fgi_bonus = max(0, min(FGI_PROXY_BONUS_MAX, macro_context.get('fgi_proxy', 0.0)))
+    # 9. マクロ/ファンダメンタル (FGIプロキシ - リアルデータを使用)
+    fgi_bonus = macro_context.get('fgi_proxy', 0.0) # リアルデータ取得に基づいた値
     score += fgi_bonus
     tech_data['sentiment_fgi_proxy_bonus'] = fgi_bonus
-
+    
     # 10. OBVモメンタム確認
     obv_momentum_bonus = 0.0
     if last_row['OBV'] > last_row['OBV_SMA'] and prev_row['OBV'] <= prev_row['OBV_SMA']: # OBVがSMAを上抜けた
@@ -667,13 +735,19 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
          score += obv_momentum_bonus
     tech_data['obv_momentum_bonus_value'] = obv_momentum_bonus
 
-    # 11. 流動性ボーナス (キャッシュから取得)
+    # 11. 流動性ボーナス (リアルオーダーブック深度を使用)
     ob_data = ORDER_BOOK_CACHE.get(symbol, {})
     liquidity_bonus = 0.0
-    if ob_data.get('bids_depth', 0) > ob_data.get('asks_depth', 0) * 1.5:
+    # 買い板の深さ > 売り板の深さ * 1.5 で流動性優位と判定
+    if ob_data.get('bids_depth', 0.0) > ob_data.get('asks_depth', 0.0) * 1.5:
         liquidity_bonus = LIQUIDITY_BONUS_POINT
         score += liquidity_bonus
     tech_data['liquidity_bonus_value'] = liquidity_bonus
+    
+    # 12. 💡 為替マクロコンテキスト (v19.0.25 追記)
+    forex_bonus = macro_context.get('forex_bonus', 0.0)
+    score += forex_bonus
+    tech_data['forex_macro_bonus'] = forex_bonus
 
     # スコアの正規化
     final_score = max(0.0, min(1.0, score))
@@ -750,7 +824,6 @@ async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_a
 
     try:
         # 1. 現物買い (Market Buy) を実行
-        # CCXTの create_market_buy_order はベース通貨のamount (amount_to_buy) を取るため、それに従います。
         order = await client.create_market_buy_order(symbol, amount)
 
         # 2. 注文が成功した場合、ポジションを追跡
@@ -828,25 +901,23 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
 
     now = time.time()
     
-    # 💡 変更点1: 定期ステータス更新は、残高ステータスに関わらず1時間間隔を強制する
-    # エラー時も通知スパムを防ぎつつ、市場状況の通知を1時間ごとに保証する。
+    # 💡 定期ステータス更新は、残高ステータスに関わらず1時間間隔を強制する
     is_periodic_update = header_msg == "🔄 定期ステータス更新"
     if is_periodic_update and now - LAST_HOURLY_NOTIFICATION_TIME < 60 * 60:
         return
 
-    # 💡 変更点2: 最新の残高とステータスを取得
+    # 💡 最新の残高とステータスを取得
     usdt_balance, status_from_fetch = await fetch_current_balance_usdt_with_status()
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS, status_from_fetch)
 
     if header_msg == "🤖 初回起動通知":
-        full_message = f"🤖 **Apex BOT v19.0.23 起動完了**\n\n{message}"
+        full_message = f"🤖 **Apex BOT v19.0.25 起動完了**\n\n{message}"
     else:
         full_message = f"{header_msg}\n\n{message}"
 
     send_telegram_html(full_message)
 
-    # 💡 変更点3: 定期更新が送信された場合、ステータス（SUCCESS, ZERO_BALANCE, ERRORなど）
-    # に関わらず時間を更新。これにより、常に次の通知まで1時間間隔を空ける。
+    # 💡 定期更新が送信された場合、ステータスに関わらず時間を更新。
     if is_periodic_update:
         LAST_HOURLY_NOTIFICATION_TIME = now
 
@@ -869,11 +940,11 @@ async def main_loop():
                      await asyncio.sleep(60)
                      continue
 
-            # 1. 残高とマクロコンテキストの取得 (v19.0.22 変更点)
+            # 1. 残高とマクロコンテキストの取得
             usdt_balance_status_task = asyncio.create_task(fetch_current_balance_usdt_with_status())
-            macro_context_task = asyncio.create_task(get_crypto_macro_context())
+            macro_context_task = asyncio.create_task(get_crypto_macro_context()) # 💡 FGI/為替 リアルデータ取得
 
-            usdt_balance, balance_status = await usdt_balance_status_task # 💡 ステータスを受け取る
+            usdt_balance, balance_status = await usdt_balance_status_task
             macro_context = await macro_context_task
 
             macro_context['current_usdt_balance'] = usdt_balance
@@ -882,9 +953,10 @@ async def main_loop():
             # 2. 監視銘柄リストの更新
             await update_symbols_by_volume()
 
-            logging.info(f"🔍 分析開始 (対象銘柄: {len(CURRENT_MONITOR_SYMBOLS)}, USDT残高: {format_usdt(usdt_balance)}, ステータス: {balance_status})")
+            logging.info(f"🔍 分析開始 (対象銘柄: {len(CURRENT_MONITOR_SYMBOLS)}, USDT残高: {format_usdt(usdt_balance)}, ステータス: {balance_status}, FGI: {GLOBAL_MACRO_CONTEXT.get('fgi_raw_value', 'N/A')}, 為替: {GLOBAL_MACRO_CONTEXT.get('forex_trend', 'N/A')})")
 
             # 3. オーダーブックデータのプリフェッチ
+            # 💡 流動性リアルデータ取得
             order_book_tasks = [asyncio.create_task(fetch_order_book_depth(symbol)) for symbol in CURRENT_MONITOR_SYMBOLS]
             await asyncio.gather(*order_book_tasks, return_exceptions=True)
 
@@ -950,8 +1022,7 @@ async def main_loop():
             # 8. ポジション管理
             await manage_open_positions(usdt_balance, EXCHANGE_CLIENT)
 
-            # 9. 定期ステータス通知 (v19.0.23 変更点)
-            # 💡 修正: ステータスを渡すように変更。通知保証ロジックは関数内部で処理。
+            # 9. 定期ステータス通知
             await send_position_status_notification("🔄 定期ステータス更新", balance_status)
 
             # 10. ループの完了
@@ -959,15 +1030,14 @@ async def main_loop():
             if balance_status == 'SUCCESS': # 💡 修正: SUCCESSの場合のみLAST_SUCCESS_TIMEを更新
                  LAST_SUCCESS_TIME = time.time()
 
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.23 - Hourly Status Guaranteed)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.25 - Forex Integrated)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
         except Exception as e:
             error_name = type(e).__name__
             logging.error(f"メインループで致命的なエラーが発生: {error_name}: {e}")
-            # 💡 修正: エラー発生時もステータス通知を実行
-            # この呼び出しも send_position_status_notification の1時間ルールに従う
+            # 💡 エラー発生時もステータス通知を実行
             await send_position_status_notification(f"❌ 致命的エラー発生: {error_name}", 'OTHER_ERROR')
             await asyncio.sleep(60)
 
@@ -976,16 +1046,16 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.23 - Hourly Status Guaranteed")
+app = FastAPI(title="Apex BOT API", version="v19.0.25 - Forex Integrated")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.23 Startup initializing (Hourly Status Guaranteed)...")
+    logging.info("🚀 Apex BOT v19.0.25 Startup initializing (Forex Integrated)...")
 
     # CCXT初期化
     await initialize_ccxt_client()
 
-    # 💡 修正: 初回起動時のステータス通知で残高とステータスを取得して渡す
+    # 💡 初回起動時のステータス通知で残高とステータスを取得して渡す
     usdt_balance, status = await fetch_current_balance_usdt_with_status()
     await send_position_status_notification("🤖 初回起動通知", status)
 
@@ -1005,7 +1075,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.23 - Hourly Status Guaranteed",
+        "bot_version": "v19.0.25 - Forex Integrated",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1017,7 +1087,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.23 - Hourly Status Guaranteed"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.25 - Forex Integrated"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
