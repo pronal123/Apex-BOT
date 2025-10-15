@@ -1,11 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 1)
 #
-# 強化ポイント:
-# 1. 【為替統合】get_crypto_macro_context() に EUR/USD のMACDモメンタムに基づくUSD強弱判定ロジックを統合。
-# 2. 【デプロイ修正】startup_event() 関数で、残高チェックを先行させ、通知関数にステータスを渡すことで、
-#    Renderデプロイ時の TypeError (object NoneType can't be used in 'await' expression) を修正。
-# 3. 【バージョン更新】全てのバージョン情報を v19.0.27 に更新。
+# 修正ポイント:
+# 1. 【CRITICAL FIX】main_loop() 内で get_crypto_macro_context が None を返した場合の TypeError を修正。
+# 2. 【CONFIG WARNING】MEXCのIPホワイトリストエラーに関する警告ロジックを追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -71,7 +69,7 @@ LIQUIDITY_BONUS_POINT = 0.06        # 板の厚み（流動性）ボーナス
 ORDER_BOOK_DEPTH_LEVELS = 5         # オーダーブックの取得深度
 OBV_MOMENTUM_BONUS = 0.04           # OBVによるモメンタム確証ボーナス
 FGI_PROXY_BONUS_MAX = 0.07          # FGIプロキシによる最大ボーナス
-FOREX_BONUS_MAX = 0.06              # ✅ 為替マクロによる最大ボーナス/ペナルティ
+FOREX_BONUS_MAX = 0.06              # 為替マクロによる最大ボーナス/ペナルティ
 RSI_MOMENTUM_LOW = 40               # RSIが40以下でロングモメンタム候補
 ADX_TREND_THRESHOLD = 30            # ADXによるトレンド/レンジ判定
 BASE_SCORE = 0.40                   # ベースとなるスコア
@@ -243,7 +241,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # FGIの生値を取得
     fgi_raw_value = GLOBAL_MACRO_CONTEXT.get('fgi_raw_value', 'N/A')
 
-    # ✅ 為替マクロ情報の表示
+    # 為替マクロ情報の表示
     forex_score = tech_data.get('forex_macro_bonus', 0.0)
     forex_trend_status = GLOBAL_MACRO_CONTEXT.get('forex_trend', 'N/A')
     if forex_trend_status == 'USD_WEAKNESS_BULLISH':
@@ -293,7 +291,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 1)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -310,6 +308,9 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
     elif balance_status == 'API_ERROR' or balance_status == 'OTHER_ERROR':
         status_line = "⚠️ **API通信エラー/権限不足の可能性**"
         warning_msg = f"\n🚨 **{CCXT_CLIENT_NAME}との通信に失敗または権限が不足しています。**ログを確認してください。"
+    elif balance_status == 'IP_ERROR':
+         status_line = "❌ **IPアドレス制限エラー**"
+         warning_msg = "\n🚨 **RenderのIPアドレスがMEXCのAPIホワイトリストに登録されていません。**MEXCの設定を確認してください。"
     elif balance_status == 'ZERO_BALANCE':
         # 実際残高がゼロ、またはAPI応答からUSDT残高情報が完全に欠落している場合のメッセージ
         status_line = "✅ **残高確認完了 (残高ゼロ)**"
@@ -348,7 +349,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 1)</i>"
     )
 
     return header + details + footer
@@ -463,7 +464,11 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
         logging.error("❌ 残高取得エラー: APIキー/Secretが不正です (AuthenticationError)。")
         return 0.0, 'AUTH_ERROR' # <- 認証エラーの場合
     except ccxt.ExchangeError as e:
+        error_msg = str(e)
         logging.error(f"❌ 残高取得エラー（CCXT Exchange Error）: {type(e).__name__}: {e}")
+        # IPアドレス制限エラーの検出
+        if "700006" in error_msg and "ip white list" in error_msg.lower():
+             return 0.0, 'IP_ERROR'
         return 0.0, 'API_ERROR' # <- API通信エラーの場合
     except Exception as e:
         logging.error(f"❌ 残高取得エラー（fetch_balance失敗）: {type(e).__name__}: {e}")
@@ -530,44 +535,49 @@ def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[p
              return None
         return data
     except Exception as e:
+        # yfinanceのエラーはログに出力せず、静かにNoneを返す
         return None
 
 
-async def get_crypto_macro_context() -> Dict:
+async def get_crypto_macro_context() -> Optional[Dict]:
     """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得)"""
     
-    # 1. 恐怖・貪欲指数 (FGI) を取得
-    fgi_value = await asyncio.to_thread(fetch_fgi_sync)
-    fgi_normalized = (fgi_value - 50) / 20.0
-    fgi_proxy = max(-FGI_PROXY_BONUS_MAX, min(FGI_PROXY_BONUS_MAX, fgi_normalized * FGI_PROXY_BONUS_MAX))
+    try:
+        # 1. 恐怖・貪欲指数 (FGI) を取得
+        fgi_value = await asyncio.to_thread(fetch_fgi_sync)
+        fgi_normalized = (fgi_value - 50) / 20.0
+        fgi_proxy = max(-FGI_PROXY_BONUS_MAX, min(FGI_PROXY_BONUS_MAX, fgi_normalized * FGI_PROXY_BONUS_MAX))
 
-    # 2. ✅ 為替マクロデータ (EUR/USD) を取得し、USDの強弱を判定
-    forex_df = await asyncio.to_thread(fetch_forex_data_sync, "EURUSD=X", "60m", "7d") # 1時間足、過去7日間
-    forex_trend = 'NEUTRAL'
-    forex_bonus = 0.0
+        # 2. 為替マクロデータ (EUR/USD) を取得し、USDの強弱を判定
+        forex_df = await asyncio.to_thread(fetch_forex_data_sync, "EURUSD=X", "60m", "7d") # 1時間足、過去7日間
+        forex_trend = 'NEUTRAL'
+        forex_bonus = 0.0
 
-    if forex_df is not None and len(forex_df) > 30:
-        # ユーロドル (EURUSD=X) のMACDヒストグラムを計算
-        forex_df['MACD'] = ta.macd(forex_df['Close'], fast=12, slow=26, signal=9)['MACDh_12_26_9']
+        if forex_df is not None and len(forex_df) > 30:
+            # ユーロドル (EURUSD=X) のMACDヒストグラムを計算
+            forex_df['MACD'] = ta.macd(forex_df['Close'], fast=12, slow=26, signal=9)['MACDh_12_26_9']
+            
+            last_macd_hist = forex_df['MACD'].iloc[-1]
+            
+            # EURUSD Bullish (上昇) = USD Weakening = Crypto Bullish (リスクオン)
+            if last_macd_hist > 0.00001: 
+                forex_trend = 'USD_WEAKNESS_BULLISH'
+                forex_bonus = FOREX_BONUS_MAX
+            # EURUSD Bearish (下落) = USD Strengthening = Crypto Bearish (リスクオフ)
+            elif last_macd_hist < -0.00001: 
+                forex_trend = 'USD_STRENGTH_BEARISH'
+                forex_bonus = -FOREX_BONUS_MAX
+            
         
-        last_macd_hist = forex_df['MACD'].iloc[-1]
-        
-        # EURUSD Bullish (上昇) = USD Weakening = Crypto Bullish (リスクオン)
-        if last_macd_hist > 0.00001: 
-            forex_trend = 'USD_WEAKNESS_BULLISH'
-            forex_bonus = FOREX_BONUS_MAX
-        # EURUSD Bearish (下落) = USD Strengthening = Crypto Bearish (リスクオフ)
-        elif last_macd_hist < -0.00001: 
-            forex_trend = 'USD_STRENGTH_BEARISH'
-            forex_bonus = -FOREX_BONUS_MAX
-        
-    
-    return {
-        'fgi_proxy': fgi_proxy,
-        'fgi_raw_value': fgi_value,
-        'forex_trend': forex_trend,
-        'forex_bonus': forex_bonus,
-    }
+        return {
+            'fgi_proxy': fgi_proxy,
+            'fgi_raw_value': fgi_value,
+            'forex_trend': forex_trend,
+            'forex_bonus': forex_bonus,
+        }
+    except Exception as e:
+         logging.warning(f"マクロコンテキスト取得中にエラー発生（外部API）：{e}")
+         return None
 
 
 async def fetch_order_book_depth(symbol: str) -> bool:
@@ -724,7 +734,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
         score += liquidity_bonus
     tech_data['liquidity_bonus_value'] = liquidity_bonus
     
-    # 12. ✅ 為替マクロコンテキスト
+    # 12. 為替マクロコンテキスト
     forex_bonus = macro_context.get('forex_bonus', 0.0)
     score += forex_bonus
     tech_data['forex_macro_bonus'] = forex_bonus
@@ -925,7 +935,37 @@ async def main_loop():
             macro_context_task = asyncio.create_task(get_crypto_macro_context()) 
 
             usdt_balance, balance_status = await usdt_balance_status_task
-            macro_context = await macro_context_task
+            macro_context_raw = await macro_context_task # NoneTypeチェックのために一旦生の値を取得
+
+            # 💡 【CRITICAL FIX】 macro_contextがNoneの場合のフォールバック
+            if macro_context_raw is None:
+                logging.warning("⚠️ マクロコンテキストの取得が失敗しました（NoneType）。デフォルト値で初期化を続行します。")
+                macro_context = {
+                    'fgi_proxy': 0.0,
+                    'fgi_raw_value': 50,
+                    'forex_trend': 'NEUTRAL',
+                    'forex_bonus': 0.0,
+                }
+            else:
+                 macro_context = macro_context_raw
+            
+            # IPアドレス制限エラーの通知
+            if balance_status == 'IP_ERROR':
+                # ログに出ているIPアドレスを抽出して具体的な警告を表示
+                error_ip = "N/A"
+                if hasattr(EXCHANGE_CLIENT, 'last_http_response'):
+                    try:
+                        # ログに出ているIPアドレスを抽出 (例: IP [xxx.xxx.xxx.xxx])
+                        error_log = EXCHANGE_CLIENT.last_http_response.get('msg', '')
+                        if 'IP [' in error_log and ']' in error_log:
+                            start_index = error_log.find('IP [') + 4
+                            end_index = error_log.find(']', start_index)
+                            error_ip = error_log[start_index:end_index]
+                    except:
+                        pass
+                
+                logging.error(f"🚨🚨 CRITICAL CONFIG ERROR: MEXCのIPアドレス制限によりアクセスが拒否されています。IP [{error_ip}] をホワイトリストに追加してください。")
+
 
             macro_context['current_usdt_balance'] = usdt_balance
             GLOBAL_MACRO_CONTEXT = macro_context
@@ -944,6 +984,7 @@ async def main_loop():
             for symbol in CURRENT_MONITOR_SYMBOLS:
                 timeframes = ['15m', '1h', '4h']
                 for tf in timeframes:
+                    # IP制限エラー時はOHLCV取得も失敗するため、このチェックをスキップしない
                     ohlcv_data, status, _ = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, symbol, tf)
                     if status != "Success": continue
 
@@ -1009,7 +1050,7 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 1))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1025,7 +1066,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build")
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 1)")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1034,7 +1075,7 @@ async def startup_event():
     # 1. CCXT初期化
     await initialize_ccxt_client()
 
-    # 2. ✅ 初回起動時のTypeErrorを回避するための修正ロジック (残高とステータスの先行取得)
+    # 2. 初回起動時のTypeErrorを回避するための修正ロジック (残高とステータスの先行取得)
     usdt_balance, status = await fetch_current_balance_usdt_with_status()
     await send_position_status_notification("🤖 BOT v19.0.27 初回起動通知", initial_status=status)
 
@@ -1054,7 +1095,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build",
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 1)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1066,7 +1107,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 1)"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
