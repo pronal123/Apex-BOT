@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 7: MACD計算のロバスト性強化)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 8: 1時間ごとの分析専用通知)
 #
 # 修正ポイント:
-# 1. 【CRITICAL FIX】get_crypto_macro_context() 内の為替MACD計算のロジックを強化。
-#    pandas_ta.macdの実行結果がNoneでないこと、および必要な列が存在することを個別にチェックすることで、
-#    不安定な外部データによる 'NoneType' object is not subscriptable エラーを完全に捕捉・抑制します。
-# 2. 【バージョン更新】全てのバージョン情報を Patch 7 に更新。
+# 1. 【機能追加】1時間ごとに取引を行わない、市場状況とトップシグナルのスコア通知のみを行う独立したループを追加。
+# 2. 【メッセージ追加】分析専用のTelegramメッセージ作成関数 format_analysis_only_message を実装。
+# 3. 【定数追加】ANALYSIS_ONLY_INTERVAL (3600秒 = 1時間) を追加。
+# 4. 【バージョン更新】全てのバージョン情報を Patch 8 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -50,6 +50,7 @@ DEFAULT_SYMBOLS = [
 ]
 TOP_SYMBOL_LIMIT = 30      # 出来高上位30銘柄を監視
 LOOP_INTERVAL = 180        # メインループの実行間隔（秒）
+ANALYSIS_ONLY_INTERVAL = 60 * 60 # 💡 1時間ごとの分析専用通知の間隔（秒）
 REQUEST_DELAY_PER_SYMBOL = 0.5 # 銘柄ごとのAPIリクエストの遅延（秒）
 
 # 🚨 環境変数から取得 (Render/Heroku/Vercelなどに設定が必要)
@@ -93,7 +94,7 @@ EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
 LAST_UPDATE_TIME: float = 0.0
 CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]
 TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} # 通知済みシグナルのクールダウン管理
-LAST_ANALYSIS_SIGNALS: List[Dict] = []
+LAST_ANALYSIS_SIGNALS: List[Dict] = [] # 💡 メインループが生成したトップシグナルを保持
 LAST_SUCCESS_TIME: float = 0.0
 GLOBAL_MACRO_CONTEXT: Dict = {}
 ORDER_BOOK_CACHE: Dict[str, Any] = {} # 流動性データキャッシュ
@@ -104,7 +105,8 @@ LAST_IP_ERROR_MESSAGE: Optional[str] = None
 # 💡 ポジション管理システム
 # {symbol: {'entry_price': float, 'amount': float, 'sl_price': float, 'tp_price': float, 'open_time': float, 'status': str}}
 ACTUAL_POSITIONS: Dict[str, Dict] = {}
-LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
+LAST_HOURLY_NOTIFICATION_TIME: float = 0.0 # 💡 定期ポジションステータス通知用
+LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0 # 💡 分析専用通知用
 
 # ログ設定
 logging.basicConfig(level=logging.INFO,
@@ -153,7 +155,8 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.27)"""
-
+    # ... (前回のコードと同一のロジック、取引通知用)
+    
     valid_signals = [s for s in signals if s.get('side') == 'ロング']
     if not valid_signals:
         return ""
@@ -297,11 +300,70 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 7)</i>" # 💡 バージョンをPatch 7に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 8)</i>" # 💡 バージョンをPatch 8に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
 
+def format_analysis_only_message(top_signals: List[Dict], macro_context: Dict) -> str:
+    """💡 1時間ごとの分析専用メッセージを作成する (Patch 8)"""
+    now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
+
+    header = (
+        f"📊 **Apex Market Snapshot (Hourly Analysis)**\n"
+        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+        f"  - **確認日時**: {now_jst} (JST)\n"
+        f"  - **取引ステータス**: <b>分析通知のみ</b>\n"
+        f"  - **対象銘柄数**: <code>{len(CURRENT_MONITOR_SYMBOLS)}</code>\n"
+        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
+    )
+
+    # マクロコンテキスト情報
+    fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
+    fgi_proxy = macro_context.get('fgi_proxy', 0.0)
+    forex_trend_status = macro_context.get('forex_trend', 'N/A')
+    forex_bonus = macro_context.get('forex_bonus', 0.0)
+
+    fgi_sentiment = "リスクオン" if fgi_proxy > 0.001 else ("リスクオフ" if fgi_proxy < -0.001 else "中立")
+    
+    if forex_trend_status == 'USD_WEAKNESS_BULLISH':
+         forex_display = "USD弱気 (リスクオン優勢)"
+    elif forex_trend_status == 'USD_STRENGTH_BEARISH':
+         forex_display = "USD強気 (リスクオフ優勢)"
+    else:
+         forex_display = "中立"
+
+    macro_section = (
+        f"🌍 <b>グローバルマクロ分析</b>\n"
+        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+        f"  - **恐怖・貪欲指数 (FGI)**: <code>{fgi_raw_value}</code> ({fgi_sentiment})\n"
+        f"  - **為替マクロ (EUR/USD)**: {forex_display}\n"
+        f"  - **総合マクロ影響**: <code>{((fgi_proxy + forex_bonus) * 100):.2f}</code> 点\n\n"
+    )
+
+    # トップシグナル情報
+    signal_section = "📈 <b>トップシグナル候補 (スコア順)</b>\n"
+    if top_signals:
+        for rank, signal in enumerate(top_signals[:TOP_SIGNAL_COUNT], 1):
+            symbol = signal['symbol']
+            timeframe = signal['timeframe']
+            score = signal['score']
+            rr_ratio = signal['rr_ratio']
+            
+            signal_section += (
+                f"  {rank}. <b>{symbol}</b> ({timeframe})\n"
+                f"     - スコア: <code>{score * 100:.2f} / 100</code> (RRR: 1:{rr_ratio:.1f})\n"
+            )
+    else:
+        signal_section += "  - 現在、特筆すべき高スコアのシグナルはありません。\n"
+    
+    footer = (
+        f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+        f"<pre>※ この通知は取引実行を伴いません。</pre>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 8)</i>" # 💡 バージョンをPatch 8に更新
+    )
+
+    return header + macro_section + signal_section + footer
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
     """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.27)"""
@@ -372,7 +434,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 7)</i>" # 💡 バージョンをPatch 7に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 8)</i>" # 💡 バージョンをPatch 8に更新
     )
 
     return header + details + footer
@@ -983,6 +1045,52 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
     if is_periodic_update:
         LAST_HOURLY_NOTIFICATION_TIME = now
 
+# ====================================================================================
+# ANALYSIS ONLY LOOP (Patch 8)
+# ====================================================================================
+
+async def analysis_only_notification_loop():
+    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 8)"""
+    global LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
+    
+    # 初回起動時はメインループが分析を完了するまで待機
+    await asyncio.sleep(LOOP_INTERVAL * 1.5) 
+    
+    while True:
+        try:
+            now = time.time()
+            if now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME < ANALYSIS_ONLY_INTERVAL:
+                # 待機
+                await asyncio.sleep(ANALYSIS_ONLY_INTERVAL - (now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME))
+                continue
+
+            # 💡 分析結果とマクロコンテキストはメインループが最新のものを更新しているものを使用
+            macro_context = GLOBAL_MACRO_CONTEXT
+            top_signals = LAST_ANALYSIS_SIGNALS
+
+            if not macro_context and not top_signals:
+                logging.warning("⚠️ 分析専用通知: メインループがまだ分析を完了していません。スキップします。")
+                await asyncio.sleep(60) # 1分待って再試行
+                continue
+                
+            logging.info(f"🔔 1時間ごとの分析レポートを開始します (FGI: {macro_context.get('fgi_raw_value', 'N/A')}, Top Signals: {len(top_signals)})")
+
+            # 1. メッセージを作成
+            message = format_analysis_only_message(top_signals, macro_context)
+            
+            # 2. 通知を送信
+            send_telegram_html(message)
+
+            LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time()
+            logging.info(f"✅ 1時間ごとの分析レポート完了。次の分析まで {ANALYSIS_ONLY_INTERVAL} 秒待機。")
+            
+            # 残りの時間を待機
+            await asyncio.sleep(ANALYSIS_ONLY_INTERVAL)
+
+        except Exception as e:
+            logging.error(f"❌ 分析専用通知ループでエラーが発生: {type(e).__name__}: {e}")
+            await asyncio.sleep(600) # 10分待機して再試行
+
 
 # ====================================================================================
 # MAIN LOOP
@@ -1021,7 +1129,7 @@ async def main_loop():
 
 
             macro_context['current_usdt_balance'] = usdt_balance
-            GLOBAL_MACRO_CONTEXT = macro_context
+            GLOBAL_MACRO_CONTEXT = macro_context # 💡 グローバル変数にマクロ情報を保存
 
             # 2. 監視銘柄リストの更新
             await update_symbols_by_volume()
@@ -1062,7 +1170,7 @@ async def main_loop():
                 }
                 all_signals.append(result)
 
-            # 6. 最適なシグナルの選定と通知
+            # 6. 最適なシグナルの選定とグローバル変数への保存
             long_signals = [s for s in all_signals if s['side'] == 'ロング' and s['score'] >= SIGNAL_THRESHOLD]
             long_signals.sort(key=lambda s: (s['score'], s['rr_ratio']), reverse=True)
 
@@ -1071,13 +1179,14 @@ async def main_loop():
             for signal in long_signals:
                 symbol = signal['symbol']
                 current_time = time.time()
+                # メインループはクールダウンをチェックして通知/取引を行う
                 if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
                     top_signals_to_notify.append(signal)
                     notified_count += 1
                     TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                     if notified_count >= TOP_SIGNAL_COUNT: break
 
-            LAST_ANALYSIS_SIGNALS = top_signals_to_notify
+            LAST_ANALYSIS_SIGNALS = long_signals # 💡 メインループで生成された全ての高スコアシグナルを保存（分析専用ループが使用するため）
 
             # 7. シグナル通知と自動取引の実行
             trade_tasks = []
@@ -1102,8 +1211,8 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            # 💡 バージョン表示をPatch 7に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 7))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 8に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 8))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1119,7 +1228,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 7)") # 💡 バージョンをPatch 7に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 8)") # 💡 バージョンをPatch 8に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1132,10 +1241,13 @@ async def startup_event():
     usdt_balance, status = await fetch_current_balance_usdt_with_status()
     await send_position_status_notification("🤖 BOT v19.0.27 初回起動通知", initial_status=status)
 
-    global LAST_HOURLY_NOTIFICATION_TIME
+    global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
+    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() - ANALYSIS_ONLY_INTERVAL + 60 # 初回起動から1分後に分析専用レポートが出るように調整
 
+    # 3. メインの取引ループと分析専用ループを起動
     asyncio.create_task(main_loop())
+    asyncio.create_task(analysis_only_notification_loop()) # 💡 分析専用ループの起動
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1148,7 +1260,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 7)", # 💡 バージョンをPatch 7に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 8)", # 💡 バージョンをPatch 8に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1160,7 +1272,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 7)"}) # 💡 バージョンをPatch 7に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 8)"}) # 💡 バージョンをPatch 8に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
