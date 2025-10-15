@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 6: マクロコンテキストエラーの分離)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 7: MACD計算のロバスト性強化)
 #
 # 修正ポイント:
-# 1. 【CRITICAL FIX】get_crypto_macro_context() のtry-exceptブロックをFGIとForexで分離。
-#    これにより、不安定なyfinance（Forex）の取得エラーが、安定しているFGIの取得結果を巻き込んで
-#    TypeErrorを引き起こすのを防ぎ、エラーを完全に抑制してデフォルト値へのフォールバックを保証します。
-# 2. 【MINOR FIX】fetch_forex_data_sync() にDataFrameに'Close'カラムが存在するかどうかのチェックを追加し、yfinanceの不完全なデータに対する頑健性を向上させました。
+# 1. 【CRITICAL FIX】get_crypto_macro_context() 内の為替MACD計算のロジックを強化。
+#    pandas_ta.macdの実行結果がNoneでないこと、および必要な列が存在することを個別にチェックすることで、
+#    不安定な外部データによる 'NoneType' object is not subscriptable エラーを完全に捕捉・抑制します。
+# 2. 【バージョン更新】全てのバージョン情報を Patch 7 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -297,7 +297,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 6)</i>" # 💡 バージョンをPatch 6に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 7)</i>" # 💡 バージョンをPatch 7に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -372,7 +372,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 6)</i>" # 💡 バージョンをPatch 6に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 7)</i>" # 💡 バージョンをPatch 7に更新
     )
 
     return header + details + footer
@@ -588,7 +588,7 @@ def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[p
 
 
 async def get_crypto_macro_context() -> Dict:
-    """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得) - Patch 6: エラー処理を分離"""
+    """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得) - Patch 7: MACD計算のロバスト性強化"""
     
     # 💡 最初にデフォルト値を設定
     fgi_value = 50
@@ -611,24 +611,30 @@ async def get_crypto_macro_context() -> Dict:
     try:
         forex_df = await asyncio.to_thread(fetch_forex_data_sync, "EURUSD=X", "60m", "7d") # 1時間足、過去7日間
         
-        if forex_df is not None and not forex_df.empty and len(forex_df) > 30:
+        # 💡 【Patch 7: Robustness強化】DataFrameの完全性を再チェックし、MACD計算結果の検証を追加
+        if forex_df is not None and not forex_df.empty and len(forex_df) > 30 and 'Close' in forex_df.columns:
+            
             # ユーロドル (EURUSD=X) のMACDヒストグラムを計算
-            forex_df['MACD'] = ta.macd(forex_df['Close'], fast=12, slow=26, signal=9)['MACDh_12_26_9']
+            macd_df = ta.macd(forex_df['Close'], fast=12, slow=26, signal=9)
             
-            # NoneType Errorの発生源はMACD計算後の.iloc[-1]アクセスである可能性が高い（パッチ6でデータフレームのRobustnessを向上）
-            last_macd_hist = forex_df['MACD'].iloc[-1]
-            
-            # EURUSD Bullish (上昇) = USD Weakening = Crypto Bullish (リスクオン)
-            if last_macd_hist > 0.00001: 
-                forex_trend = 'USD_WEAKNESS_BULLISH'
-                forex_bonus = FOREX_BONUS_MAX
-            # EURUSD Bearish (下落) = USD Strengthening = Crypto Bearish (リスクオフ)
-            elif last_macd_hist < -0.00001: 
-                forex_trend = 'USD_STRENGTH_BEARISH'
-                forex_bonus = -FOREX_BONUS_MAX
+            # MACDの計算結果と必要な列の存在をチェック
+            if macd_df is not None and 'MACDh_12_26_9' in macd_df.columns and not macd_df.empty:
+                forex_df['MACD'] = macd_df['MACDh_12_26_9']
+                
+                # NoneType Errorの発生源であった.iloc[-1]アクセスを安全に実行
+                last_macd_hist = forex_df['MACD'].iloc[-1]
+                
+                # EURUSD Bullish (上昇) = USD Weakening = Crypto Bullish (リスクオン)
+                if last_macd_hist > 0.00001: 
+                    forex_trend = 'USD_WEAKNESS_BULLISH'
+                    forex_bonus = FOREX_BONUS_MAX
+                # EURUSD Bearish (下落) = USD Strengthening = Crypto Bearish (リスクオフ)
+                elif last_macd_hist < -0.00001: 
+                    forex_trend = 'USD_STRENGTH_BEARISH'
+                    forex_bonus = -FOREX_BONUS_MAX
         
     except Exception as e:
-         # 💡 【Patch 6: yfinanceエラーを分離】為替データ取得・処理中のエラーをキャッチ
+         # 💡 【Patch 7: yfinanceエラーを分離】為替データ取得・処理中のエラーをキャッチ
          error_type = type(e).__name__
          # エラーログは出すが、FGIデータは保持して続行
          logging.warning(f"マクロコンテキスト取得中にエラー発生（為替データ/yfinance関連）：{error_type}: {e}")
@@ -998,11 +1004,11 @@ async def main_loop():
 
             # 1. 残高とマクロコンテキストの取得
             usdt_balance_status_task = asyncio.create_task(fetch_current_balance_usdt_with_status())
-            # 💡 Patch 6: get_crypto_macro_context はエラーが発生しても None を返さないので、そのまま await する
+            # 💡 Patch 7: get_crypto_macro_context はエラーが発生しても None を返さないことを保証
             macro_context_task = asyncio.create_task(get_crypto_macro_context()) 
 
             usdt_balance, balance_status = await usdt_balance_status_task
-            macro_context = await macro_context_task # Patch 6では None が返されないことを保証
+            macro_context = await macro_context_task # Patch 7では None が返されないことを保証
 
             # IPアドレス制限エラーの検出時のログ強化
             if balance_status == 'IP_ERROR':
@@ -1096,8 +1102,8 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            # 💡 バージョン表示をPatch 6に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 6))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 7に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 7))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1113,7 +1119,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 6)") # 💡 バージョンをPatch 6に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 7)") # 💡 バージョンをPatch 7に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1142,7 +1148,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 6)", # 💡 バージョンをPatch 6に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 7)", # 💡 バージョンをPatch 7に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1154,7 +1160,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 6)"}) # 💡 バージョンをPatch 6に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 7)"}) # 💡 バージョンをPatch 7に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
