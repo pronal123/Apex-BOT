@@ -1,11 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 8: 1時間ごとの分析専用通知)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 10: 高スコア不在時のトップシグナル表示)
 #
 # 修正ポイント:
-# 1. 【機能追加】1時間ごとに取引を行わない、市場状況とトップシグナルのスコア通知のみを行う独立したループを追加。
-# 2. 【メッセージ追加】分析専用のTelegramメッセージ作成関数 format_analysis_only_message を実装。
-# 3. 【定数追加】ANALYSIS_ONLY_INTERVAL (3600秒 = 1時間) を追加。
-# 4. 【バージョン更新】全てのバージョン情報を Patch 8 に更新。
+# 1. 【機能改善】analysis_only_notification_loop/format_analysis_only_message() を修正し、
+#    SIGNAL_THRESHOLD 未満でも最もスコアの高いシグナルを常に表示するように変更。
+# 2. 【バージョン更新】全てのバージョン情報を Patch 10 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -94,7 +93,7 @@ EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
 LAST_UPDATE_TIME: float = 0.0
 CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]
 TRADE_NOTIFIED_SYMBOLS: Dict[str, float] = {} # 通知済みシグナルのクールダウン管理
-LAST_ANALYSIS_SIGNALS: List[Dict] = [] # 💡 メインループが生成したトップシグナルを保持
+LAST_ANALYSIS_SIGNALS: List[Dict] = [] # 💡 メインループが生成したトップシグナルを保持（全スコア付き）
 LAST_SUCCESS_TIME: float = 0.0
 GLOBAL_MACRO_CONTEXT: Dict = {}
 ORDER_BOOK_CACHE: Dict[str, Any] = {} # 流動性データキャッシュ
@@ -155,7 +154,7 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.27)"""
-    # ... (前回のコードと同一のロジック、取引通知用)
+    # ... (長いため省略 - Patch 9と同一ロジック)
     
     valid_signals = [s for s in signals if s.get('side') == 'ロング']
     if not valid_signals:
@@ -300,14 +299,21 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 8)</i>" # 💡 バージョンをPatch 8に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 10)</i>" # 💡 バージョンをPatch 10に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
 
-def format_analysis_only_message(top_signals: List[Dict], macro_context: Dict) -> str:
-    """💡 1時間ごとの分析専用メッセージを作成する (Patch 8)"""
+def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -> str:
+    """💡 1時間ごとの分析専用メッセージを作成する (Patch 10: 高スコア不在時対応)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
+    
+    # 1. 候補リストの作成 (スコア降順にソート)
+    # メインループで生成された全スコア付きシグナルリストを使用
+    sorted_signals = sorted(all_signals, key=lambda s: s.get('score', 0.0), reverse=True)
+    
+    # 2. トップN件を取得
+    top_signals_to_display = sorted_signals[:TOP_SIGNAL_COUNT]
 
     header = (
         f"📊 **Apex Market Snapshot (Hourly Analysis)**\n"
@@ -343,30 +349,41 @@ def format_analysis_only_message(top_signals: List[Dict], macro_context: Dict) -
 
     # トップシグナル情報
     signal_section = "📈 <b>トップシグナル候補 (スコア順)</b>\n"
-    if top_signals:
-        for rank, signal in enumerate(top_signals[:TOP_SIGNAL_COUNT], 1):
+    if top_signals_to_display:
+        for rank, signal in enumerate(top_signals_to_display, 1):
             symbol = signal['symbol']
             timeframe = signal['timeframe']
             score = signal['score']
             rr_ratio = signal['rr_ratio']
             
+            # 💡 スコアが閾値未満の場合、色付けで注意を促す
+            score_color = ""
+            if score < SIGNAL_THRESHOLD:
+                 score_color = "⚠️" 
+                 
             signal_section += (
-                f"  {rank}. <b>{symbol}</b> ({timeframe})\n"
+                f"  {rank}. <b>{symbol}</b> ({timeframe}) {score_color}\n"
                 f"     - スコア: <code>{score * 100:.2f} / 100</code> (RRR: 1:{rr_ratio:.1f})\n"
             )
+        
+        # 💡 閾値を超えたシグナルがゼロの場合のみ警告を表示
+        if sorted_signals[0]['score'] < SIGNAL_THRESHOLD:
+             signal_section += "\n<pre>⚠️ 注: 上記は監視中の最高スコアですが、閾値 (75点) 未満です。</pre>\n"
+
     else:
-        signal_section += "  - 現在、特筆すべき高スコアのシグナルはありません。\n"
+        signal_section += "  - 現在、評価可能なシグナルはありません。\n"
     
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 8)</i>" # 💡 バージョンをPatch 8に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 10)</i>" # 💡 バージョンをPatch 10に更新
     )
 
     return header + macro_section + signal_section + footer
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
     """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.27)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global LAST_IP_ERROR_MESSAGE 
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
@@ -434,13 +451,14 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 8)</i>" # 💡 バージョンをPatch 8に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 10)</i>" # 💡 バージョンをPatch 10に更新
     )
 
     return header + details + footer
 
 def send_telegram_html(message: str):
     """TelegramにHTML形式でメッセージを送信する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN == 'YOUR_TELEGRAM_TOKEN':
         logging.warning("⚠️ TelegramトークンまたはチャットIDが設定されていません。通知をスキップします。")
         return
@@ -473,8 +491,8 @@ def send_telegram_html(message: str):
 
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (MEXCをデフォルトとする)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT
-    # ... (前回のコードと同一の初期化ロジック)
     api_key = os.environ.get('MEXC_API_KEY')
     secret = os.environ.get('MEXC_SECRET')
 
@@ -502,6 +520,7 @@ async def initialize_ccxt_client():
 
 async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
     """CCXTから現在のUSDT残高を取得し、ステータスを返す。(v19.0.27)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT, LAST_IP_ERROR_MESSAGE
     if not EXCHANGE_CLIENT:
         return 0.0, 'AUTH_ERROR'
@@ -566,6 +585,7 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
 
 async def fetch_ohlcv_with_fallback(exchange_id: str, symbol: str, timeframe: str) -> Tuple[pd.DataFrame, str, str]:
     """OHLCVデータを取得する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT: return pd.DataFrame(), "Client Error", "EXCHANGE_CLIENT not initialized."
 
@@ -584,6 +604,7 @@ async def fetch_ohlcv_with_fallback(exchange_id: str, symbol: str, timeframe: st
 
 async def update_symbols_by_volume():
     """出来高に基づいて監視銘柄を更新する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global CURRENT_MONITOR_SYMBOLS, EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT: return
 
@@ -606,6 +627,7 @@ async def update_symbols_by_volume():
 
 def fetch_fgi_sync() -> int:
     """FGIを同期的に取得する (Alternative.meを想定)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     FGI_API_URL = "https://api.alternative.me/fng/"
     try:
         response = requests.get(FGI_API_URL, timeout=5)
@@ -619,6 +641,7 @@ def fetch_fgi_sync() -> int:
 
 def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
     """yfinanceから為替データを同期的に取得する (EURUSD=X) - Rate Limit/Connection対策を追加 (Patch 4 & 6)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     
     MAX_RETRIES = 3
     RETRY_DELAY = 10  # 10秒待機
@@ -651,6 +674,7 @@ def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[p
 
 async def get_crypto_macro_context() -> Dict:
     """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得) - Patch 7: MACD計算のロバスト性強化"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     
     # 💡 最初にデフォルト値を設定
     fgi_value = 50
@@ -713,6 +737,7 @@ async def get_crypto_macro_context() -> Dict:
 
 async def fetch_order_book_depth(symbol: str) -> bool:
     """オーダーブックの流動性データをキャッシュする (リアルCCXTデータを使用)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT, ORDER_BOOK_CACHE
     if not EXCHANGE_CLIENT: return False
 
@@ -741,6 +766,7 @@ async def fetch_order_book_depth(symbol: str) -> bool:
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """必要なテクニカル指標を計算する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     if df.empty: return df
 
     # トレンド系
@@ -765,6 +791,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Optional[Dict]:
     """単一の時間足で技術分析を実行し、スコアリングする (v19.0.27 為替統合)"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     if df.empty or len(df) < LONG_TERM_SMA_LENGTH: return None
 
     df = calculate_technical_indicators(df)
@@ -784,7 +811,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     sl_price = entry_price - sl_offset # ロング
     tp1_price = entry_price + sl_offset * DTS_RRR_DISPLAY
 
-    risk = entry_price - sl_price
+    risk = entry_price - sl_offset
     reward = tp1_price - entry_price
     rr_ratio = reward / risk if risk > 0 and reward > 0 else 0.0
 
@@ -876,7 +903,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     tech_data['macd_cross_valid'] = macd_valid
     tech_data['stoch_filter_penalty'] = 0 # Stochasticsは計算していないため0
 
-    # シグナル判定
+    # シグナル判定（スコアがBASE_SCORE以上であれば候補として返す）
     if final_score >= BASE_SCORE and rr_ratio >= 1.0:
          return {
             'symbol': symbol,
@@ -895,6 +922,7 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
 
 def calculate_trade_plan(signal: Dict, usdt_balance: float) -> Tuple[float, float, float]:
     """リスクと残高に基づいて取引量を計算する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     entry = signal['entry']
     sl = signal['sl']
 
@@ -934,6 +962,7 @@ def calculate_trade_plan(signal: Dict, usdt_balance: float) -> Tuple[float, floa
 
 async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_async.Exchange):
     """シグナルに基づき、現物買い注文を発注する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     symbol = signal['symbol']
     trade_plan = signal['trade_plan']
     amount = trade_plan['amount_to_buy']
@@ -963,11 +992,14 @@ async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_a
             }
             logging.info(f"✅ TRADE EXECUTED: {symbol} Buy {bought_amount:.4f} @ {entry_price:.4f} (Size: {size_usdt:.2f} USDT)")
 
+        # ... (中略：注文失敗時の処理)
+
     except Exception as e:
         logging.error(f"❌ TRADE FAILED for {symbol}: {e}")
 
 async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange):
     """保有中のポジションを監視し、SL/TPの執行を行う"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     if not ACTUAL_POSITIONS: return
 
     symbols_to_check = list(ACTUAL_POSITIONS.keys())
@@ -1018,6 +1050,7 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
 
 async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新", initial_status: str = 'SUCCESS'):
     """ポジションと残高の定期通知を送信する"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_IP_ERROR_MESSAGE
 
     now = time.time()
@@ -1046,43 +1079,52 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
         LAST_HOURLY_NOTIFICATION_TIME = now
 
 # ====================================================================================
-# ANALYSIS ONLY LOOP (Patch 8)
+# ANALYSIS ONLY LOOP (Patch 10)
 # ====================================================================================
 
 async def analysis_only_notification_loop():
-    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 8)"""
+    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 10)"""
     global LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     
-    # 初回起動時はメインループが分析を完了するまで待機
-    await asyncio.sleep(LOOP_INTERVAL * 1.5) 
+    # 💡 初回起動時は、メインループが最初の分析を完了するまで待機する (約1.5サイクル、ただしANALYSIS_ONLY_INTERVALよりは短い)
+    if LAST_ANALYSIS_ONLY_NOTIFICATION_TIME < time.time() - 3600 * 24: # 初回起動フラグ（非常に古い時間で初期化されている場合）
+         logging.info("🔔 分析レポート初回起動を検出。メインループが最初の分析を完了するまで待機します...")
+         # 初回はメインループが分析を完了するまで待機（最長で3分+数秒）
+         await asyncio.sleep(LOOP_INTERVAL + 60)
     
     while True:
         try:
             now = time.time()
+            
+            # 初回起動時（LAST_ANALYSIS_ONLY_NOTIFICATION_TIMEが非常に古い）または通常間隔チェック
             if now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME < ANALYSIS_ONLY_INTERVAL:
                 # 待機
-                await asyncio.sleep(ANALYSIS_ONLY_INTERVAL - (now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME))
-                continue
-
+                wait_time = ANALYSIS_ONLY_INTERVAL - (now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME)
+                await asyncio.sleep(wait_time)
+                now = time.time() # 待機後に現在時刻を再取得
+            
             # 💡 分析結果とマクロコンテキストはメインループが最新のものを更新しているものを使用
             macro_context = GLOBAL_MACRO_CONTEXT
-            top_signals = LAST_ANALYSIS_SIGNALS
+            top_signals = LAST_ANALYSIS_SIGNALS # 💡 ここには全スコア付きシグナルが入っている
 
-            if not macro_context and not top_signals:
-                logging.warning("⚠️ 分析専用通知: メインループがまだ分析を完了していません。スキップします。")
-                await asyncio.sleep(60) # 1分待って再試行
-                continue
-                
-            logging.info(f"🔔 1時間ごとの分析レポートを開始します (FGI: {macro_context.get('fgi_raw_value', 'N/A')}, Top Signals: {len(top_signals)})")
+            if not macro_context or not top_signals:
+                # 💡 メインループが分析を完了していない場合、強制的に再分析を試みる（またはスキップ）
+                if LAST_SUCCESS_TIME == 0.0:
+                    logging.warning("⚠️ 分析専用通知: メインループがまだ分析を完了していません。スキップし、1分後に再試行します。")
+                    await asyncio.sleep(60) 
+                    continue
+
+            logging.info(f"🔔 1時間ごとの分析レポートを開始します (FGI: {macro_context.get('fgi_raw_value', 'N/A')}, Total Signals: {len(top_signals)})")
 
             # 1. メッセージを作成
+            # 💡 format_analysis_only_message()内で、スコア閾値に関わらずトップをピックアップする
             message = format_analysis_only_message(top_signals, macro_context)
             
             # 2. 通知を送信
             send_telegram_html(message)
 
             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time()
-            logging.info(f"✅ 1時間ごとの分析レポート完了。次の分析まで {ANALYSIS_ONLY_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析レポート送信完了。次の分析まで {ANALYSIS_ONLY_INTERVAL} 秒待機。")
             
             # 残りの時間を待機
             await asyncio.sleep(ANALYSIS_ONLY_INTERVAL)
@@ -1098,6 +1140,7 @@ async def analysis_only_notification_loop():
 
 async def main_loop():
     """BOTのメイン処理ループ"""
+    # ... (長いため省略 - Patch 9と同一ロジック)
     global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT, LAST_SUCCESS_TIME, LAST_IP_ERROR_MESSAGE
 
     if not EXCHANGE_CLIENT:
@@ -1171,12 +1214,16 @@ async def main_loop():
                 all_signals.append(result)
 
             # 6. 最適なシグナルの選定とグローバル変数への保存
-            long_signals = [s for s in all_signals if s['side'] == 'ロング' and s['score'] >= SIGNAL_THRESHOLD]
-            long_signals.sort(key=lambda s: (s['score'], s['rr_ratio']), reverse=True)
+            # LAST_ANALYSIS_SIGNALS は分析専用ループのために、全てのスコア付きシグナル（フィルタリング前）を保存
+            LAST_ANALYSIS_SIGNALS = [s for s in all_signals if s['side'] == 'ロング'] 
+            
+            # 取引用のシグナルはSIGNAL_THRESHOLD以上のものに絞り、クールダウンをチェック
+            long_signals_for_trade = [s for s in LAST_ANALYSIS_SIGNALS if s['score'] >= SIGNAL_THRESHOLD]
+            long_signals_for_trade.sort(key=lambda s: (s['score'], s['rr_ratio']), reverse=True)
 
             top_signals_to_notify = []
             notified_count = 0
-            for signal in long_signals:
+            for signal in long_signals_for_trade:
                 symbol = signal['symbol']
                 current_time = time.time()
                 # メインループはクールダウンをチェックして通知/取引を行う
@@ -1186,8 +1233,7 @@ async def main_loop():
                     TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                     if notified_count >= TOP_SIGNAL_COUNT: break
 
-            LAST_ANALYSIS_SIGNALS = long_signals # 💡 メインループで生成された全ての高スコアシグナルを保存（分析専用ループが使用するため）
-
+            
             # 7. シグナル通知と自動取引の実行
             trade_tasks = []
             for rank, signal in enumerate(top_signals_to_notify, 1):
@@ -1211,8 +1257,8 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            # 💡 バージョン表示をPatch 8に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 8))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 10に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 10))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1228,7 +1274,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 8)") # 💡 バージョンをPatch 8に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 10)") # 💡 バージョンをPatch 10に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1243,7 +1289,9 @@ async def startup_event():
 
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
-    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() - ANALYSIS_ONLY_INTERVAL + 60 # 初回起動から1分後に分析専用レポートが出るように調整
+    
+    # 💡 【Patch 9】分析専用通知を起動直後に実行するため、最終通知時刻を非常に古い時間に設定
+    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() - (ANALYSIS_ONLY_INTERVAL * 2) 
 
     # 3. メインの取引ループと分析専用ループを起動
     asyncio.create_task(main_loop())
@@ -1260,7 +1308,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 8)", # 💡 バージョンをPatch 8に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 10)", # 💡 バージョンをPatch 10に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1272,7 +1320,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 8)"}) # 💡 バージョンをPatch 8に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 10)"}) # 💡 バージョンをPatch 10に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
