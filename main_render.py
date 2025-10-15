@@ -563,6 +563,7 @@ def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[p
 
     for attempt in range(MAX_RETRIES):
         try:
+            # ⚠️ 注意: yfinanceの警告は抑制されているが、ダウンロード自体は行われる
             data = yf.download(ticker, interval=interval, period=period, progress=False)
             if data.empty:
                  return None
