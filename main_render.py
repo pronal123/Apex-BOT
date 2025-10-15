@@ -1,9 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 2: IP Logging)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 3: yfinance Rate Limit対策)
 #
 # 修正ポイント:
-# 1. 【IP LOGGING FIX】MEXCのIPアドレス制限エラー時に、拒否されたIPアドレスを抽出してTelegram通知に表示。
-# 2. 【CRITICAL FIX】main_loop() 内で get_crypto_macro_context が None を返した場合の TypeError を修正 (Patch 1からの維持)。
+# 1. 【CRITICAL FIX】fetch_forex_data_sync() に yfinance の RateLimitError に対するリトライ機構を追加。
+# 2. 【IP LOGGING FIX】MEXCのIPアドレス制限エラー時に、拒否されたIPアドレスを抽出してTelegram通知に表示 (Patch 2からの維持)。
+# 3. 【CRITICAL FIX】main_loop() 内で get_crypto_macro_context が None を返した場合の TypeError を修正 (Patch 1からの維持)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -27,7 +28,7 @@ from dotenv import load_dotenv
 import sys
 import random
 import json
-import re # 👈 追加: IPアドレス抽出のため
+import re # 👈 IPアドレス抽出のため
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -295,7 +296,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 2)</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 3)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -318,7 +319,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
     elif balance_status == 'IP_ERROR':
          status_line = "❌ **IPアドレス制限エラー**"
          
-         # 💡 【改良点】IPアドレスを抽出して表示
+         # 💡 IPアドレスを抽出して表示
          extracted_ip = "N/A"
          if LAST_IP_ERROR_MESSAGE:
              # 例: mexc {"code":700006,"msg":"IP [54.254.162.138] not in the ip white list"}
@@ -370,7 +371,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 2)</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 3)</i>"
     )
 
     return header + details + footer
@@ -492,7 +493,7 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
         logging.error(f"❌ 残高取得エラー（CCXT Exchange Error）: {type(e).__name__}: {e}")
         # IPアドレス制限エラーの検出
         if "700006" in error_msg and "ip white list" in error_msg.lower():
-             # 💡 【改良点】IPエラーメッセージを保存
+             # 💡 IPエラーメッセージを保存
              LAST_IP_ERROR_MESSAGE = error_msg
              return 0.0, 'IP_ERROR'
         return 0.0, 'API_ERROR' # <- API通信エラーの場合
@@ -554,16 +555,31 @@ def fetch_fgi_sync() -> int:
         return 50
 
 def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
-    """yfinanceから為替データを同期的に取得する (EURUSD=X)"""
-    try:
-        data = yf.download(ticker, interval=interval, period=period, progress=False)
-        if data.empty:
-             return None
-        return data
-    except Exception as e:
-        # yfinanceのエラーはログに出力せず、静かにNoneを返す
-        return None
+    """yfinanceから為替データを同期的に取得する (EURUSD=X) - Rate Limit対策を追加"""
+    
+    # 💡 【Patch 3: Rate Limit対策】リトライ機構を追加
+    MAX_RETRIES = 3
+    RETRY_DELAY = 10  # 10秒待機
 
+    for attempt in range(MAX_RETRIES):
+        try:
+            data = yf.download(ticker, interval=interval, period=period, progress=False)
+            if data.empty:
+                 return None
+            return data
+        except yf.exceptions.YFRateLimitError as e:
+            if attempt < MAX_RETRIES - 1:
+                # レート制限エラー発生時、リトライ回数が残っていれば待機
+                logging.warning(f"⚠️ yfinanceレート制限エラー ({attempt + 1}/{MAX_RETRIES})。{RETRY_DELAY}秒後に再試行します。")
+                time.sleep(RETRY_DELAY)
+            else:
+                # 最終リトライ失敗
+                logging.error(f"❌ yfinanceレート制限エラーにより為替データ取得に失敗しました。: {e}")
+                return None
+        except Exception as e:
+            # その他のyfinanceのエラーはログに出力せず、静かにNoneを返す
+            return None
+    return None # safety return
 
 async def get_crypto_macro_context() -> Optional[Dict]:
     """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得)"""
@@ -926,7 +942,7 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
     # LAST_IP_ERROR_MESSAGE は fetch_current_balance_usdt_with_status() 内で設定される
     usdt_balance, status_from_fetch = await fetch_current_balance_usdt_with_status()
     
-    # 💡 【改良点】format_position_status_messageでグローバルなLAST_IP_ERROR_MESSAGEを使用
+    # 💡 format_position_status_messageでグローバルなLAST_IP_ERROR_MESSAGEを使用
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS, status_from_fetch)
 
     if header_msg == "🤖 BOT v19.0.27 初回起動通知":
@@ -966,7 +982,7 @@ async def main_loop():
             usdt_balance, balance_status = await usdt_balance_status_task
             macro_context_raw = await macro_context_task # NoneTypeチェックのために一旦生の値を取得
 
-            # 💡 【CRITICAL FIX】 macro_contextがNoneの場合のフォールバック (Patch 1からの維持)
+            # 💡 マクロコンテキストがNoneの場合のフォールバック
             if macro_context_raw is None:
                 logging.warning("⚠️ マクロコンテキストの取得が失敗しました（NoneType）。デフォルト値で初期化を続行します。")
                 macro_context = {
@@ -980,12 +996,10 @@ async def main_loop():
             
             # IPアドレス制限エラーの検出時のログ強化
             if balance_status == 'IP_ERROR':
-                # LAST_IP_ERROR_MESSAGEにメッセージが保存されていることを利用
                 ip_match = re.search(r"IP\s*\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]", LAST_IP_ERROR_MESSAGE or "")
                 extracted_ip = ip_match.group(1) if ip_match else "N/A"
                 logging.error(f"🚨🚨 CRITICAL CONFIG ERROR: MEXCのIPアドレス制限によりアクセスが拒否されています。IP [{extracted_ip}] をホワイトリストに追加してください。")
             else:
-                 # 成功時はIPエラーメッセージをクリア（fetch_current_balance_usdt_with_statusでもクリアされるが念のため）
                  if LAST_IP_ERROR_MESSAGE is not None:
                       LAST_IP_ERROR_MESSAGE = None
 
@@ -1007,7 +1021,6 @@ async def main_loop():
             for symbol in CURRENT_MONITOR_SYMBOLS:
                 timeframes = ['15m', '1h', '4h']
                 for tf in timeframes:
-                    # IP制限エラー時はOHLCV取得も失敗するため、このチェックをスキップしない
                     ohlcv_data, status, _ = await fetch_ohlcv_with_fallback(CCXT_CLIENT_NAME, symbol, tf)
                     if status != "Success": continue
 
@@ -1073,7 +1086,8 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 2))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 3に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 3))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1089,7 +1103,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 2)")
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 3)")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1118,7 +1132,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 2)",
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 3)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1130,7 +1144,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 2)"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 3)"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
