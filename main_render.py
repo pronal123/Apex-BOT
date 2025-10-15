@@ -154,7 +154,6 @@ def get_estimated_win_rate(score: float, timeframe: str) -> float:
 
 def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: int) -> str:
     """分析結果を統合したTelegramメッセージをHTML形式で作成する (v19.0.27)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     
     valid_signals = [s for s in signals if s.get('side') == 'ロング']
     if not valid_signals:
@@ -367,6 +366,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -
             )
         
         # 💡 閾値を超えたシグナルがゼロの場合のみ警告を表示
+        # (ただし、top_signals_to_displayが空でない、つまり最低1つのシグナルが存在する場合)
         if sorted_signals[0]['score'] < SIGNAL_THRESHOLD:
              signal_section += "\n<pre>⚠️ 注: 上記は監視中の最高スコアですが、閾値 (75点) 未満です。</pre>\n"
 
@@ -383,7 +383,6 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
     """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.27)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global LAST_IP_ERROR_MESSAGE 
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
@@ -458,7 +457,6 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
 def send_telegram_html(message: str):
     """TelegramにHTML形式でメッセージを送信する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN == 'YOUR_TELEGRAM_TOKEN':
         logging.warning("⚠️ TelegramトークンまたはチャットIDが設定されていません。通知をスキップします。")
         return
@@ -491,7 +489,6 @@ def send_telegram_html(message: str):
 
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (MEXCをデフォルトとする)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT
     api_key = os.environ.get('MEXC_API_KEY')
     secret = os.environ.get('MEXC_SECRET')
@@ -520,7 +517,6 @@ async def initialize_ccxt_client():
 
 async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
     """CCXTから現在のUSDT残高を取得し、ステータスを返す。(v19.0.27)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT, LAST_IP_ERROR_MESSAGE
     if not EXCHANGE_CLIENT:
         return 0.0, 'AUTH_ERROR'
@@ -585,7 +581,6 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
 
 async def fetch_ohlcv_with_fallback(exchange_id: str, symbol: str, timeframe: str) -> Tuple[pd.DataFrame, str, str]:
     """OHLCVデータを取得する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT: return pd.DataFrame(), "Client Error", "EXCHANGE_CLIENT not initialized."
 
@@ -604,7 +599,6 @@ async def fetch_ohlcv_with_fallback(exchange_id: str, symbol: str, timeframe: st
 
 async def update_symbols_by_volume():
     """出来高に基づいて監視銘柄を更新する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global CURRENT_MONITOR_SYMBOLS, EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT: return
 
@@ -627,7 +621,6 @@ async def update_symbols_by_volume():
 
 def fetch_fgi_sync() -> int:
     """FGIを同期的に取得する (Alternative.meを想定)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     FGI_API_URL = "https://api.alternative.me/fng/"
     try:
         response = requests.get(FGI_API_URL, timeout=5)
@@ -641,7 +634,6 @@ def fetch_fgi_sync() -> int:
 
 def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
     """yfinanceから為替データを同期的に取得する (EURUSD=X) - Rate Limit/Connection対策を追加 (Patch 4 & 6)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     
     MAX_RETRIES = 3
     RETRY_DELAY = 10  # 10秒待機
@@ -674,7 +666,6 @@ def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[p
 
 async def get_crypto_macro_context() -> Dict:
     """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得) - Patch 7: MACD計算のロバスト性強化"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     
     # 💡 最初にデフォルト値を設定
     fgi_value = 50
@@ -737,7 +728,6 @@ async def get_crypto_macro_context() -> Dict:
 
 async def fetch_order_book_depth(symbol: str) -> bool:
     """オーダーブックの流動性データをキャッシュする (リアルCCXTデータを使用)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global EXCHANGE_CLIENT, ORDER_BOOK_CACHE
     if not EXCHANGE_CLIENT: return False
 
@@ -766,7 +756,6 @@ async def fetch_order_book_depth(symbol: str) -> bool:
 
 def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """必要なテクニカル指標を計算する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     if df.empty: return df
 
     # トレンド系
@@ -791,7 +780,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Optional[Dict]:
     """単一の時間足で技術分析を実行し、スコアリングする (v19.0.27 為替統合)"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     if df.empty or len(df) < LONG_TERM_SMA_LENGTH: return None
 
     df = calculate_technical_indicators(df)
@@ -922,7 +910,6 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
 
 def calculate_trade_plan(signal: Dict, usdt_balance: float) -> Tuple[float, float, float]:
     """リスクと残高に基づいて取引量を計算する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     entry = signal['entry']
     sl = signal['sl']
 
@@ -962,7 +949,6 @@ def calculate_trade_plan(signal: Dict, usdt_balance: float) -> Tuple[float, floa
 
 async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_async.Exchange):
     """シグナルに基づき、現物買い注文を発注する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     symbol = signal['symbol']
     trade_plan = signal['trade_plan']
     amount = trade_plan['amount_to_buy']
@@ -992,14 +978,15 @@ async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_a
             }
             logging.info(f"✅ TRADE EXECUTED: {symbol} Buy {bought_amount:.4f} @ {entry_price:.4f} (Size: {size_usdt:.2f} USDT)")
 
-        # ... (中略：注文失敗時の処理)
-
+        # 3. 注文失敗時の処理
+        elif order and order['status'] != 'closed':
+            logging.warning(f"⚠️ TRADE ORDER PENDING/FAILED for {symbol}. Status: {order['status']}")
+            
     except Exception as e:
         logging.error(f"❌ TRADE FAILED for {symbol}: {e}")
 
 async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange):
     """保有中のポジションを監視し、SL/TPの執行を行う"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     if not ACTUAL_POSITIONS: return
 
     symbols_to_check = list(ACTUAL_POSITIONS.keys())
@@ -1037,6 +1024,9 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
 
         try:
             # 現物売り (Market Sell) を実行
+            # MEXCでは、現物取引の決済は取引所側で銘柄の残高があるかを確認する必要があるため、fetch_balanceを挟むのが理想
+            
+            # 簡易的な実装として、一旦ポジション量で売却を試みる
             order = await client.create_market_sell_order(symbol, pos['amount'])
 
             if order and order.get('status') == 'closed':
@@ -1050,7 +1040,6 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
 
 async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新", initial_status: str = 'SUCCESS'):
     """ポジションと残高の定期通知を送信する"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_IP_ERROR_MESSAGE
 
     now = time.time()
@@ -1140,7 +1129,6 @@ async def analysis_only_notification_loop():
 
 async def main_loop():
     """BOTのメイン処理ループ"""
-    # ... (長いため省略 - Patch 9と同一ロジック)
     global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT, LAST_SUCCESS_TIME, LAST_IP_ERROR_MESSAGE
 
     if not EXCHANGE_CLIENT:
@@ -1290,7 +1278,7 @@ async def startup_event():
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
     
-    # 💡 【Patch 9】分析専用通知を起動直後に実行するため、最終通知時刻を非常に古い時間に設定
+    # 💡 分析専用通知を起動直後に実行するため、最終通知時刻を非常に古い時間に設定
     LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() - (ANALYSIS_ONLY_INTERVAL * 2) 
 
     # 3. メインの取引ループと分析専用ループを起動
