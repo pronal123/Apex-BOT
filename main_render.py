@@ -1,12 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 13: Eventベースの初回同期)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 14: 定期通知への分析統合)
 #
 # 修正ポイント:
-# 1. 【機能修正】analysis_only_notification_loop() の初回待機ロジックを、
-#    グローバル変数 (LAST_SUCCESS_TIME) のポーリングから、より信頼性の高い
-#    asyncio.Event() を使用した待機に変更。
-# 2. 【同期強化】main_loop() の最後に Event を設定 (set()) し、確実に初回完了を通知。
-# 3. 【バージョン更新】全てのバージョン情報を Patch 13 に更新。
+# 1. 【機能追加】format_position_status_message() に最新の分析結果 (LAST_ANALYSIS_SIGNALS) を追加。
+# 2. 【通知強化】send_position_status_notification() が最新のランク1シグナルの分析サマリー/根拠を表示。
+# 3. 【バージョン更新】全てのバージョン情報を Patch 14 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -304,7 +302,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 13)</i>" # 💡 バージョンをPatch 13に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 14)</i>" # 💡 バージョンをPatch 14に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -383,13 +381,16 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 13)</i>" # 💡 バージョンをPatch 13に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 14)</i>" # 💡 バージョンをPatch 14に更新
     )
 
     return header + macro_section + signal_section + footer
 
-def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
-    """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.27)"""
+def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str, latest_signals: List[Dict]) -> str:
+    """
+    💡 Patch 14: 最新の分析サマリーと根拠を統合した
+    現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する 
+    """
     global LAST_IP_ERROR_MESSAGE 
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
@@ -421,8 +422,8 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
          
     elif balance_status == 'ZERO_BALANCE':
         # 実際残高がゼロ、またはAPI応答からUSDT残高情報が完全に欠落している場合のメッセージ
-        status_line = "✅ **残高確認完了 (残高ゼロ)**"
-        warning_msg = "\n👉 **USDT残高がゼロ、またはAPI応答から見つからないため、自動取引はスキップされます。**"
+        status_line = "✅ **残高確認完了 (残高ゼロ/取引停止)**"
+        warning_msg = "\n👉 **USDT残高がゼロまたは不足($50未満)のため、自動取引はスキップされます。**"
     else: # SUCCESS
         status_line = "🔔 **Apex BOT ポジション/残高ステータス**"
         warning_msg = ""
@@ -437,30 +438,87 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
         f"  - **保有中ポジション数**: <code>{len(open_positions)}</code> 件\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
     )
-
+    
+    # 1. ポジション詳細
     if not open_positions:
-        return header + "👉 **現在、保有中の現物ポジションはありません。**\n"
+        details = "👉 **現在、保有中の現物ポジションはありません。**\n\n"
+    else:
+        details = "📈 **保有ポジション詳細**\n\n"
+        for symbol, pos in open_positions.items():
+            entry = format_price_utility(pos['entry_price'], symbol)
+            sl = format_price_utility(pos['sl_price'], symbol)
+            tp = format_price_utility(pos['tp_price'], symbol)
+            amount = pos['amount']
 
-    details = "📈 **保有ポジション詳細**\n\n"
-    for symbol, pos in open_positions.items():
-        entry = format_price_utility(pos['entry_price'], symbol)
-        sl = format_price_utility(pos['sl_price'], symbol)
-        tp = format_price_utility(pos['tp_price'], symbol)
-        amount = pos['amount']
+            details += (
+                f"🔹 <b>{symbol}</b> ({amount:.4f} 単位)\n"
+                f"  - Buy @ <code>${entry}</code> (Open: {datetime.fromtimestamp(pos['open_time'], tz=JST).strftime('%m/%d %H:%M')})\n"
+                f"  - SL: <code>${sl}</code> | TP: <code>${tp}</code>\n"
+                f"  - Status: {pos['status']}\n"
+            )
+        details += "\n"
+        
+    # 2. 最新の分析結果の追加 (Patch 14)
+    analysis_summary = ""
+    # 💡 スコア降順にソート（念のため）
+    sorted_signals = sorted(latest_signals, key=lambda s: s.get('score', 0.0), reverse=True)
+    
+    if sorted_signals:
+        best_signal = sorted_signals[0] # ランク1のシグナルを取得
+        symbol = best_signal['symbol']
+        score_raw = best_signal.get('score', 0.0)
+        timeframe = best_signal.get('timeframe', 'N/A')
+        win_rate = get_estimated_win_rate(score_raw, timeframe) * 100
+        tech_data = best_signal.get('tech_data', {})
 
-        details += (
-            f"🔹 <b>{symbol}</b> ({amount:.4f} 単位)\n"
-            f"  - Buy @ <code>${entry}</code> (Open: {datetime.fromtimestamp(pos['open_time'], tz=JST).strftime('%m/%d %H:%M')})\n"
-            f"  - SL: <code>${sl}</code> | TP: <code>${tp}</code>\n"
-            f"  - Status: {pos['status']}\n"
+        # ヘッダーとサマリーの抽出
+        analysis_summary = (
+            f"📊 **最新分析レポート (ランク1: {symbol})**\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+            f"  - **銘柄**: <b>{symbol}</b> (ロングシグナル)\n"
+            f"  - **分析スコア**: <code>{score_raw * 100:.2f} / 100</code>\n"
+            f"  - **予測勝率**: <code>約 {win_rate:.1f}%</code>\n"
+            f"  - **時間軸**: <code>{timeframe}</code>\n"
+        )
+        
+        # 根拠の抜粋 (簡略化)
+        long_term_trend_ok = not tech_data.get('long_term_reversal_penalty', False)
+        momentum_ok = tech_data.get('macd_cross_valid', True) and not tech_data.get('stoch_filter_penalty', 0) > 0
+        structure_ok = tech_data.get('structural_pivot_bonus', 0.0) > 0
+        volume_confirm_ok = tech_data.get('volume_confirmation_bonus', 0.0) > 0
+        liquidity_ok = tech_data.get('liquidity_bonus_value', 0.0) > 0
+
+        lt_trend_str = tech_data.get('long_term_trend', 'N/A')
+        
+        analysis_summary += (
+            f"  - **主な根拠のチェック**:\n"
+            f"    {'✅' if long_term_trend_ok else '❌'} 長期トレンド ({lt_trend_str}) と一致\n"
+            f"    {'✅' if momentum_ok else '⚠️'} 短期モメンタム加速 (RSI/MACD)\n"
+            f"    {'✅' if structure_ok else '❌'} 重要支持線に近接\n"
+            f"    {'✅' if (volume_confirm_ok or tech_data.get('obv_momentum_bonus_value', 0.0) > 0) else '❌'} 出来高/OBVの裏付け\n"
+            f"    {'✅' if liquidity_ok else '❌'} 流動性優位\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
+        )
+    else:
+        analysis_summary = (
+            f"📊 **最新分析レポート**\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+            f"  - **前回の分析で有効なシグナルはありませんでした。**\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
         )
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 13)</i>" # 💡 バージョンをPatch 13に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 14)</i>" # 💡 バージョンをPatch 14に更新
     )
 
-    return header + details + footer
+    return header + details + analysis_summary + footer
+
+def format_position_status_message_legacy(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
+    """旧バージョンのポジションステータス通知（Patch 13以前の互換性維持のため）"""
+    # ... (この関数は使用されませんが、コードの整合性を保つためにコメントアウトせず残します)
+    return format_position_status_message(balance_usdt, open_positions, balance_status, LAST_ANALYSIS_SIGNALS)
+
 
 def send_telegram_html(message: str):
     """TelegramにHTML形式でメッセージを送信する"""
@@ -568,7 +626,10 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
             pass # パッチ失敗は無視
 
         # 3. 取得失敗時の判定
-        return 0.0, 'ZERO_BALANCE' # <- 実際の残高がゼロの場合
+        if usdt_free > MIN_USDT_BALANCE_TO_TRADE:
+            return usdt_free, 'SUCCESS'
+            
+        return usdt_free, 'ZERO_BALANCE' # <- 実際の残高がゼロの場合
 
     except ccxt.AuthenticationError:
         logging.error("❌ 残高取得エラー: APIキー/Secretが不正です (AuthenticationError)。")
@@ -1034,9 +1095,6 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
 
         try:
             # 現物売り (Market Sell) を実行
-            # MEXCでは、現物取引の決済は取引所側で銘柄の残高があるかを確認する必要があるため、fetch_balanceを挟むのが理想
-            
-            # 簡易的な実装として、一旦ポジション量で売却を試みる
             order = await client.create_market_sell_order(symbol, pos['amount'])
 
             if order and order.get('status') == 'closed':
@@ -1048,9 +1106,11 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
         except Exception as e:
             logging.error(f"❌ POSITION CLOSE FAILED for {symbol}: {e}")
 
-async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新", initial_status: str = 'SUCCESS'):
-    """ポジションと残高の定期通知を送信する"""
-    global LAST_HOURLY_NOTIFICATION_TIME, LAST_IP_ERROR_MESSAGE
+async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新"):
+    """
+    💡 Patch 14: 最新の分析結果を組み込み、ポジションと残高の定期通知を送信する
+    """
+    global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_SIGNALS
 
     now = time.time()
     
@@ -1060,13 +1120,12 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
         return
 
     # 💡 最新の残高とステータスを取得
-    # LAST_IP_ERROR_MESSAGE は fetch_current_balance_usdt_with_status() 内で設定される
     usdt_balance, status_from_fetch = await fetch_current_balance_usdt_with_status()
     
-    # 💡 format_position_status_messageでグローバルなLAST_IP_ERROR_MESSAGEを使用
-    message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS, status_from_fetch)
+    # 💡 修正: 最新のシグナル情報 (LAST_ANALYSIS_SIGNALS) を渡す
+    message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS, status_from_fetch, LAST_ANALYSIS_SIGNALS)
 
-    if header_msg == "🤖 BOT v19.0.27 初回起動通知":
+    if header_msg.startswith("🤖 BOT v19.0.27 初回起動通知"):
         full_message = f"🤖 **Apex BOT v19.0.27 起動完了**\n\n{message}"
     else:
         full_message = f"{header_msg}\n\n{message}"
@@ -1225,7 +1284,7 @@ async def main_loop():
                 all_signals.append(result)
 
             # 6. 最適なシグナルの選定とグローバル変数への保存
-            # LAST_ANALYSIS_SIGNALS は分析専用ループのために、全てのスコア付きシグナル（フィルタリング前）を保存
+            # LAST_ANALYSIS_SIGNALS は分析専用ループと定期通知のために、全てのスコア付きシグナル（フィルタリング前）を保存
             LAST_ANALYSIS_SIGNALS = [s for s in all_signals if s['side'] == 'ロング'] 
             
             # 取引用のシグナルはSIGNAL_THRESHOLD以上のものに絞り、クールダウンをチェック
@@ -1265,8 +1324,9 @@ async def main_loop():
             # 8. ポジション管理
             await manage_open_positions(usdt_balance, EXCHANGE_CLIENT)
 
-            # 9. 定期ステータス通知
-            await send_position_status_notification("🔄 定期ステータス更新", balance_status)
+            # 9. 定期ステータス通知 (Patch 14)
+            # 💡 LAST_ANALYSIS_SIGNALS はグローバルから取得されるため、引数には渡さない
+            await send_position_status_notification("🔄 定期ステータス更新")
 
             # 10. ループの完了とロギング強化
             LAST_UPDATE_TIME = time.time()
@@ -1280,8 +1340,8 @@ async def main_loop():
             # 💡 Patch 13: 生成されたシグナル数を明示的にログ出力
             logging.info(f"💡 分析完了 - 生成シグナル数 (全スコア): {len(LAST_ANALYSIS_SIGNALS)} 件")
 
-            # 💡 バージョン表示をPatch 13に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 13))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 14に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 14))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1289,7 +1349,8 @@ async def main_loop():
             error_name = type(e).__name__
             logging.error(f"メインループで致命的なエラーが発生: {error_name}: {e}")
             # エラー発生時もステータス通知を実行
-            await send_position_status_notification(f"❌ 致命的エラー発生: {error_name}", 'OTHER_ERROR')
+            # 💡 LAST_ANALYSIS_SIGNALS はグローバルから取得される
+            await send_position_status_notification(f"❌ 致命的エラー発生: {error_name}")
             await asyncio.sleep(60)
 
 
@@ -1297,7 +1358,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 13)") # 💡 バージョンをPatch 13に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 14)") # 💡 バージョンをPatch 14に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1307,8 +1368,8 @@ async def startup_event():
     await initialize_ccxt_client()
 
     # 2. 初回起動時のTypeErrorを回避するための修正ロジック (残高とステータスの先行取得)
-    usdt_balance, status = await fetch_current_balance_usdt_with_status()
-    await send_position_status_notification("🤖 BOT v19.0.27 初回起動通知", initial_status=status)
+    # 💡 初回通知は分析結果がない状態で送信されるが、フォーマッタで処理される
+    await send_position_status_notification("🤖 BOT v19.0.27 初回起動通知")
 
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
@@ -1331,7 +1392,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 13)", # 💡 バージョンをPatch 13に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 14)", # 💡 バージョンをPatch 14に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1343,7 +1404,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 13)"}) # 💡 バージョンをPatch 13に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 14)"}) # 💡 バージョンをPatch 14に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
