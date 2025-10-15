@@ -1,10 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 3: yfinance Rate Limit対策)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 4: yfinance 全エラー対応リトライ)
 #
 # 修正ポイント:
-# 1. 【CRITICAL FIX】fetch_forex_data_sync() に yfinance の RateLimitError に対するリトライ機構を追加。
-# 2. 【IP LOGGING FIX】MEXCのIPアドレス制限エラー時に、拒否されたIPアドレスを抽出してTelegram通知に表示 (Patch 2からの維持)。
-# 3. 【CRITICAL FIX】main_loop() 内で get_crypto_macro_context が None を返した場合の TypeError を修正 (Patch 1からの維持)。
+# 1. 【CRITICAL FIX】fetch_forex_data_sync() のリトライ機構を強化。YFRateLimitErrorだけでなく、
+#    すべての接続/APIエラー (Exception) および空のDataFrame取得時にもリトライを行うように修正。
+# 2. 【Patch 3からの維持】IPアドレス制限時のログ表示と、マクロコンテキストのNoneTypeエラー回避ロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 import sys
 import random
 import json
-import re # 👈 IPアドレス抽出のため
+import re
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -296,7 +296,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 3)</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 4)</i>" # 💡 バージョンをPatch 4に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -304,7 +304,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
     """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.27)"""
-    global LAST_IP_ERROR_MESSAGE # 👈 グローバル変数を使用
+    global LAST_IP_ERROR_MESSAGE 
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
     # 💡 ステータスに応じたヘッダーと警告メッセージ
@@ -371,7 +371,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 3)</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 4)</i>" # 💡 バージョンをPatch 4に更新
     )
 
     return header + details + footer
@@ -439,7 +439,7 @@ async def initialize_ccxt_client():
 
 async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
     """CCXTから現在のUSDT残高を取得し、ステータスを返す。(v19.0.27)"""
-    global EXCHANGE_CLIENT, LAST_IP_ERROR_MESSAGE # 👈 グローバル変数を使用
+    global EXCHANGE_CLIENT, LAST_IP_ERROR_MESSAGE
     if not EXCHANGE_CLIENT:
         return 0.0, 'AUTH_ERROR'
         
@@ -555,9 +555,9 @@ def fetch_fgi_sync() -> int:
         return 50
 
 def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
-    """yfinanceから為替データを同期的に取得する (EURUSD=X) - Rate Limit対策を追加"""
+    """yfinanceから為替データを同期的に取得する (EURUSD=X) - Rate Limit/Connection対策を追加 (Patch 4)"""
     
-    # 💡 【Patch 3: Rate Limit対策】リトライ機構を追加
+    # 💡 【Patch 4: 全エラー対応リトライ】リトライ機構を強化
     MAX_RETRIES = 3
     RETRY_DELAY = 10  # 10秒待機
 
@@ -565,22 +565,27 @@ def fetch_forex_data_sync(ticker: str, interval: str, period: str) -> Optional[p
         try:
             # ⚠️ 注意: yfinanceの警告は抑制されているが、ダウンロード自体は行われる
             data = yf.download(ticker, interval=interval, period=period, progress=False)
-            if data.empty:
+            
+            # データが空、またはデータ数が不十分な場合も一時的なエラーとみなしリトライ
+            if data.empty or len(data) < 30: 
+                 if attempt < MAX_RETRIES - 1:
+                      logging.warning(f"⚠️ yfinanceデータ取得: 空のDataFrameまたはデータ不足 ({len(data)}件) ({attempt + 1}/{MAX_RETRIES})。{RETRY_DELAY}秒後に再試行します。")
+                      time.sleep(RETRY_DELAY)
+                      continue
                  return None
+
             return data
-        except yf.exceptions.YFRateLimitError as e:
+        except Exception as e: # 💡 RateLimit, ConnectionErrorなど全てをキャッチ
             if attempt < MAX_RETRIES - 1:
-                # レート制限エラー発生時、リトライ回数が残っていれば待機
-                logging.warning(f"⚠️ yfinanceレート制限エラー ({attempt + 1}/{MAX_RETRIES})。{RETRY_DELAY}秒後に再試行します。")
+                # エラー発生時、リトライ回数が残っていれば待機
+                logging.warning(f"⚠️ yfinanceデータ取得エラー ({type(e).__name__})。({attempt + 1}/{MAX_RETRIES})。{RETRY_DELAY}秒後に再試行します。")
                 time.sleep(RETRY_DELAY)
             else:
                 # 最終リトライ失敗
-                logging.error(f"❌ yfinanceレート制限エラーにより為替データ取得に失敗しました。: {e}")
+                logging.error(f"❌ yfinanceデータ取得が最終リトライでも失敗しました。: {type(e).__name__}: {e}")
                 return None
-        except Exception as e:
-            # その他のyfinanceのエラーはログに出力せず、静かにNoneを返す
-            return None
     return None # safety return
+
 
 async def get_crypto_macro_context() -> Optional[Dict]:
     """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得)"""
@@ -592,6 +597,7 @@ async def get_crypto_macro_context() -> Optional[Dict]:
         fgi_proxy = max(-FGI_PROXY_BONUS_MAX, min(FGI_PROXY_BONUS_MAX, fgi_normalized * FGI_PROXY_BONUS_MAX))
 
         # 2. 為替マクロデータ (EUR/USD) を取得し、USDの強弱を判定
+        # fetch_forex_data_syncはPatch 4によりエラー時にNoneを返すが、リトライされる
         forex_df = await asyncio.to_thread(fetch_forex_data_sync, "EURUSD=X", "60m", "7d") # 1時間足、過去7日間
         forex_trend = 'NEUTRAL'
         forex_bonus = 0.0
@@ -619,6 +625,7 @@ async def get_crypto_macro_context() -> Optional[Dict]:
             'forex_bonus': forex_bonus,
         }
     except Exception as e:
+         # FGI取得やその他ロジックでエラーが出た場合はNoneを返し、メインループで処理
          logging.warning(f"マクロコンテキスト取得中にエラー発生（外部API）：{e}")
          return None
 
@@ -981,7 +988,7 @@ async def main_loop():
             macro_context_task = asyncio.create_task(get_crypto_macro_context()) 
 
             usdt_balance, balance_status = await usdt_balance_status_task
-            macro_context_raw = await macro_context_task # NoneTypeチェックのために一旦生の値を取得
+            macro_context_raw = await macro_context_task 
 
             # 💡 マクロコンテキストがNoneの場合のフォールバック
             if macro_context_raw is None:
@@ -1087,8 +1094,8 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            # 💡 バージョン表示をPatch 3に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 3))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 4に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 4))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1104,7 +1111,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 3)")
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 4)") # 💡 バージョンをPatch 4に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1133,7 +1140,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 3)",
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 4)", # 💡 バージョンをPatch 4に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1145,7 +1152,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 3)"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 4)"}) # 💡 バージョンをPatch 4に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
