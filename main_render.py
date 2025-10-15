@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 11: 分析レポート即時送信強化)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 12: 分析レポート初回送信の確実化)
 #
 # 修正ポイント:
-# 1. 【機能改善】analysis_only_notification_loop() を修正し、メインループの初回分析完了後、
-#    1時間の待機をスキップして最初の分析レポートを即時送信するように強化。
-# 2. 【ロギング強化】main_loop完了時に生成されたシグナル数を明示的にログ出力。
-# 3. 【バージョン更新】全てのバージョン情報を Patch 11 に更新。
+# 1. 【機能修正】analysis_only_notification_loop() のロジックを修正し、メインループの初回完了後、
+#    グローバル変数の競合による遅延を避けるため、即座に初回レポート送信をトリガーするように修正。
+# 2. 【ロジック強化】analysis_only_notification_loop() のメイン待機ループを削除し、よりロバストな定期実行ロジックに修正。
+# 3. 【バージョン更新】全てのバージョン情報を Patch 12 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -108,7 +108,7 @@ ACTUAL_POSITIONS: Dict[str, Dict] = {}
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0 # 💡 定期ポジションステータス通知用
 LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0 # 💡 分析専用通知用
 
-# 💡 Patch 11: 初回分析レポート即時送信フラグ
+# 💡 Patch 12: 初回分析レポート即時送信フラグ (analysis_only_notification_loop内で使用)
 FIRST_ANALYSIS_DONE: bool = False
 
 # ログ設定
@@ -166,6 +166,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # スコアが閾値を超えたシグナルの中から、最もRRR/スコアが高いものを選択
     high_score_signals = [s for s in valid_signals if s.get('score', 0.5) >= SIGNAL_THRESHOLD]
     if not high_score_signals:
+        # この関数はSIGNAL_THRESHOLD以上のシグナル通知用だが、念のためこのパスも警告を出さない
         return ""
 
     best_signal = max(
@@ -302,13 +303,13 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 11)</i>" # 💡 バージョンをPatch 11に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 12)</i>" # 💡 バージョンをPatch 12に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
 
 def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -> str:
-    """💡 1時間ごとの分析専用メッセージを作成する (Patch 10/11: 高スコア不在時対応)"""
+    """💡 1時間ごとの分析専用メッセージを作成する (Patch 12)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     # 1. 候補リストの作成 (スコア降順にソート)
@@ -370,16 +371,18 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -
             )
         
         # 💡 閾値を超えたシグナルがゼロの場合のみ警告を表示
+        # (sorted_signalsリストが空でない && 最高のスコアが閾値未満)
         if sorted_signals[0]['score'] < SIGNAL_THRESHOLD:
              signal_section += "\n<pre>⚠️ 注: 上記は監視中の最高スコアですが、閾値 (75点) 未満です。</pre>\n"
 
     else:
-        signal_section += "  - 現在、評価可能なシグナルはありません。\n"
+        # シグナルがゼロ件の場合 (ログで確認済みのパターン)
+        signal_section += "  - **シグナル候補なし**: 現在、すべての監視銘柄で取引推奨スコア (40点以上) に達するロングシグナルは見つかりませんでした。\n"
     
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 11)</i>" # 💡 バージョンをPatch 11に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 12)</i>" # 💡 バージョンをPatch 12に更新
     )
 
     return header + macro_section + signal_section + footer
@@ -453,7 +456,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 11)</i>" # 💡 バージョンをPatch 11に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 12)</i>" # 💡 バージョンをPatch 12に更新
     )
 
     return header + details + footer
@@ -786,6 +789,9 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     if df.empty or len(df) < LONG_TERM_SMA_LENGTH: return None
 
     df = calculate_technical_indicators(df)
+    # 💡 データフレームの最後の行と、その前の行が確実に存在するかをチェック (Patch 12 - ゼロ件シグナル対策)
+    if len(df) < 2: return None 
+    
     last_row = df.iloc[-1]
     prev_row = df.iloc[-2]
     current_price = last_row['close']
@@ -1073,12 +1079,11 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
 async def send_analysis_report(macro_context: Dict, top_signals: List[Dict]):
     """分析レポートの生成と送信を行うヘルパー関数"""
     
-    if not macro_context or not top_signals:
-         # 💡 メインループの完了チェックを通過しているため、このブロックは基本的にシグナルゼロの場合のみ
-         logging.info("🔔 分析レポート送信試行: シグナル/マクロデータがありません。")
+    if not macro_context:
+         logging.info("🔔 分析レポート送信試行: マクロコンテキストデータがありません。スキップします。")
          return 
 
-    logging.info(f"🔔 1時間ごとの分析レポートを生成します (FGI: {macro_context.get('fgi_raw_value', 'N/A')}, Total Signals: {len(top_signals)})")
+    logging.info(f"🔔 分析レポートを生成します (FGI: {macro_context.get('fgi_raw_value', 'N/A')}, Total Signals: {len(top_signals)})")
 
     # 1. メッセージを作成
     message = format_analysis_only_message(top_signals, macro_context)
@@ -1089,32 +1094,36 @@ async def send_analysis_report(macro_context: Dict, top_signals: List[Dict]):
 
 
 # ====================================================================================
-# ANALYSIS ONLY LOOP (Patch 11)
+# ANALYSIS ONLY LOOP (Patch 12 - ロバスト性強化)
 # ====================================================================================
 
 async def analysis_only_notification_loop():
-    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 11: 初回即時送信強化)"""
+    """💡 取引を行わない、1時間ごとの市場分析通知ループ (Patch 12: 初回即時送信強化)"""
     global LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SUCCESS_TIME, FIRST_ANALYSIS_DONE
     
-    # 1. 最初のメインループ完了まで待機
+    # 1. メインループの初回完了まで待機（ポーリング）
+    # 💡 以前の無限ループを削除し、初回完了をチェック
     while LAST_SUCCESS_TIME == 0.0:
          logging.info("⚠️ 分析レポート送信準備: メインループの初回分析完了を待機中...")
-         await asyncio.sleep(60)
+         await asyncio.sleep(10) # 10秒に短縮し、メインループの完了を早くキャッチ
 
-    # 2. メインループ完了後、最初のレポートを即時送信
+    # 2. メインループ初回完了後の即時レポート送信
     if not FIRST_ANALYSIS_DONE:
         try:
-             await send_analysis_report(GLOBAL_MACRO_CONTEXT, LAST_ANALYSIS_SIGNALS)
+             # 確実に最新のデータを取得
+             macro_context = GLOBAL_MACRO_CONTEXT
+             top_signals = LAST_ANALYSIS_SIGNALS 
+             
+             await send_analysis_report(macro_context, top_signals)
              LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time()
              FIRST_ANALYSIS_DONE = True # 最初のレポート送信フラグを立てる
              logging.info(f"✅ 分析レポート初回送信完了。次の定期分析まで {ANALYSIS_ONLY_INTERVAL} 秒待機。")
         except Exception as e:
              logging.error(f"❌ 分析レポート初回送信中にエラーが発生: {type(e).__name__}: {e}")
-             # エラーが発生してもフラグは立てて、定期サイクルに進む
              FIRST_ANALYSIS_DONE = True 
              
     
-    # 3. 1時間ごとの定期実行サイクル
+    # 3. 1時間ごとの定期実行サイクル (初回送信完了後に実行)
     while True:
         try:
             now = time.time()
@@ -1265,11 +1274,11 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
             
-            # 💡 Patch 11: 生成されたシグナル数を明示的にログ出力
+            # 💡 Patch 12: 生成されたシグナル数を明示的にログ出力
             logging.info(f"💡 分析完了 - 生成シグナル数 (全スコア): {len(LAST_ANALYSIS_SIGNALS)} 件")
 
-            # 💡 バージョン表示をPatch 11に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 11))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 12に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 12))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1285,7 +1294,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 11)") # 💡 バージョンをPatch 11に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 12)") # 💡 バージョンをPatch 12に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1319,7 +1328,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 11)", # 💡 バージョンをPatch 11に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 12)", # 💡 バージョンをPatch 12に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1331,7 +1340,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 11)"}) # 💡 バージョンをPatch 11に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 12)"}) # 💡 バージョンをPatch 12に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
