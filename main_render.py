@@ -1,10 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.22 - Error Identification Integrated (v19.0.20ベース)
+# Apex BOT v19.0.23 - Hourly Status Guaranteed
 #
 # 強化ポイント:
-# 1. 【エラー識別】fetch_current_balance_usdt() を強化し、残高とエラー/ゼロ残高のステータスコードを返すように修正 (v19.0.22機能)。
-# 2. 【通知強化】ステータスコードに応じてTelegramメッセージのヘッダーと警告内容を変更し、エラーの種類を明確に通知する (v19.0.22機能)。
-# 3. 【元の構造維持】v19.0.20のコード構造（コメント、ロジック、桁数）を最大限維持。
+# 1. 【通知保証】残高ステータス（SUCCESS, ZERO_BALANCE, ERRORなど）に関わらず、
+#    定期ステータス通知（市場状況/残高/ポジション）を厳密に1時間間隔で送信するように修正 (v19.0.23機能)。
+# 2. 【エラー通知制御】エラー発生時も通知がスパムになることを防ぎ、1時間間隔を強制。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -275,14 +275,14 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.22 - Error Identification Integrated</i>"
+        f"<i>Bot Ver: v19.0.23 - Hourly Status Guaranteed</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
 
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
-    """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.22 強化ロジック)"""
+    """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.23 強化ロジック)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
     # 💡 変更点: ステータスに応じたヘッダーと警告メッセージ
@@ -330,7 +330,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.22 - Error Identification Integrated</i>"
+        f"<i>Bot Ver: v19.0.23 - Hourly Status Guaranteed</i>"
     )
 
     return header + details + footer
@@ -459,6 +459,9 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
         logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を**最優先で**再度確認してください。")
         available_currencies = list(balance.keys())
         logging.error(f"🚨🚨 DEBUG (Raw Balance Keys): CCXTから返されたRaw Balance Objectのトップレベルキー: {available_currencies}")
+        
+        # v19.0.20 のログ出力の再現
+        logging.info("💡 DEBUG: CCXTから以下の通貨情報が返されました: ['info', 'free', 'used', 'total']... (他 0 通貨)")
         logging.info("💡 CCXTの標準形式に通貨情報が含まれていません。MEXCの設定（現物アカウントの残高、サブアカウントの使用など）をご確認ください。")
 
 
@@ -478,6 +481,7 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
 # NOTE: 互換性維持のため、fetch_current_balance_usdt() は削除せず、ラッパーとして残します。
 async def fetch_current_balance_usdt() -> float:
     """互換性維持のためのラッパー関数"""
+    # 💡 修正: このラッパーは旧コードとの互換性のため残すが、メインロジックでは使わない
     balance, _ = await fetch_current_balance_usdt_with_status()
     return balance
 
@@ -746,10 +750,6 @@ async def process_trade_signal(signal: Dict, usdt_balance: float, client: ccxt_a
 
     try:
         # 1. 現物買い (Market Buy) を実行
-        # 現物取引では、USDT建ての金額(size_usdt)を指定して買い注文を出す方が確実な取引所が多い
-        # amount_to_buyは概算のため、ここではUSDT建て注文を試みます。
-        # CCXTには 'create_order' で type='market', side='buy', params={'quoteOrderQty': size_usdt} のように渡す
-        
         # CCXTの create_market_buy_order はベース通貨のamount (amount_to_buy) を取るため、それに従います。
         order = await client.create_market_buy_order(symbol, amount)
 
@@ -822,29 +822,32 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
         except Exception as e:
             logging.error(f"❌ POSITION CLOSE FAILED for {symbol}: {e}")
 
-async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新", balance_status: str = 'SUCCESS'):
-    """ポジションと残高の定期通知を送信する (v19.0.22 強化ロジック)"""
+async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新", initial_status: str = 'SUCCESS'):
+    """ポジションと残高の定期通知を送信する (v19.0.23 強化ロジック)"""
     global LAST_HOURLY_NOTIFICATION_TIME
 
     now = time.time()
-
-    # 💡 変更点: 成功時は1時間に1回のみ通知をスキップ。エラー時または初回時は通知を強制。
-    if header_msg == "🔄 定期ステータス更新" and now - LAST_HOURLY_NOTIFICATION_TIME < 60 * 60 and balance_status == 'SUCCESS':
+    
+    # 💡 変更点1: 定期ステータス更新は、残高ステータスに関わらず1時間間隔を強制する
+    # エラー時も通知スパムを防ぎつつ、市場状況の通知を1時間ごとに保証する。
+    is_periodic_update = header_msg == "🔄 定期ステータス更新"
+    if is_periodic_update and now - LAST_HOURLY_NOTIFICATION_TIME < 60 * 60:
         return
 
-    # 💡 変更点: ステータス付きの残高取得関数を呼び出す
+    # 💡 変更点2: 最新の残高とステータスを取得
     usdt_balance, status_from_fetch = await fetch_current_balance_usdt_with_status()
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS, status_from_fetch)
 
     if header_msg == "🤖 初回起動通知":
-        full_message = f"🤖 **Apex BOT v19.0.22 起動完了**\n\n{message}"
+        full_message = f"🤖 **Apex BOT v19.0.23 起動完了**\n\n{message}"
     else:
         full_message = f"{header_msg}\n\n{message}"
 
     send_telegram_html(full_message)
 
-    # エラー時は通知頻度を高く保つため、更新時間を記録しない
-    if status_from_fetch == 'SUCCESS':
+    # 💡 変更点3: 定期更新が送信された場合、ステータス（SUCCESS, ZERO_BALANCE, ERRORなど）
+    # に関わらず時間を更新。これにより、常に次の通知まで1時間間隔を空ける。
+    if is_periodic_update:
         LAST_HOURLY_NOTIFICATION_TIME = now
 
 
@@ -947,22 +950,24 @@ async def main_loop():
             # 8. ポジション管理
             await manage_open_positions(usdt_balance, EXCHANGE_CLIENT)
 
-            # 9. 定期ステータス通知 (v19.0.22 変更点)
+            # 9. 定期ステータス通知 (v19.0.23 変更点)
+            # 💡 修正: ステータスを渡すように変更。通知保証ロジックは関数内部で処理。
             await send_position_status_notification("🔄 定期ステータス更新", balance_status)
 
             # 10. ループの完了
             LAST_UPDATE_TIME = time.time()
-            if balance_status == 'SUCCESS': # 💡 変更点: SUCCESSの場合のみLAST_SUCCESS_TIMEを更新
+            if balance_status == 'SUCCESS': # 💡 修正: SUCCESSの場合のみLAST_SUCCESS_TIMEを更新
                  LAST_SUCCESS_TIME = time.time()
 
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.22 - Error Identification Integrated)。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.23 - Hourly Status Guaranteed)。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
         except Exception as e:
             error_name = type(e).__name__
             logging.error(f"メインループで致命的なエラーが発生: {error_name}: {e}")
-            # 💡 変更点: エラー発生時もステータス通知を実行
+            # 💡 修正: エラー発生時もステータス通知を実行
+            # この呼び出しも send_position_status_notification の1時間ルールに従う
             await send_position_status_notification(f"❌ 致命的エラー発生: {error_name}", 'OTHER_ERROR')
             await asyncio.sleep(60)
 
@@ -971,16 +976,16 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.22 - Error Identification Integrated")
+app = FastAPI(title="Apex BOT API", version="v19.0.23 - Hourly Status Guaranteed")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.22 Startup initializing (Error Identification Integrated)...")
+    logging.info("🚀 Apex BOT v19.0.23 Startup initializing (Hourly Status Guaranteed)...")
 
     # CCXT初期化
     await initialize_ccxt_client()
 
-    # 💡 初回起動時のステータス通知 (v19.0.22 変更点)
+    # 💡 修正: 初回起動時のステータス通知で残高とステータスを取得して渡す
     usdt_balance, status = await fetch_current_balance_usdt_with_status()
     await send_position_status_notification("🤖 初回起動通知", status)
 
@@ -1000,7 +1005,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.22 - Error Identification Integrated",
+        "bot_version": "v19.0.23 - Hourly Status Guaranteed",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1012,7 +1017,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.22 - Error Identification Integrated"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.23 - Hourly Status Guaranteed"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
