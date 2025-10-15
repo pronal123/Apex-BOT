@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 1)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 2: IP Logging)
 #
 # 修正ポイント:
-# 1. 【CRITICAL FIX】main_loop() 内で get_crypto_macro_context が None を返した場合の TypeError を修正。
-# 2. 【CONFIG WARNING】MEXCのIPホワイトリストエラーに関する警告ロジックを追加。
+# 1. 【IP LOGGING FIX】MEXCのIPアドレス制限エラー時に、拒否されたIPアドレスを抽出してTelegram通知に表示。
+# 2. 【CRITICAL FIX】main_loop() 内で get_crypto_macro_context が None を返した場合の TypeError を修正 (Patch 1からの維持)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 import sys
 import random
 import json
+import re # 👈 追加: IPアドレス抽出のため
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -94,6 +95,9 @@ LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_SUCCESS_TIME: float = 0.0
 GLOBAL_MACRO_CONTEXT: Dict = {}
 ORDER_BOOK_CACHE: Dict[str, Any] = {} # 流動性データキャッシュ
+
+# 💡 IPアドレス制限エラーメッセージを一時保存するグローバル変数
+LAST_IP_ERROR_MESSAGE: Optional[str] = None
 
 # 💡 ポジション管理システム
 # {symbol: {'entry_price': float, 'amount': float, 'sl_price': float, 'tp_price': float, 'open_time': float, 'status': str}}
@@ -291,7 +295,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 1)</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 2)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -299,9 +303,12 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str) -> str:
     """現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する (v19.0.27)"""
+    global LAST_IP_ERROR_MESSAGE # 👈 グローバル変数を使用
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
     # 💡 ステータスに応じたヘッダーと警告メッセージ
+    warning_msg = ""
+    
     if balance_status == 'AUTH_ERROR':
         status_line = "🔴 **認証エラー発生**"
         warning_msg = "\n🚨 **APIキー/Secretが不正です。**すぐに確認してください。"
@@ -310,7 +317,21 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
         warning_msg = f"\n🚨 **{CCXT_CLIENT_NAME}との通信に失敗または権限が不足しています。**ログを確認してください。"
     elif balance_status == 'IP_ERROR':
          status_line = "❌ **IPアドレス制限エラー**"
-         warning_msg = "\n🚨 **RenderのIPアドレスがMEXCのAPIホワイトリストに登録されていません。**MEXCの設定を確認してください。"
+         
+         # 💡 【改良点】IPアドレスを抽出して表示
+         extracted_ip = "N/A"
+         if LAST_IP_ERROR_MESSAGE:
+             # 例: mexc {"code":700006,"msg":"IP [54.254.162.138] not in the ip white list"}
+             match = re.search(r"IP\s*\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]", LAST_IP_ERROR_MESSAGE)
+             if match:
+                 extracted_ip = match.group(1)
+         
+         warning_msg = (
+             f"\n🚨 **RenderのIPアドレスがMEXCのAPIホワイトリストに登録されていません。**"
+             f"\n  - **アクセス拒否されたIP**: <code>{extracted_ip}</code>"
+             f"\n  - **対応**: MEXC API設定で上記IPをホワイトリストに**追加**してください。"
+         )
+         
     elif balance_status == 'ZERO_BALANCE':
         # 実際残高がゼロ、またはAPI応答からUSDT残高情報が完全に欠落している場合のメッセージ
         status_line = "✅ **残高確認完了 (残高ゼロ)**"
@@ -349,7 +370,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 1)</i>"
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 2)</i>"
     )
 
     return header + details + footer
@@ -389,8 +410,7 @@ def send_telegram_html(message: str):
 async def initialize_ccxt_client():
     """CCXTクライアントを初期化 (MEXCをデフォルトとする)"""
     global EXCHANGE_CLIENT
-
-    # 環境変数からAPIキーを取得
+    # ... (前回のコードと同一の初期化ロジック)
     api_key = os.environ.get('MEXC_API_KEY')
     secret = os.environ.get('MEXC_SECRET')
 
@@ -418,9 +438,13 @@ async def initialize_ccxt_client():
 
 async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
     """CCXTから現在のUSDT残高を取得し、ステータスを返す。(v19.0.27)"""
-    global EXCHANGE_CLIENT
+    global EXCHANGE_CLIENT, LAST_IP_ERROR_MESSAGE # 👈 グローバル変数を使用
     if not EXCHANGE_CLIENT:
         return 0.0, 'AUTH_ERROR'
+        
+    # エラーが発生しない場合のために、IPエラーメッセージをリセット
+    if LAST_IP_ERROR_MESSAGE is not None:
+         LAST_IP_ERROR_MESSAGE = None
 
     try:
         balance = await EXCHANGE_CLIENT.fetch_balance()
@@ -468,6 +492,8 @@ async def fetch_current_balance_usdt_with_status() -> Tuple[float, str]:
         logging.error(f"❌ 残高取得エラー（CCXT Exchange Error）: {type(e).__name__}: {e}")
         # IPアドレス制限エラーの検出
         if "700006" in error_msg and "ip white list" in error_msg.lower():
+             # 💡 【改良点】IPエラーメッセージを保存
+             LAST_IP_ERROR_MESSAGE = error_msg
              return 0.0, 'IP_ERROR'
         return 0.0, 'API_ERROR' # <- API通信エラーの場合
     except Exception as e:
@@ -887,7 +913,7 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
 
 async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新", initial_status: str = 'SUCCESS'):
     """ポジションと残高の定期通知を送信する"""
-    global LAST_HOURLY_NOTIFICATION_TIME
+    global LAST_HOURLY_NOTIFICATION_TIME, LAST_IP_ERROR_MESSAGE
 
     now = time.time()
     
@@ -897,7 +923,10 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
         return
 
     # 💡 最新の残高とステータスを取得
+    # LAST_IP_ERROR_MESSAGE は fetch_current_balance_usdt_with_status() 内で設定される
     usdt_balance, status_from_fetch = await fetch_current_balance_usdt_with_status()
+    
+    # 💡 【改良点】format_position_status_messageでグローバルなLAST_IP_ERROR_MESSAGEを使用
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS, status_from_fetch)
 
     if header_msg == "🤖 BOT v19.0.27 初回起動通知":
@@ -918,7 +947,7 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
 
 async def main_loop():
     """BOTのメイン処理ループ"""
-    global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT, LAST_SUCCESS_TIME
+    global LAST_UPDATE_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT, LAST_SUCCESS_TIME, LAST_IP_ERROR_MESSAGE
 
     if not EXCHANGE_CLIENT:
          await initialize_ccxt_client()
@@ -937,7 +966,7 @@ async def main_loop():
             usdt_balance, balance_status = await usdt_balance_status_task
             macro_context_raw = await macro_context_task # NoneTypeチェックのために一旦生の値を取得
 
-            # 💡 【CRITICAL FIX】 macro_contextがNoneの場合のフォールバック
+            # 💡 【CRITICAL FIX】 macro_contextがNoneの場合のフォールバック (Patch 1からの維持)
             if macro_context_raw is None:
                 logging.warning("⚠️ マクロコンテキストの取得が失敗しました（NoneType）。デフォルト値で初期化を続行します。")
                 macro_context = {
@@ -949,22 +978,16 @@ async def main_loop():
             else:
                  macro_context = macro_context_raw
             
-            # IPアドレス制限エラーの通知
+            # IPアドレス制限エラーの検出時のログ強化
             if balance_status == 'IP_ERROR':
-                # ログに出ているIPアドレスを抽出して具体的な警告を表示
-                error_ip = "N/A"
-                if hasattr(EXCHANGE_CLIENT, 'last_http_response'):
-                    try:
-                        # ログに出ているIPアドレスを抽出 (例: IP [xxx.xxx.xxx.xxx])
-                        error_log = EXCHANGE_CLIENT.last_http_response.get('msg', '')
-                        if 'IP [' in error_log and ']' in error_log:
-                            start_index = error_log.find('IP [') + 4
-                            end_index = error_log.find(']', start_index)
-                            error_ip = error_log[start_index:end_index]
-                    except:
-                        pass
-                
-                logging.error(f"🚨🚨 CRITICAL CONFIG ERROR: MEXCのIPアドレス制限によりアクセスが拒否されています。IP [{error_ip}] をホワイトリストに追加してください。")
+                # LAST_IP_ERROR_MESSAGEにメッセージが保存されていることを利用
+                ip_match = re.search(r"IP\s*\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]", LAST_IP_ERROR_MESSAGE or "")
+                extracted_ip = ip_match.group(1) if ip_match else "N/A"
+                logging.error(f"🚨🚨 CRITICAL CONFIG ERROR: MEXCのIPアドレス制限によりアクセスが拒否されています。IP [{extracted_ip}] をホワイトリストに追加してください。")
+            else:
+                 # 成功時はIPエラーメッセージをクリア（fetch_current_balance_usdt_with_statusでもクリアされるが念のため）
+                 if LAST_IP_ERROR_MESSAGE is not None:
+                      LAST_IP_ERROR_MESSAGE = None
 
 
             macro_context['current_usdt_balance'] = usdt_balance
@@ -1050,7 +1073,7 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 1))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 2))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1066,7 +1089,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 1)")
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 2)")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1095,7 +1118,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 1)",
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 2)",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1107,7 +1130,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 1)"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 2)"})
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
