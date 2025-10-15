@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 4: yfinance 全エラー対応リトライ)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 5: 診断ログの改善)
 #
 # 修正ポイント:
-# 1. 【CRITICAL FIX】fetch_forex_data_sync() のリトライ機構を強化。YFRateLimitErrorだけでなく、
-#    すべての接続/APIエラー (Exception) および空のDataFrame取得時にもリトライを行うように修正。
-# 2. 【Patch 3からの維持】IPアドレス制限時のログ表示と、マクロコンテキストのNoneTypeエラー回避ロジックを維持。
+# 1. 【MINOR FIX】get_crypto_macro_context() のエラーログを強化。
+#    yfinanceのエラー発生時に、エラーメッセージだけでなく、例外タイプ (Exception Type) を記録するように修正し、
+#    エラーの原因特定を容易にします。
+# 2. 【Patch 4からの維持】yfinance 全エラー対応リトライロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -296,7 +297,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 4)</i>" # 💡 バージョンをPatch 4に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 5)</i>" # 💡 バージョンをPatch 5に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -371,7 +372,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 4)</i>" # 💡 バージョンをPatch 4に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 5)</i>" # 💡 バージョンをPatch 5に更新
     )
 
     return header + details + footer
@@ -597,7 +598,6 @@ async def get_crypto_macro_context() -> Optional[Dict]:
         fgi_proxy = max(-FGI_PROXY_BONUS_MAX, min(FGI_PROXY_BONUS_MAX, fgi_normalized * FGI_PROXY_BONUS_MAX))
 
         # 2. 為替マクロデータ (EUR/USD) を取得し、USDの強弱を判定
-        # fetch_forex_data_syncはPatch 4によりエラー時にNoneを返すが、リトライされる
         forex_df = await asyncio.to_thread(fetch_forex_data_sync, "EURUSD=X", "60m", "7d") # 1時間足、過去7日間
         forex_trend = 'NEUTRAL'
         forex_bonus = 0.0
@@ -625,8 +625,9 @@ async def get_crypto_macro_context() -> Optional[Dict]:
             'forex_bonus': forex_bonus,
         }
     except Exception as e:
-         # FGI取得やその他ロジックでエラーが出た場合はNoneを返し、メインループで処理
-         logging.warning(f"マクロコンテキスト取得中にエラー発生（外部API）：{e}")
+         # 💡 【Patch 5: 診断ログの改善】例外タイプを明示的に記録
+         error_type = type(e).__name__
+         logging.warning(f"マクロコンテキスト取得中にエラー発生（外部API）：{error_type}: {e}")
          return None
 
 
@@ -992,6 +993,7 @@ async def main_loop():
 
             # 💡 マクロコンテキストがNoneの場合のフォールバック
             if macro_context_raw is None:
+                # Patch 5では、このログはget_crypto_macro_context内のより詳細なログの後に続く。
                 logging.warning("⚠️ マクロコンテキストの取得が失敗しました（NoneType）。デフォルト値で初期化を続行します。")
                 macro_context = {
                     'fgi_proxy': 0.0,
@@ -1094,8 +1096,8 @@ async def main_loop():
             if balance_status == 'SUCCESS': 
                  LAST_SUCCESS_TIME = time.time()
 
-            # 💡 バージョン表示をPatch 4に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 4))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 5に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 5))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1111,7 +1113,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 4)") # 💡 バージョンをPatch 4に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 5)") # 💡 バージョンをPatch 5に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1140,7 +1142,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 4)", # 💡 バージョンをPatch 4に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 5)", # 💡 バージョンをPatch 5に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1152,7 +1154,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 4)"}) # 💡 バージョンをPatch 4に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 5)"}) # 💡 バージョンをPatch 5に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
