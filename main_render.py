@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.21 - Alpha Vantage Forex Macro Integration
+# Apex BOT v19.0.27 - MEXC Balance & Alpha Vantage Hard Patch
 #
 # 強化ポイント:
-# 1. 【バージョン更新】全てのバージョン情報を v19.0.21 に更新。
-# 2. 【CCXT初期化修正】クライアントが強制的にMEXCになるよう初期化ロジックを再確認。
-# 3. 【バグ修正】fetch_current_balance_usdt() における CCXT例外処理の強化。
-# 4. 【為替マクロ修正】yfinanceを削除し、**Alpha Vantage API**経由のEUR/USDトレンド分析を導入。
+# 1. 【バージョン更新】全てのバージョン情報を v19.0.27 に更新。
+# 2. 【最重要パッチ - 残高】fetch_current_balance_usdt() において、CCXT標準形式に加えて
+#     MEXCのRaw Info内の全てのリストを探索し、USDT残高を強制的に取得するロジックを最大まで強化。
+# 3. 【最重要パッチ - 為替】Alpha Vantageの応答キーを動的に探索し、「予期せぬキー」エラーを解決。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -302,7 +302,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.21 (Alpha Vantage Fix)</i>"
+        f"<i>Bot Ver: v19.0.27 (MEXC Balance/Forex Hard Patch)</i>"
     )
 
     return header + trade_plan + summary + analysis_details + footer
@@ -340,7 +340,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict) ->
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.21</i>"
+        f"<i>Bot Ver: v19.0.27</i>"
     )
 
     return header + details + footer
@@ -358,7 +358,7 @@ async def send_position_status_notification(header_msg: str = "🔄 定期ステ
     message = format_position_status_message(usdt_balance, ACTUAL_POSITIONS)
 
     if header_msg == "🤖 初回起動通知":
-        full_message = f"🤖 **Apex BOT v19.0.21 起動完了**\n\n{message}"
+        full_message = f"🤖 **Apex BOT v19.0.27 起動完了**\n\n{message}"
     else:
         full_message = f"{header_msg}\n\n{message}"
 
@@ -425,7 +425,7 @@ async def initialize_ccxt_client():
 
 
 async def fetch_current_balance_usdt() -> float:
-    """CCXTから現在のUSDT残高を取得する。(v19.0.14 Raw Info パッチの強化)"""
+    """CCXTから現在のUSDT残高を取得する。(v19.0.27 Raw Info パッチの最大強化)"""
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return 0.0
@@ -443,35 +443,56 @@ async def fetch_current_balance_usdt() -> float:
 
         # 1.1. 通貨キーがトップレベルにある場合 (例: balance['USDT']['free'])
         if 'USDT' in balance and isinstance(balance['USDT'], dict):
-             usdt_free = balance['USDT'].get('free', 0.0)
+             usdt_free = float(balance['USDT'].get('free', 0.0))
              if usdt_free > 0.0:
                   logging.info(f"✅ DEBUG (Balance Success - Top Key): CCXT標準形式 (トップキー) でUSDT残高 {usdt_free:.2f} を取得しました。")
                   return usdt_free
 
         # 1.2. Unifiedオブジェクトの 'free' ディクショナリにある場合 (例: balance['free']['USDT'])
-        patch_free_unified = balance.get('free', {}).get('USDT', 0.0)
+        patch_free_unified = float(balance.get('free', {}).get('USDT', 0.0))
         if patch_free_unified > 0.0:
-             logging.warning(f"⚠️ DEBUG (Patch 1/2 - Unified Free): 'free' オブジェクトからUSDT残高 {patch_free_unified:.2f} を取得しました。")
+             logging.warning(f"⚠️ DEBUG (Patch 1/3 - Unified Free): 'free' オブジェクトからUSDT残高 {patch_free_unified:.2f} を取得しました。")
              return patch_free_unified
 
-        # 2. Raw Info 強制パッチ (MEXC固有の対応 - 最終手段)
-        # 💡 V19.0.14: infoオブジェクト内の'assets'（または類似のキー）からUSDTを検索
+        # 2. Raw Info 強制パッチ (MEXC固有の対応 - 最大強化: v19.0.27)
         try:
             raw_info = balance.get('info', {})
 
-            # 資産リストを探す (MEXC v3 APIの応答構造を想定: {"assets": [...]} )
-            assets_list = raw_info.get('assets')
+            # 2.1. MEXC v3 APIの Spot Assets 応答構造を想定: {"assets": [...]}
+            assets_list_candidates = [
+                raw_info.get('assets'),
+                raw_info.get('data', {}).get('balances'), # MEXC v2 API構造
+                raw_info.get('data'), # dataが直接リストの場合
+            ]
+            
+            # raw_info内のすべてのリストを探索
+            for key, value in raw_info.items():
+                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                    if ('currency' in value[0] or 'asset' in value[0]):
+                        assets_list_candidates.append(value)
+            
+            assets_list_candidates = [l for l in assets_list_candidates if isinstance(l, list)]
 
-            if isinstance(assets_list, list):
+            for assets_list in assets_list_candidates:
                 for asset in assets_list:
                     # 'currency' や 'asset' フィールドでUSDTを探す
-                    if asset.get('currency') == 'USDT' or asset.get('asset') == 'USDT':
-                        # 'availableBalance' または 'free' フィールドから残高を取得
-                        available_balance = float(asset.get('availableBalance', asset.get('free', 0.0)))
+                    currency_key = asset.get('currency') or asset.get('asset')
+                    if currency_key == 'USDT':
+                        # 'availableBalance' または 'free' フィールドから残高を取得 (v19.0.27: 可能な限り広いキーをチェック)
+                        available_balance = asset.get('availableBalance')
+                        if available_balance is None: available_balance = asset.get('free')
+                        if available_balance is None: available_balance = asset.get('available')
+                        
+                        try:
+                            # 最終的に float に変換
+                            available_balance_float = float(available_balance or 0.0)
+                            if available_balance_float > 0.0:
+                                logging.warning(f"⚠️ DEBUG (Patch 2/3 - Raw Info Forced): 'info' -> 資産リストからUSDT残高 {available_balance_float:.2f} を強制的に取得しました。")
+                                return available_balance_float
+                        except ValueError:
+                             # 文字列が数値に変換できない場合（例: 'locked'など）はスキップ
+                             continue
 
-                        if available_balance > 0.0:
-                            logging.warning(f"⚠️ DEBUG (Patch 2/2 - Raw Info Forced): 'info' -> 'assets' からUSDT残高 {available_balance:.2f} を強制的に取得しました。")
-                            return available_balance
 
         except Exception as e:
             logging.error(f"❌ DEBUG (Patch Info Error): MEXC Raw Info パッチでエラー発生: {e}")
@@ -480,17 +501,17 @@ async def fetch_current_balance_usdt() -> float:
         # 3. 取得失敗時のログ出力と終了
         logging.error(f"❌ 残高取得エラー: USDT残高が取得できませんでした。")
 
-        # 💡 V19.0.13/14: デバッグログの強化
+        # 💡 V19.0.27: デバッグログの強化
         free_keys = list(balance.get('free', {}).keys())
         total_keys = list(balance.get('total', {}).keys())
         logging.error(f"🚨🚨 DEBUG (Free Keys): CCXT Unified 'free' オブジェクト内の通貨キー: {free_keys}")
         logging.error(f"🚨🚨 DEBUG (Total Keys): CCXT Unified 'total' オブジェクト内の通貨キー: {total_keys}")
 
-        logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を**最優先で**再度確認してください。")
+        logging.error(f"🚨🚨 DEBUG (Raw Balance Keys): CCXTから返されたRaw Balance Objectのトップレベルキー: {list(balance.keys())}")
+        logging.warning(f"⚠️ APIキー/Secretの**入力ミス**または**Spot残高読み取り権限**を**最優先で**再度確認してください。資金が**現物アカウント**にあるかも確認してください。")
+
 
         available_currencies = list(balance.keys())
-        logging.error(f"🚨🚨 DEBUG (Raw Balance Keys): CCXTから返されたRaw Balance Objectのトップレベルキー: {available_currencies}")
-
         if available_currencies and len(available_currencies) > 3:
              other_count = max(0, len(available_currencies) - 5)
              logging.info(f"💡 DEBUG: CCXTから以下の通貨情報が返されました: {available_currencies[:5]}... (他 {other_count} 通貨)")
@@ -726,7 +747,7 @@ def get_liquidity_bonus(symbol: str, price: float, side: str) -> float:
     return min(LIQUIDITY_BONUS_POINT, (total_depth_usdt / 1_000_000) * LIQUIDITY_BONUS_POINT)
 
 
-# 💡 Alpha Vantage を使用した為替データ取得関数
+# 💡 Alpha Vantage を使用した為替データ取得関数 (v19.0.27 Key Patch)
 def fetch_alpha_vantage_forex_data() -> Tuple[Optional[pd.DataFrame], str]:
     """Alpha Vantage APIからEUR/USDの1時間足データを取得しDataFrameを返す"""
     
@@ -739,7 +760,6 @@ def fetch_alpha_vantage_forex_data() -> Tuple[Optional[pd.DataFrame], str]:
     try:
         logging.info("💡 DEBUG (Forex Macro): Alpha VantageからEUR/USDデータを取得中...")
         
-        # requests.getはブロッキング関数だが、後続のget_crypto_macro_contextでto_threadを使って非同期実行される
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         
@@ -753,10 +773,15 @@ def fetch_alpha_vantage_forex_data() -> Tuple[Optional[pd.DataFrame], str]:
             logging.warning(f"⚠️ Alpha Vantage レート制限に達しました。キャッシュを使用します。")
             return None, "Rate limit reached"
 
-        # 2. データのパース
-        time_series_key = "Time Series FX (60min)"
-        if time_series_key not in raw_data:
-            logging.error("❌ Alpha Vantage応答に予期せぬキーが含まれています。")
+        # 2. データのパース (v19.0.27 Alpha Vantage Hard Patch: 'Time Series'を含むキーを動的に検索)
+        time_series_key = ""
+        for key in raw_data.keys():
+            if "Time Series" in key:
+                 time_series_key = key
+                 break
+        
+        if not time_series_key:
+            logging.error("❌ Alpha Vantage応答に予期せぬキーが含まれています。('Time Series'キーが見つかりませんでした)")
             return None, "Unexpected response format"
 
         raw_time_series = raw_data[time_series_key]
@@ -1360,7 +1385,7 @@ async def main_loop():
             if not long_signals:
                  signal_log = "生成シグナル数 (全スコア): 0 件"
             
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.21)。 {signal_log}")
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27)。 {signal_log}")
             # ユーザーのログ形式に合わせた出力
             logging.info(f"{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} - INFO - 💡 分析完了 - {signal_log}") 
 
@@ -1380,11 +1405,11 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.21 - Alpha Vantage Fix")
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - MEXC Balance/Forex Hard Patch")
 
 @app.on_event("startup")
 async def startup_event():
-    logging.info("🚀 Apex BOT v19.0.21 Startup initializing (Alpha Vantage Fix)...")
+    logging.info("🚀 Apex BOT v19.0.27 Startup initializing (MEXC Balance/Forex Hard Patch)...")
 
     # CCXT初期化
     await initialize_ccxt_client()
@@ -1408,7 +1433,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.21 - Alpha Vantage Fix",
+        "bot_version": "v19.0.27 - MEXC Balance/Forex Hard Patch",
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1420,7 +1445,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.21 - Alpha Vantage Fix"})
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - MEXC Balance/Forex Hard Patch"})
 
 if __name__ == "__main__":
     # 環境変数PORTが設定されている場合はそれを使用
