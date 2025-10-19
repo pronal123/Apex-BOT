@@ -1,9 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 19: .env変数名調整)
+# Apex BOT v19.0.28 - Final Integrated Build (Patch 22: WEBSHARE/FTPログアップロード実装)
 #
 # 修正ポイント:
-# 1. 【ユーザー修正⑦】Telegramボットトークンを .env の記述に合わせて "TELEGRAM_TOKEN" で読み込むように修正。
-# 2. 【バージョン更新】全てのバージョン情報を Patch 19 に更新。
+# 1. 【機能追加】WEBSHARE_HOST/USER/PASS 環境変数を読み込むよう設定。
+# 2. 【機能追加】ローカルログを外部ストレージにアップロードする upload_logs_to_webshare 関数を実装 (FTP想定)。
+# 3. 【ロジック変更】main_loop内で、ログアップロードを1時間に1回の頻度で実行するよう制御。
+# 4. 【バージョン更新】全てのバージョン情報を Patch 22 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -18,7 +20,6 @@ import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
-import yfinance as yf
 import asyncio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -28,6 +29,7 @@ import sys
 import random
 import json
 import re
+import ftplib # FTP接続に使用
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -50,16 +52,22 @@ DEFAULT_SYMBOLS = [
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)を40に引き上げ
 LOOP_INTERVAL = 60 * 10             # メインループの実行間隔 (秒) - 10分ごと
 ANALYSIS_ONLY_INTERVAL = 60 * 60    # 分析専用通知の実行間隔 (秒) - 1時間ごと
+WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
 
-# 💡 クライアント設定は MEXC に固定
+# 💡 クライアント設定
 CCXT_CLIENT_NAME = os.getenv("EXCHANGE_CLIENT", "mexc")
-# 💡 ユーザー修正⑦: TELEGRAM_TOKEN の変数名に修正
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_API_KEY")
 SECRET_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_SECRET")
 TEST_MODE = os.getenv("TEST_MODE", "False").lower() in ('true', '1', 't')
 SKIP_MARKET_UPDATE = os.getenv("SKIP_MARKET_UPDATE", "False").lower() in ('true', '1', 't')
+
+# 💡 WEBSHARE設定 (FTP/WebDAVなど、外部ログストレージを想定)
+WEBSHARE_HOST = os.getenv("WEBSHARE_HOST")
+WEBSHARE_PORT = int(os.getenv("WEBSHARE_PORT", "21")) # デフォルトはFTPポート
+WEBSHARE_USER = os.getenv("WEBSHARE_USER")
+WEBSHARE_PASS = os.getenv("WEBSHARE_PASS")
 
 # グローバル変数 (状態管理用)
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
@@ -69,6 +77,7 @@ LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
 LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0
+LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 # 💡 WebShareアップロード時刻を追跡
 
 # ロギング設定
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -81,7 +90,7 @@ SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン (通常�
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
 REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} # 取得するOHLCVの足数
 
-# テクニカル分析定数 (v19.0.27ベース)
+# テクニカル分析定数 (v19.0.28ベース)
 TARGET_TIMEFRAMES = ['15m', '1h', '4h']
 BASE_SCORE = 0.60                   # ベースとなる取引基準点 (60点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
@@ -182,7 +191,7 @@ def get_score_breakdown(signal: Dict) -> str:
         sign = '✅' if fgi_bonus > 0 else '❌'
         breakdown_list.append(f"  - {sign} FGIマクロ影響: <code>{'+' if fgi_bonus > 0 else ''}{fgi_bonus*100:.1f}</code> 点")
 
-    # 為替マクロ
+    # 為替マクロ (常に0.0を表示)
     forex_bonus = tech_data.get('forex_bonus', 0.0) 
     breakdown_list.append(f"  - ⚪ 為替マクロ影響: <code>{forex_bonus*100:.1f}</code> 点 (機能削除済)")
     
@@ -276,7 +285,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 19)</i>"
+        f"<i>Bot Ver: v19.0.28 - Final Integrated Build (Patch 22)</i>"
     )
 
     return header + macro_section + signal_section + footer
@@ -303,6 +312,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **日時**: {now_jst} (JST)\n"
         f"  - **銘柄**: <b>{symbol}</b> ({timeframe})\n"
         f"  - **監視取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code>\n"
+        f"  - **取引タイプ**: <b>現物 (Spot) - ロング</b>\n" # 現物取引であることを明記
         f"  - **総合スコア**: <code>{score * 100:.2f} / 100</code>\n"
         f"  - **取引閾値**: <code>{current_threshold * 100:.2f}</code> 点 (市場環境による動的設定)\n"
         f"  - **推定勝率**: <code>{estimated_wr}</code>\n"
@@ -318,7 +328,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  \n**📊 スコア詳細ブレークダウン** (+/-要因)\n"
         f"{breakdown_details}\n"
         f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 19)</i>"
+        f"<i>Bot Ver: v19.0.28 - Final Integrated Build (Patch 22)</i>"
     )
     return message
 
@@ -373,6 +383,72 @@ def log_signal(signal: Dict, log_type: str = "SIGNAL") -> None:
     except Exception as e:
         logging.error(f"❌ ログ書き込みエラー: {e}")
 
+def _sync_ftp_upload(local_file: str, remote_file: str):
+    """
+    同期的にFTPアップロードを実行するヘルパー関数。
+    asyncio.to_threadで使用される。
+    """
+    if not WEBSHARE_HOST or not WEBSHARE_USER or not WEBSHARE_PASS:
+        logging.error("❌ WEBSHARE設定 (HOST/USER/PASS) が不足しています。")
+        return False
+
+    if not os.path.exists(local_file):
+        logging.warning(f"⚠️ ローカルファイル {local_file} が見つかりません。アップロードをスキップします。")
+        return True # ファイルがないのはエラーではない
+
+    try:
+        # FTP接続とログイン
+        ftp = ftplib.FTP()
+        ftp.connect(WEBSHARE_HOST, WEBSHARE_PORT, timeout=10)
+        ftp.login(WEBSHARE_USER, WEBSHARE_PASS)
+        
+        # ファイルのアップロード (バイナリモード)
+        with open(local_file, 'rb') as fp:
+            ftp.storbinary(f'STOR {remote_file}', fp)
+
+        ftp.quit()
+        return True
+        
+    except ftplib.all_errors as e:
+        logging.error(f"❌ FTPアップロードエラー ({WEBSHARE_HOST}): {e}")
+        return False
+    except Exception as e:
+        logging.error(f"❌ ログアップロードの予期せぬエラー: {e}")
+        return False
+
+async def upload_logs_to_webshare():
+    """ローカルログファイルを外部ストレージ (WebShare/FTP) にアップロードする"""
+    log_files = [
+        "apex_bot_trade_signal_log.jsonl",
+        "apex_bot_hourly_analysis_log.jsonl",
+    ]
+    
+    now_jst = datetime.now(JST)
+    upload_timestamp = now_jst.strftime("%Y%m%d_%H%M%S")
+    
+    logging.info(f"📤 WEBSHAREログアップロード処理を開始します...")
+
+    tasks = []
+    for log_file in log_files:
+        if os.path.exists(log_file):
+            # リモートファイル名にはタイムスタンプとファイル名を含める
+            remote_filename = f"apex_log_{upload_timestamp}_{log_file}"
+            
+            # 同期FTP処理を別スレッドで実行
+            tasks.append(
+                asyncio.to_thread(_sync_ftp_upload, log_file, remote_filename)
+            )
+
+    if not tasks:
+        logging.info("ℹ️ アップロード対象のログファイルがありませんでした。")
+        return
+
+    results = await asyncio.gather(*tasks)
+    
+    if all(results):
+        logging.info(f"✅ すべてのログファイル ({len(tasks)} 件) を WEBSHARE にアップロードしました。")
+    else:
+        logging.error("❌ 一部またはすべてのログファイルの WEBSHARE へのアップロードに失敗しました。")
 
 # ====================================================================================
 # CCXT & DATA ACQUISITION
@@ -397,7 +473,7 @@ async def initialize_exchange_client() -> bool:
 
         # CCXTのオプション設定
         options = {
-            'defaultType': 'future', # 基本的にUSDT先物 (Perpetual Swap) を想定
+            'defaultType': 'spot', # 現物取引 (Spot) を想定
         }
 
         EXCHANGE_CLIENT = exchange_class({
@@ -407,7 +483,7 @@ async def initialize_exchange_client() -> bool:
             'options': options
         })
         await EXCHANGE_CLIENT.load_markets()
-        logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を初期化しました。")
+        logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を現物取引モードで初期化しました。")
         return True
 
     except Exception as e:
@@ -422,6 +498,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
         return None
         
     try:
+        # 現物取引のため、'spot'を指定する必要がある場合がありますが、defaultType='spot'で解決されるはずです。
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         if not ohlcv:
             return None
@@ -458,24 +535,24 @@ async def update_symbols_by_volume() -> None:
         return
         
     try:
-        # すべてのUSDTペアの先物銘柄を取得
+        # すべてのUSDTペアの現物銘柄を取得
         markets = await EXCHANGE_CLIENT.load_markets()
-        usdt_futures = [
+        usdt_spot_symbols = [
             s for s, m in markets.items() 
-            if m['active'] and 'future' in m['type'] and (m['quote'] == 'USDT' or s.endswith('/USDT'))
+            if m['active'] and m['spot'] and (m['quote'] == 'USDT' or s.endswith('/USDT'))
         ]
 
-        if not usdt_futures:
-            logging.warning("⚠️ USDT先物銘柄が見つかりませんでした。デフォルトリストを使用します。")
+        if not usdt_spot_symbols:
+            logging.warning("⚠️ USDT現物銘柄が見つかりませんでした。デフォルトリストを使用します。")
             CURRENT_MONITOR_SYMBOLS = list(set(DEFAULT_SYMBOLS))
             logging.info(f"✅ 銘柄リストを更新しました。合計: {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
             return
 
         # 24時間出来高情報を取得 (ccxtのfetch_tickersでquoteVolumeを使用)
-        tickers = await EXCHANGE_CLIENT.fetch_tickers(usdt_futures)
+        tickers = await EXCHANGE_CLIENT.fetch_tickers(usdt_spot_symbols)
         
         volume_data = []
-        for symbol in usdt_futures:
+        for symbol in usdt_spot_symbols:
             if symbol in tickers and 'quoteVolume' in tickers[symbol]:
                 volume_data.append({
                     'symbol': symbol,
@@ -496,7 +573,7 @@ async def update_symbols_by_volume() -> None:
         if len(CURRENT_MONITOR_SYMBOLS) < 30:
             logging.warning(f"⚠️ 監視銘柄数が30未満 ({len(CURRENT_MONITOR_SYMBOLS)}) です。静的リストの追加をご検討ください。")
         
-        logging.info(f"✅ 銘柄リストを更新しました。合計: {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
+        logging.info(f"✅ 現物銘柄リストを更新しました。合計: {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
         logging.debug(f"現在の監視銘柄リスト: {CURRENT_MONITOR_SYMBOLS}")
 
     except Exception as e:
@@ -519,7 +596,7 @@ def fetch_fgi_sync() -> int:
         return 50
 
 async def get_crypto_macro_context() -> Dict:
-    """市場全体のマクロコンテキストを取得する (FGI/為替 リアルデータ取得)"""
+    """市場全体のマクロコンテキストを取得する (FGI リアルデータ取得)"""
     # 最初にデフォルト値を設定
     fgi_value = 50
     fgi_proxy = 0.0
@@ -535,7 +612,7 @@ async def get_crypto_macro_context() -> Dict:
     except Exception as e:
         logging.error(f"❌ FGI取得エラー: {e}")
         
-    # 2. 為替マクロデータは削除
+    # 2. 為替マクロデータは削除（forex_trendとforex_bonusはデフォルト値のまま）
 
     # 3. マクロコンテキストの確定
     return {
@@ -851,7 +928,7 @@ async def analysis_only_notification_loop():
         
 async def main_loop():
     """メインの取引ロジックと分析処理を実行する"""
-    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS
+    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, LAST_WEBSHARE_UPLOAD_TIME
 
     while True:
         start_time = time.time()
@@ -925,7 +1002,7 @@ async def main_loop():
                     
                     # 4.3. 取引実行 (ここでは通知とログのみ)
                     if not TEST_MODE:
-                        logging.warning(f"⚠️ LIVE MODE: {symbol} の取引実行ロジックは未実装です。")
+                        logging.warning(f"⚠️ LIVE MODE: {symbol} の現物購入実行ロジックは未実装です。")
                         pass 
                         
                     # 4.4. クールダウン時間更新
@@ -933,13 +1010,18 @@ async def main_loop():
             else:
                 logging.info(f"ℹ️ 今回の分析で動的閾値 ({effective_threshold*100:.2f}点) と RRR >= 1.0 を満たすシグナルは見つかりませんでした。")
                 
-            # 5. 成功時間更新
+            # 5. WebShareログアップロードの実行 (1時間に1回)
+            if time.time() - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
+                await upload_logs_to_webshare()
+                LAST_WEBSHARE_UPLOAD_TIME = time.time()
+                
+            # 6. 成功時間更新
             LAST_SUCCESS_TIME = time.time()
             
         except Exception as e:
             logging.critical(f"❌ メインループで致命的なエラーが発生しました: {e}", exc_info=True)
             
-        # 6. 次のループまで待機
+        # 7. 次のループまで待機
         elapsed_time = time.time() - start_time
         sleep_time = max(0, LOOP_INTERVAL - elapsed_time)
         logging.info(f"♻️ 次のループまで {sleep_time:.1f} 秒待機します。")
@@ -950,7 +1032,7 @@ async def main_loop():
 # FASTAPI / ENTRY POINT
 # ====================================================================================
 
-app = FastAPI(title="Apex Trading Bot API", version="v19.0.27 - Patch 19: .env変数名調整")
+app = FastAPI(title="Apex Trading Bot API", version="v19.0.28 - Patch 22: WEBSHARE実装")
 
 @app.on_event("startup")
 async def startup_event():
@@ -962,11 +1044,13 @@ async def startup_event():
     await update_symbols_by_volume()
 
     # 3. グローバル変数の初期化
-    global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
+    global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_WEBSHARE_UPLOAD_TIME
     LAST_HOURLY_NOTIFICATION_TIME = time.time()
     
     # 分析専用通知の初回実行は main_loop 完了後に analysis_only_notification_loop 内で制御
-    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() - (ANALYSIS_ONLY_INTERVAL * 2) 
+    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() - (ANALYSIS_ONLY_INTERVAL * 2)
+    # WebShareアップロードの初回実行は main_loop 完了後に制御
+    LAST_WEBSHARE_UPLOAD_TIME = time.time() - (WEBSHARE_UPLOAD_INTERVAL * 2)
 
     # 4. メインの取引ループと分析専用ループを起動
     asyncio.create_task(main_loop())
@@ -983,7 +1067,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 19)",
+        "bot_version": "v19.0.28 - Final Integrated Build (Patch 22)",
         "test_mode": TEST_MODE,
         "base_signal_threshold": SIGNAL_THRESHOLD_NORMAL, # ベースラインの閾値を表示
         "last_success_time_jst": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=JST).strftime("%Y-%m-%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
@@ -992,6 +1076,7 @@ def get_status():
         "last_signals_count": len(LAST_ANALYSIS_SIGNALS),
         "loop_interval_sec": LOOP_INTERVAL,
         "analysis_interval_sec": ANALYSIS_ONLY_INTERVAL,
-        "next_analysis_notification_in_sec": max(0, ANALYSIS_ONLY_INTERVAL - (time.time() - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME))
+        "next_analysis_notification_in_sec": max(0, ANALYSIS_ONLY_INTERVAL - (time.time() - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME)),
+        "next_webshare_upload_in_sec": max(0, WEBSHARE_UPLOAD_INTERVAL - (time.time() - LAST_WEBSHARE_UPLOAD_TIME))
     }
     return JSONResponse(content=status_msg)
