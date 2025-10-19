@@ -7,7 +7,9 @@
 #    - 15m: RRR 1.0, SL=1.5*ATR (タイト)
 #    - 1h: RRR 1.5, SL=2.0*ATR (標準)
 #    - 4h: RRR 2.0, SL=3.0*ATR (ルーズ)
-# 3. 【バージョン更新】全てのバージョン情報を Patch 30 に更新。
+# 3. 【機能追加】ポジション監視ループ (monitor_positions_loop) の追加。
+# 4. 【機能追加】WebShare (FTP) ログアップロード機能の追加。
+# 5. 【バージョン更新】全てのバージョン情報を Patch 30 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -96,11 +98,6 @@ LAST_WEBSHARE_UPLOAD_TIME: float = 0.0
 GLOBAL_MACRO_CONTEXT: Dict = {} # マクロコンテキストを保持するための変数
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False # 💡 初回メインループ完了フラグ
 OPEN_POSITIONS: List[Dict] = [] # 💡 【新規】現在保有中のポジション (SL/TP監視用)
-
-# ロギング設定
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-if TEST_MODE:
-    logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
 
 # 取引ルール設定
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
@@ -1211,7 +1208,10 @@ async def execute_trade_order(signal: Dict) -> Dict:
     
     if TEST_MODE:
         logging.warning(f"⚠️ TEST_MODE: {symbol} 現物ロング注文は実行されません。")
-        return {'status': 'ok', 'filled_amount': 0.0, 'filled_usdt': trade_size_usdt, 'is_test': True}
+        # テストモードでは、仮想的に約定したと見なすデータを返す
+        price = signal['entry_price'] 
+        filled_amount = trade_size_usdt / price
+        return {'status': 'ok', 'filled_amount': filled_amount, 'filled_usdt': trade_size_usdt, 'is_test': True, 'entry_price': price}
         
     if not EXCHANGE_CLIENT:
         return {'status': 'error', 'error_message': 'Exchange client not initialized.'}
@@ -1305,7 +1305,26 @@ async def execute_closing_trade(position: Dict, exit_type: str) -> Dict:
     
     if TEST_MODE:
         logging.warning(f"⚠️ TEST_MODE: {symbol} 現物売却注文は実行されません。")
-        return {'status': 'ok', 'exit_price': position['entry_price'], 'filled_amount': amount_to_sell, 'is_test': True}
+        # テストモードでは、TP/SLに応じて仮想の決済価格を決定
+        if exit_type == "TP (Take Profit)":
+            exit_price = position['take_profit'] * (1 - 0.0001) # TPより少し手前
+        elif exit_type == "SL (Stop Loss)":
+            exit_price = position['stop_loss'] * (1 + 0.0001) # SLより少し上
+        else:
+            exit_price = position['entry_price'] # 安全策
+            
+        pnl_usdt = (exit_price - position['entry_price']) * amount_to_sell
+        pnl_rate = pnl_usdt / position['filled_usdt']
+            
+        return {
+            'status': 'ok', 
+            'exit_price': exit_price, 
+            'filled_amount': amount_to_sell, 
+            'is_test': True,
+            'pnl_usdt': pnl_usdt,
+            'pnl_rate': pnl_rate,
+            'entry_price': position['entry_price'],
+        }
         
     if not EXCHANGE_CLIENT:
         return {'status': 'error', 'error_message': 'Exchange client not initialized.'}
@@ -1446,7 +1465,26 @@ async def main_loop():
                     # 4.2. 取引実行ロジック
                     trade_result = await execute_trade_order(signal)
                     
-                    # 4.3. 通知とログ
+                    # 4.3. ポジション管理リストの更新（テストモード対応）
+                    if TEST_MODE and trade_result['status'] == 'ok':
+                         # テストモードで仮想約定した場合、ポジションをリストに追加
+                         new_position = {
+                            'id': str(uuid.uuid4()), # 一意のID
+                            'symbol': symbol,
+                            'entry_time': time.time(),
+                            'entry_price': trade_result['entry_price'],
+                            'filled_amount': trade_result['filled_amount'],
+                            'filled_usdt': trade_result['filled_usdt'],
+                            'stop_loss': signal['stop_loss'],
+                            'take_profit': signal['take_profit'],
+                            'signal_score': signal['score'],
+                            'timeframe': signal['timeframe'],
+                            'rr_ratio': signal['rr_ratio'],
+                         }
+                         OPEN_POSITIONS.append(new_position)
+
+
+                    # 4.4. 通知とログ
                     message = format_telegram_message(signal, "取引シグナル", current_threshold, trade_result)
                     await send_telegram_notification(message)
                     log_signal(signal, log_type="TRADE_SIGNAL", trade_result=trade_result)
@@ -1501,6 +1539,7 @@ async def monitor_positions_loop():
             stop_loss = position['stop_loss']
             take_profit = position['take_profit']
             
+            # 💡 現在価格は 'last' (直近の取引価格) を使用。売買の判断には十分。
             current_price = tickers.get(symbol, {}).get('last')
             
             if current_price is None:
@@ -1519,7 +1558,7 @@ async def monitor_positions_loop():
                 # 決済実行
                 exit_result = await execute_closing_trade(position, exit_type)
                 
-                # 決済通知とログ
+                # 決済通知とログに必要なデータ
                 exit_data = {
                     'symbol': symbol,
                     'timeframe': position['timeframe'],
@@ -1654,4 +1693,5 @@ def get_status():
     return JSONResponse(content=status_msg)
 
 if __name__ == "__main__":
+    # uvicornの起動コマンドは外部で実行されるため、ここではpass
     pass
