@@ -2,9 +2,8 @@
 # Apex BOT v19.0.27 - Final Integrated Build (Patch 14: 定期通知への分析統合)
 #
 # 修正ポイント:
-# 1. 【機能追加】format_position_status_message() に最新の分析結果 (LAST_ANALYSIS_SIGNALS) を追加。
-# 2. 【通知強化】send_position_status_notification() が最新のランク1シグナルの分析サマリー/根拠を表示。
-# 3. 【バージョン更新】全てのバージョン情報を Patch 14 に更新。
+# 1. 【ログ強化】main_loop の最後に、ランク1シグナル (最高スコア) の銘柄、時間足、スコアをログに出力。
+# 2. 【通知確認】定期通知 (send_position_status_notification) は、前回分析の最高スコアを既に含んでいることを確認。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -1336,6 +1335,18 @@ async def main_loop():
             # 💡 Patch 13: 初回分析が完了したらイベントを設定
             if not FIRST_ANALYSIS_EVENT.is_set():
                  FIRST_ANALYSIS_EVENT.set()
+            
+            # 💡 【追加/修正】ログ出力の強化
+            if LAST_ANALYSIS_SIGNALS:
+                # ランク1シグナルを取得
+                best_signal = max(LAST_ANALYSIS_SIGNALS, key=lambda s: s.get('score', 0.0))
+                symbol = best_signal['symbol']
+                score = best_signal['score'] * 100
+                tf = best_signal['timeframe']
+                logging.info(f"💡 分析サマリー: ランク1シグナル -> {symbol} ({tf}) スコア: {score:.2f} / 100")
+            else:
+                logging.info(f"💡 分析サマリー: ランク1シグナル -> 該当なし (全スコアがベーススコア未満)")
+            # 💡 (ここまで追加/修正)
             
             # 💡 Patch 13: 生成されたシグナル数を明示的にログ出力
             logging.info(f"💡 分析完了 - 生成シグナル数 (全スコア): {len(LAST_ANALYSIS_SIGNALS)} 件")
