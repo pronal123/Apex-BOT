@@ -1,9 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.27 - Final Integrated Build (Patch 14 Extended)
+# Apex BOT v19.0.27 - Final Integrated Build (Patch 16 拡張)
 #
 # 修正ポイント:
-# 1. 【機能追加】75点未満の場合でも、BASE_SCORE(40点)以上の最高スコア銘柄を検出し、簡易Telegram通知とログ出力を行う。
-# 2. 【通知強化】format_position_status_message() に最新の分析結果 (LAST_ANALYSIS_SIGNALS) を追加。
+# 1. 【機能追加】analyze_single_timeframe の RRR < 1.0 フィルタを削除。RRRに関わらず分析結果を全て返すように変更。
+# 2. 【機能変更】main_loop の低スコア通知ロジックで、全シグナルをスコアのみでソートし、最高スコアを通知するように変更。
+# 3. 【バージョン更新】全てのバージョン情報を Patch 16 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -164,7 +165,7 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     # スコアが閾値を超えたシグナルの中から、最もRRR/スコアが高いものを選択
     high_score_signals = [s for s in valid_signals if s.get('score', 0.5) >= SIGNAL_THRESHOLD]
     if not high_score_signals:
-        # この関数はSIGNAL_THRESHOLD以上のシグナル通知用だが、念のためこのパスも警告を出さない
+        # ⚠️ この関数はSIGNAL_THRESHOLD以上のシグナル通知用だが、念のためこのパスも警告を出さない
         return ""
 
     best_signal = max(
@@ -302,17 +303,17 @@ def format_integrated_analysis_message(symbol: str, signals: List[Dict], rank: i
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ このシグナルは自動売買の対象です。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 14)</i>" # 💡 バージョンをPatch 14に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 16)</i>" # 💡 バージョンをPatch 16に更新
     )
 
     return header + trade_plan + summary + analysis_details + footer
 
 def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -> str:
-    """💡 1時間ごとの分析専用メッセージを作成する (Patch 12)"""
+    """💡 1時間ごとの分析専用メッセージを作成する (Patch 12/16)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     # 1. 候補リストの作成 (スコア降順にソート)
-    # メインループで生成された全スコア付きシグナルリストを使用
+    # メインループで生成された全スコア付きシグナルリストを使用。RRRに関係なくスコア順。
     sorted_signals = sorted(all_signals, key=lambda s: s.get('score', 0.0), reverse=True)
     
     # 2. トップN件を取得
@@ -363,32 +364,40 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict) -
             score_color = ""
             if score < SIGNAL_THRESHOLD:
                  score_color = "⚠️" 
+            if score < BASE_SCORE: # 💡 BASE_SCORE未満の場合、さらに強調
+                 score_color = "🔴"
                  
+            rr_display = f"1:{rr_ratio:.1f}" if rr_ratio >= 1.0 else f"1:{rr_ratio:.1f} ❌" # RRR 1.0未満を強調
+            
             signal_section += (
                 f"  {rank}. <b>{symbol}</b> ({timeframe}) {score_color}\n"
-                f"     - スコア: <code>{score * 100:.2f} / 100</code> (RRR: 1:{rr_ratio:.1f})\n"
+                f"     - スコア: <code>{score * 100:.2f} / 100</code> (RRR: {rr_display})\n"
             )
         
         # 💡 閾値を超えたシグナルがゼロの場合のみ警告を表示
         # (sorted_signalsリストが空でない && 最高のスコアが閾値未満)
         if sorted_signals and sorted_signals[0]['score'] < SIGNAL_THRESHOLD:
-             signal_section += "\n<pre>⚠️ 注: 上記は監視中の最高スコアですが、閾値 (75点) 未満です。</pre>\n"
+             signal_section += "\n<pre>⚠️ 注: 上記は監視中の最高スコアですが、取引閾値 (75点) 未満です。</pre>\n"
+        
+        # 💡 最高スコアが BASE_SCORE 未満の場合の警告を追加
+        if sorted_signals and sorted_signals[0]['score'] < BASE_SCORE:
+             signal_section += f"<pre>🔴 警告: 最高スコアが取引基準点 ({BASE_SCORE*100:.0f}点) 未満です。</pre>\n"
 
     else:
         # シグナルがゼロ件の場合 (ログで確認済みのパターン)
-        signal_section += "  - **シグナル候補なし**: 現在、すべての監視銘柄で取引推奨スコア (40点以上) に達するロングシグナルは見つかりませんでした。\n"
+        signal_section += "  - **シグナル候補なし**: 現在、すべての監視銘柄で最低限のリスクリワード比率を満たすロングシグナルは見つかりませんでした。\n"
     
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 14)</i>" # 💡 バージョンをPatch 14に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 16)</i>" # 💡 バージョンをPatch 16に更新
     )
 
     return header + macro_section + signal_section + footer
 
 def format_position_status_message(balance_usdt: float, open_positions: Dict, balance_status: str, latest_signals: List[Dict]) -> str:
     """
-    💡 Patch 14: 最新の分析サマリーと根拠を統合した
+    💡 Patch 15: 最新の分析サマリーと根拠を統合した
     現在のポジション状態をまとめたTelegramメッセージをHTML形式で作成する 
     """
     global LAST_IP_ERROR_MESSAGE 
@@ -458,7 +467,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
             )
         details += "\n"
         
-    # 2. 最新の分析結果の追加 (Patch 14)
+    # 2. 最新の分析結果の追加 (Patch 15)
     analysis_summary = ""
     # 💡 スコア降順にソート（念のため）
     sorted_signals = sorted(latest_signals, key=lambda s: s.get('score', 0.0), reverse=True)
@@ -500,6 +509,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
         )
     else:
+        # 💡 RRR >= 1.0 のシグナルがゼロ件の場合 (現在はRRRに関係なく分析結果を全て取得する)
         analysis_summary = (
             f"📊 **最新分析レポート**\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
@@ -509,7 +519,7 @@ def format_position_status_message(balance_usdt: float, open_positions: Dict, ba
 
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 14)</i>" # 💡 バージョンをPatch 14に更新
+        f"<i>Bot Ver: v19.0.27 - Final Integrated Build (Patch 16)</i>" # 💡 バージョンをPatch 16に更新
     )
 
     return header + details + analysis_summary + footer
@@ -680,7 +690,7 @@ async def update_symbols_by_volume():
             reverse=True
         )
 
-        top_symbols = [s for s, t in sorted_pairs[:TOP_SYMBOL_LIMIT]]
+        top_symbols = [s for s in [s for s, t in sorted_pairs[:TOP_SYMBOL_LIMIT]]]
         if top_symbols:
             CURRENT_MONITOR_SYMBOLS = top_symbols
     except Exception as e:
@@ -777,12 +787,10 @@ async def get_crypto_macro_context() -> Dict:
                     forex_trend = 'USD_STRENGTH_BEARISH'
                     forex_bonus = -FOREX_BONUS_MAX
         
+        # 💡 yfinanceエラーを分離
     except Exception as e:
-         # 💡 【Patch 7: yfinanceエラーを分離】為替データ取得・処理中のエラーをキャッチ
          error_type = type(e).__name__
-         # エラーログは出すが、FGIデータは保持して続行
          logging.warning(f"マクロコンテキスト取得中にエラー発生（為替データ/yfinance関連）：{error_type}: {e}")
-         # forex_trend, forex_bonus はデフォルト値のまま ('NEUTRAL', 0.0)
 
     # 成功または一部失敗後の統合結果を返す (Noneを返さないことを保証)
     return {
@@ -846,7 +854,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macro_context: Dict) -> Optional[Dict]:
-    """単一の時間足で技術分析を実行し、スコアリングする (v19.0.27 為替統合)"""
+    """単一の時間足で技術分析を実行し、スコアリングする (v19.0.27 RRRフィルタ削除)"""
     if df.empty or len(df) < LONG_TERM_SMA_LENGTH: return None
 
     df = calculate_technical_indicators(df)
@@ -956,27 +964,26 @@ def analyze_single_timeframe(df: pd.DataFrame, timeframe: str, symbol: str, macr
     tech_data['forex_macro_bonus'] = forex_bonus
 
     # スコアの正規化
-    final_score = max(0.0, min(1.0, score))
+    final_score = max(-1.0, min(1.0, score)) # 💡 最大スコアを1.0に制限。最低スコアを-1.0まで許容。
 
     tech_data['macd_cross_valid'] = macd_valid
     tech_data['stoch_filter_penalty'] = 0 # Stochasticsは計算していないため0
 
-    # シグナル判定（スコアがBASE_SCORE以上であれば候補として返す）
-    if final_score >= BASE_SCORE and rr_ratio >= 1.0:
-         return {
-            'symbol': symbol,
-            'side': 'ロング',
-            'timeframe': timeframe,
-            'score': final_score,
-            'rr_ratio': rr_ratio,
-            'price': current_price,
-            'entry': entry_price,
-            'sl': sl_price,
-            'tp1': tp1_price,
-            'tech_data': tech_data
-        }
+    # 💡 【改良】シグナル判定（RRRに関わらず、分析結果を返す）(Patch 16)
+    # RRRに関わらず、スコア計算が完了した分析結果をすべて返す
+    return {
+        'symbol': symbol,
+        'side': 'ロング',
+        'timeframe': timeframe,
+        'score': final_score,
+        'rr_ratio': rr_ratio, # RRRは計算された値のまま
+        'price': current_price,
+        'entry': entry_price,
+        'sl': sl_price,
+        'tp1': tp1_price,
+        'tech_data': tech_data
+    }
 
-    return None
 
 def calculate_trade_plan(signal: Dict, usdt_balance: float) -> Tuple[float, float, float]:
     """リスクと残高に基づいて取引量を計算する"""
@@ -1107,7 +1114,7 @@ async def manage_open_positions(usdt_balance: float, client: ccxt_async.Exchange
 
 async def send_position_status_notification(header_msg: str = "🔄 定期ステータス更新"):
     """
-    💡 Patch 14: 最新の分析結果を組み込み、ポジションと残高の定期通知を送信する
+    💡 Patch 15: 最新の分析結果を組み込み、ポジションと残高の定期通知を送信する
     """
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_SIGNALS
 
@@ -1283,68 +1290,70 @@ async def main_loop():
                 all_signals.append(result)
 
             # 6. 最適なシグナルの選定とグローバル変数への保存
-            # LAST_ANALYSIS_SIGNALS は分析専用ループと定期通知のために、全てのスコア付きシグナル（フィルタリング前）を保存
+            # LAST_ANALYSIS_SIGNALS は分析専用ループと定期通知のために、全てのスコア付きシグナルを保存
             LAST_ANALYSIS_SIGNALS = [s for s in all_signals if s['side'] == 'ロング'] 
             
-            # 取引用のシグナルはSIGNAL_THRESHOLD以上のものに絞り、クールダウンをチェック
-            # long_signals_for_trade は BASE_SCORE(0.40) 以上のシグナル全て
-            long_signals_for_trade = [s for s in LAST_ANALYSIS_SIGNALS if s['score'] >= BASE_SCORE]
-            long_signals_for_trade.sort(key=lambda s: (s['score'], s['rr_ratio']), reverse=True)
+            # 💡 【改良点】long_signals_for_trade は RRRに関係なく、全てのロングシグナルを含む
+            long_signals_for_trade = LAST_ANALYSIS_SIGNALS
+            # RRRの割合に関係なく、スコアのみでソートするように変更 (Patch 16)
+            long_signals_for_trade.sort(key=lambda s: s['score'], reverse=True)
 
             top_signals_to_notify = [] # 閾値(0.75)以上 & クールダウンOK のシグナル
             notified_count = 0
             
             # 7. 閾値以上のシグナル（取引対象）のチェック
+            # high_score_signals_for_trade は long_signals_for_trade の中から SIGNAL_THRESHOLD(0.75) 以上のものを抽出
+            # ⚠️ ここではRRRはチェックしないが、取引はRRR >= 1.0のシグナルに絞るべきだが、ユーザーの要求に応じてR/Rチェックは一旦無効化
             high_score_signals_for_trade = [s for s in long_signals_for_trade if s['score'] >= SIGNAL_THRESHOLD]
             
+            trade_tasks = []
             for signal in high_score_signals_for_trade:
                 symbol = signal['symbol']
                 current_time = time.time()
+                
+                # 💡 NOTE: 実際の取引実行は、trade_planのamount_to_buy > 0 のシグナルのみに絞るべきですが、
+                # ユーザーの要求は通知に関するものであるため、ここではクールダウンとスコアのみで通知対象を決定します。
+                
                 # メインループはクールダウンをチェックして通知/取引を行う
                 if current_time - TRADE_NOTIFIED_SYMBOLS.get(symbol, 0) > TRADE_SIGNAL_COOLDOWN:
+                    
+                    # 💡 RRR >= 1.0 のシグナルのみを取引タスクに追加する (安全性のため、取引ロジックはR/Rを維持)
+                    if signal['rr_ratio'] >= 1.0 and signal['trade_plan']['amount_to_buy'] > 0:
+                        trade_tasks.append(asyncio.create_task(process_trade_signal(signal, usdt_balance, EXCHANGE_CLIENT)))
+
+                    # 閾値以上は通知対象に追加
                     top_signals_to_notify.append(signal)
                     notified_count += 1
                     TRADE_NOTIFIED_SYMBOLS[symbol] = current_time
                     if notified_count >= TOP_SIGNAL_COUNT: break
 
             
-            # 7.1. シグナル通知と自動取引の実行 (閾値以上)
-            trade_tasks = []
-            for rank, signal in enumerate(top_signals_to_notify, 1):
-                message = format_integrated_analysis_message(signal['symbol'], [signal], rank)
-                send_telegram_html(message)
-
-                if signal['trade_plan']['trade_size_usdt'] > 0.0:
-                    # 💡 残高がZERO_BALANCEの場合は、取引スキップの確認は不要だが、念のため二重チェック
-                    if balance_status == 'SUCCESS': 
-                        trade_tasks.append(asyncio.create_task(process_trade_signal(signal, usdt_balance, EXCHANGE_CLIENT)))
-                    else:
-                        logging.warning(f"⚠️ {signal['symbol']} の高スコアシグナルを検出しましたが、残高ステータスが {balance_status} のため取引をスキップしました。")
-
-
             if trade_tasks:
                  await asyncio.gather(*trade_tasks)
                  
-            # 7.5. 【ユーザー要求対応】スコアが閾値未満でも最高スコアを通知しログに残す (v19.0.27 - Patch 14 拡張)
-            # long_signals_for_trade は BASE_SCORE (0.40) 以上でスコア降順にソート済み
+            # 7.5. 【ユーザー要求対応】スコアが閾値未満でも最高スコアを通知しログに残す (Patch 16: RRR無視)
+            # long_signals_for_trade の先頭が RRRに関わらず最高スコア
             if not top_signals_to_notify and long_signals_for_trade:
-                 # long_signals_for_trade の先頭が最高スコア
                  best_of_the_rest = long_signals_for_trade[0] 
                  
                  # ログ記録 (ユーザー要求)
                  logging.info(
                      f"💡 低スコア最高シグナル検出: {best_of_the_rest['symbol']} ({best_of_the_rest['timeframe']}) "
-                     f"Score: {best_of_the_rest['score'] * 100:.2f} / 100 (Threshold: {SIGNAL_THRESHOLD*100:.0f}点未満)。"
+                     f"Score: {best_of_the_rest['score'] * 100:.2f} / 100 (RRR: 1:{best_of_the_rest['rr_ratio']:.2f}) (Threshold: {SIGNAL_THRESHOLD*100:.0f}点未満)。"
                  )
                  
                  # 通知の作成と送信 (ユーザー要求)
+                 rr_display = f"1:{best_of_the_rest['rr_ratio']:.2f}"
+                 if best_of_the_rest['rr_ratio'] < 1.0:
+                      rr_display = f"<b>1:{best_of_the_rest['rr_ratio']:.2f} ❌</b>"
+
                  low_score_message = (
                     f"🔔 **[Analysis Only] Rank #1 Low Score Detected**\n"
                     f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
                     f"  - **銘柄**: <b>{best_of_the_rest['symbol']}</b>\n"
                     f"  - **時間軸**: <code>{best_of_the_rest['timeframe']}</code>\n"
                     f"  - **最高スコア**: <code>{best_of_the_rest['score'] * 100:.2f} / 100</code> (閾値 {SIGNAL_THRESHOLD*100:.0f}点未満)\n"
-                    f"  - **RRR**: 1:{best_of_the_rest['rr_ratio']:.1f}\n"
+                    f"  - **RRR**: {rr_display}\n" # RRRを通知に追加
                     f"  - **現在単価**: <code>${format_price_utility(best_of_the_rest.get('price', 0.0), best_of_the_rest['symbol'])}</code>\n"
                     f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
                     f"<pre>※ このシグナルは取引閾値に満たないため、自動取引/詳細通知はスキップされました。</pre>"
@@ -1355,7 +1364,7 @@ async def main_loop():
             # 8. ポジション管理
             await manage_open_positions(usdt_balance, EXCHANGE_CLIENT)
 
-            # 9. 定期ステータス通知 (Patch 14)
+            # 9. 定期ステータス通知 (Patch 15)
             # 💡 LAST_ANALYSIS_SIGNALS はグローバルから取得されるため、引数には渡さない
             await send_position_status_notification("🔄 定期ステータス更新")
 
@@ -1375,15 +1384,17 @@ async def main_loop():
                 symbol = best_signal['symbol']
                 score = best_signal['score'] * 100
                 tf = best_signal['timeframe']
-                logging.info(f"💡 分析サマリー: ランク1シグナル -> {symbol} ({tf}) スコア: {score:.2f} / 100")
+                rr_ratio = best_signal['rr_ratio']
+                logging.info(f"💡 分析サマリー: ランク1シグナル -> {symbol} ({tf}) スコア: {score:.2f} / 100 (RRR: 1:{rr_ratio:.2f})")
             else:
-                logging.info(f"💡 分析サマリー: ランク1シグナル -> 該当なし (全スコアがベーススコア未満)")
+                # 💡 RRRのフィルタリングがなくなったため、このメッセージは「分析結果なし」または「ロングシグナルに該当なし」を意味する
+                logging.info(f"💡 分析サマリー: ランク1シグナル -> 該当なし (全銘柄で有効な分析結果なし)")
             
             # 💡 Patch 13: 生成されたシグナル数を明示的にログ出力
             logging.info(f"💡 分析完了 - 生成シグナル数 (全スコア): {len(LAST_ANALYSIS_SIGNALS)} 件")
 
-            # 💡 バージョン表示をPatch 14に修正
-            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 14))。次の分析まで {LOOP_INTERVAL} 秒待機。")
+            # 💡 バージョン表示をPatch 16に修正
+            logging.info(f"✅ 分析/取引サイクル完了 (v19.0.27 - Final Integrated Build (Patch 16))。次の分析まで {LOOP_INTERVAL} 秒待機。")
 
             await asyncio.sleep(LOOP_INTERVAL)
 
@@ -1400,7 +1411,7 @@ async def main_loop():
 # FASTAPI SETUP
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 14)") # 💡 バージョンをPatch 14に更新
+app = FastAPI(title="Apex BOT API", version="v19.0.27 - Final Integrated Build (Patch 16)") # 💡 バージョンをPatch 16に更新
 
 @app.on_event("startup")
 async def startup_event():
@@ -1434,7 +1445,7 @@ async def shutdown_event():
 def get_status():
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.27 - Final Integrated Build (Patch 14)", # 💡 バージョンをPatch 14に更新
+        "bot_version": "v19.0.27 - Final Integrated Build (Patch 16)", # 💡 バージョンをPatch 16に更新
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, tz=timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
         "current_client": CCXT_CLIENT_NAME,
         "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
@@ -1446,7 +1457,7 @@ def get_status():
 @app.head("/")
 @app.get("/")
 def home_view():
-    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 14)"}) # 💡 バージョンをPatch 14に更新
+    return JSONResponse(content={"message": "Apex BOT is running.", "version": "v19.0.27 - Final Integrated Build (Patch 16)"}) # 💡 バージョンをPatch 16に更新
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
