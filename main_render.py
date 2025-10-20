@@ -1366,11 +1366,11 @@ def determine_dynamic_threshold(macro_context: Dict) -> float:
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     
     if fgi_proxy < FGI_SLUMP_THRESHOLD:
-        return SIGNAL_THRESHOLD_SLUMP # 67点 (低迷時)
+        return SIGNAL_THRESHOLD_SLUMP # 70点 (低迷時)
     elif fgi_proxy > FGI_ACTIVE_THRESHOLD:
-        return SIGNAL_THRESHOLD_ACTIVE # 58点 (活発時)
+        return SIGNAL_THRESHOLD_ACTIVE # 60点 (活発時)
     else:
-        return SIGNAL_THRESHOLD_NORMAL # 63点 (通常時)
+        return SIGNAL_THRESHOLD_NORMAL # 65点 (通常時)
 
 
 async def main_loop():
