@@ -114,7 +114,7 @@ TARGET_TIMEFRAMES = ['15m', '1h', '4h']
 BASE_SCORE = 0.60                   # ベースとなる取引基準点 (60点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
 LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンド逆行時のペナルティ
-STRUCTURAL_PIVOT_BONUS = 0.05       # 価格構造/ピボット支持時のボーナス
+STRUCTURAL_PIVOT_BONUS = 0.07       # 価格構造/ピボット支持時のボーナス
 RSI_MOMENTUM_LOW = 40               # RSIが40以下でロングモメンタム候補
 MACD_CROSS_PENALTY = 0.15           # MACDが不利なクロス/発散時のペナルティ
 LIQUIDITY_BONUS_MAX = 0.06          # 流動性(板の厚み)による最大ボーナス
@@ -125,9 +125,9 @@ FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設
 FGI_SLUMP_THRESHOLD = -0.02         # FGIプロキシがこの値未満の場合、市場低迷と見なす
 FGI_ACTIVE_THRESHOLD = 0.02         # FGIプロキシがこの値を超える場合、市場活発と見なす
 # 🚨 最終調整箇所: 頻度目標達成のため閾値を引き下げ (この値で確定)
-SIGNAL_THRESHOLD_SLUMP = 0.67       # 低迷時の閾値 (1-2銘柄/日を想定)
-SIGNAL_THRESHOLD_NORMAL = 0.63      # 通常時の閾値 (2-3銘柄/日を想定)
-SIGNAL_THRESHOLD_ACTIVE = 0.58      # 活発時の閾値 (3+銘柄/日を想定)
+SIGNAL_THRESHOLD_SLUMP = 0.70       # 低迷時の閾値 (1-2銘柄/日を想定)
+SIGNAL_THRESHOLD_NORMAL = 0.65      # 通常時の閾値 (2-3銘柄/日を想定)
+SIGNAL_THRESHOLD_ACTIVE = 0.60      # 活発時の閾値 (3+銘柄/日を想定)
 
 RSI_DIVERGENCE_BONUS = 0.10         # RSIダイバージェンス時のボーナス (未使用だが定数として残す)
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 # ボラティリティ過熱時のペナルティ閾値
