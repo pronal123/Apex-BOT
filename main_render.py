@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v19.0.28 - Safety and Frequency Finalized (Patch 36)
+#Apex BOT v19.0.28 - Safety and Frequency Finalized (Patch 36)
 #
 # 修正ポイント:
 # 1. 【安全確認】動的取引閾値 (0.70, 0.65, 0.60) を最終確定。
