@@ -1634,22 +1634,47 @@ async def shutdown_event():
         await EXCHANGE_CLIENT.close()
         logging.info("CCXTクライアントをシャットダウンしました。")
 
-@app.get("/status")
-def get_status():
+# ===========================================================
+# 💡 監視サービス対応のエンドポイント (GET/HEADの統合)
+# ===========================================================
+
+# GET と HEAD の両方を同じ関数で処理するために @app.api_route を使用
+@app.api_route("/status", methods=["GET", "HEAD"])
+def get_head_status():
+    """
+    ボットの現在の動作状態を返す。
+    GETリクエスト: JSONを返す。
+    HEADリクエスト: ボディなしで200 OKを返す (UptimeRobot対策)。
+    """
+    current_time = time.time()
+    # LAST_SUCCESS_TIMEがゼロの場合は現在の時刻を基準にする（初回起動時）
+    last_time_for_calc = LAST_SUCCESS_TIME if LAST_SUCCESS_TIME > 0 else current_time
+    next_check = max(0, int(LOOP_INTERVAL - (current_time - last_time_for_calc)))
+
     status_msg = {
         "status": "ok",
         "bot_version": "v19.0.28 - Safety and Frequency Finalized (Patch 36)", # バージョン更新
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
-        "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME else "N/A",
-        "next_main_loop_check_seconds": max(0, int(LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME))),
+        # last_success_time は、LAST_SUCCESS_TIMEが初期値(0.0)でない場合にのみフォーマットする
+        "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME > 0 else "N/A",
+        "next_main_loop_check_seconds": next_check,
         "current_threshold": get_current_threshold(GLOBAL_MACRO_CONTEXT),
-        "macro_context": GLOBAL_MACRO_CONTEXT,
+        "macro_context": GLOBAL_MACRO_CONTEXT, # 0:低リスク, 1:中リスク, 2:高リスク
         "is_test_mode": TEST_MODE,
-        "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS)
+        "monitoring_symbols": len(CURRENT_MONITOR_SYMBOLS),
+        "last_signals_count": len(LAST_ANALYSIS_SIGNALS),
+        "is_client_ready": IS_CLIENT_READY
     }
+    
+    # HEADリクエストの場合、FastAPIは自動的にボディなしで200 OKを返します。
+    # GETリクエストの場合、JSONResponseを返します。
     return JSONResponse(content=status_msg)
 
+# ===========================================================
+# 💡 アプリケーションの実行
+# ===========================================================
+
 if __name__ == "__main__":
-    # uvicorn.runの引数は環境に応じて調整してください
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 環境変数PORTからポートを取得してUvicornを起動
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
