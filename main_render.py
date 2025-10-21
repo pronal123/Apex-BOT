@@ -103,6 +103,9 @@ OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (SL/TP監視
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
 
+# CCXTクライアントの準備完了フラグ
+IS_CLIENT_READY: bool = False
+
 # 取引ルール設定
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
 SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン (通常時の値 2-3銘柄/日を想定)
