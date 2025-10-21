@@ -916,8 +916,7 @@ def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> Optional
 
     # 4. BBWのSMA (ボラティリティ過熱チェック用: 警告回避のためここで計算)
     # 警告の原因: コードがBBWの移動平均を想定し、そのキーを参照していた可能性
-    df[f'BBW_SMA'] = df[f'BBW_20_2.0'].rolling(window=20).mean()
-
+    df[f'BBW_SMA'] = df['BBW'].rolling(window=20).mean()
     return df
 
 def get_signal_metrics(df: pd.DataFrame, timeframe: str) -> Dict[str, Any]:
