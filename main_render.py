@@ -6,6 +6,7 @@
 # 2. 【安全確認】取引実行ロジック (SL/TP, RRR >= 1.0, CCXT精度調整) の堅牢性を再確認。
 # 3. 【バージョン更新】全てのバージョン情報を Patch 36 に更新。
 # 4. 【キーエラー/警告修正】calculate_technical_indicatorsおよびget_signal_metricsにおけるBBW/BBPの参照を修正。
+# 5. 【✅ 構文エラー修正】monitor_positions_loop関数内のglobal OPEN_POSITIONS宣言の位置を修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -1261,6 +1262,7 @@ async def process_signal(signal: Dict, account_status: Dict, current_threshold: 
     """
     シグナルを評価し、取引を実行する。
     """
+    global OPEN_POSITIONS
     symbol = signal['symbol']
     
     # 1. 閾値チェック
@@ -1416,6 +1418,9 @@ async def monitor_positions_loop():
     """
     保有中のポジションを監視し、SL/TP条件を満たせば決済するメインループ
     """
+    # 【✅ 修正済み: global宣言を関数の冒頭に移動】
+    global OPEN_POSITIONS
+    
     while True:
         await asyncio.sleep(MONITOR_INTERVAL)
         
@@ -1438,7 +1443,6 @@ async def monitor_positions_loop():
                 new_open_positions.append(position)
                 
         # グローバルリストを更新
-        global OPEN_POSITIONS
         OPEN_POSITIONS = new_open_positions
         
         logging.info(f"✅ ポジション監視完了: 残り {len(OPEN_POSITIONS)} 銘柄。")
