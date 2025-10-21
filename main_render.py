@@ -155,6 +155,30 @@ def get_estimated_win_rate(score: float) -> str:
     if score >= 0.60: return "60-65%"
     return "<60% (低)"
 
+def get_current_threshold(macro_context: Dict) -> float:
+    """
+    グローバルマクロコンテキスト（FGIプロキシ値）に基づいて、
+    現在の市場環境に合わせた動的な取引閾値を決定し、返す。
+    """
+    # グローバル定数にアクセス
+    global FGI_SLUMP_THRESHOLD, FGI_ACTIVE_THRESHOLD
+    global SIGNAL_THRESHOLD_SLUMP, SIGNAL_THRESHOLD_NORMAL, SIGNAL_THRESHOLD_ACTIVE
+    
+    # FGIプロキシ値を取得（デフォルトは0.0）
+    fgi_proxy = macro_context.get('fgi_proxy', 0.0)
+    
+    # 市場低迷/リスクオフの閾値 (0.67)
+    if fgi_proxy < FGI_SLUMP_THRESHOLD:
+        return SIGNAL_THRESHOLD_SLUMP
+    
+    # 市場活発/リスクオンの閾値 (0.58)
+    elif fgi_proxy > FGI_ACTIVE_THRESHOLD:
+        return SIGNAL_THRESHOLD_ACTIVE
+        
+    # 通常/中立時の閾値 (0.63)
+    else:
+        return SIGNAL_THRESHOLD_NORMAL
+
 def get_score_breakdown(signal: Dict) -> str:
     """分析スコアの詳細なブレークダウンメッセージを作成する (Telegram通知用)"""
     tech_data = signal.get('tech_data', {})
