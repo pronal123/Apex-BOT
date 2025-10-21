@@ -886,11 +886,35 @@ def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> Optional
     # SMA (長期トレンドフィルタ用) (SMA_200)
     df.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
     
-    # 2. ボリンジャーバンド (BBANDS_20_2.0)
-    # 生成されるキー: BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, BBW_20_2.0, BBP_20_2.0
-    df.ta.bbands(length=20, std=2.0, append=True) 
+    # 2. ボリンジャーバンド (Bollinger Bands)
+    bb_data = ta.bbands(df['close'], length=20, std=2)
     
-    # 3. BBWのSMA (ボラティリティ過熱チェック用: 警告回避のためここで計算)
+    # 【✅ 修正箇所: BBWのキーエラー対応】
+    # pandas_taのバージョンによるキー名の違いを吸収するため、getメソッドを使用します。
+    # 期待されるキー名
+    key_prefix = '20_2.0' # length_std
+    
+    df['BBL'] = bb_data.get(f'BBL_{key_prefix}')
+    df['BBM'] = bb_data.get(f'BBM_{key_prefix}')
+    df['BBU'] = bb_data.get(f'BBU_{key_prefix}')
+    
+    # BBW (バンド幅) のキーを柔軟に取得
+    bbw_key = f'BBW_{key_prefix}'
+    if bbw_key not in bb_data.columns and 'BBW' in bb_data.columns:
+        bbw_key = 'BBW'
+    elif bbw_key not in bb_data.columns:
+        # 最終手段として、BBWから始まる最初の列を探す (より堅牢にする)
+        for col in bb_data.columns:
+            if col.startswith('BBW'):
+                bbw_key = col
+                break
+        
+    df['BBW'] = bb_data.get(bbw_key) # BBWを確実に 'BBW' という名前で保存
+    # 【修正箇所 終わり】
+    
+    # 3. OBV (On-Balance Volume)
+
+    # 4. BBWのSMA (ボラティリティ過熱チェック用: 警告回避のためここで計算)
     # 警告の原因: コードがBBWの移動平均を想定し、そのキーを参照していた可能性
     df[f'BBW_SMA'] = df[f'BBW_20_2.0'].rolling(window=20).mean()
 
