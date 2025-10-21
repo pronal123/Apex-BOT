@@ -5,6 +5,8 @@
 # 1. 【安全確認】動的取引閾値 (0.70, 0.65, 0.60) を最終確定。
 # 2. 【安全確認】取引実行ロジック (SL/TP, RRR >= 1.0, CCXT精度調整) の堅牢性を再確認。
 # 3. 【バージョン更新】全てのバージョン情報を Patch 36 に更新。
+# 4. 【UptimeRobot対応】/health GETエンドポイントを追加。
+# 5. 【エラー修正】KeyError: 'BBL_20_2.0' 対策として、Bollinger Bandsのキーアクセスにフォールバック処理を追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -897,10 +899,20 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     
     # 4. ボリンジャーバンド (Bollinger Bands)
     bb_data = ta.bbands(df['close'], length=20, std=2)
-    df['BBL'] = bb_data['BBL_20_2.0']
-    df['BBM'] = bb_data['BBM_20_2.0']
-    df['BBU'] = bb_data['BBU_20_2.0']
-    df['BBW'] = bb_data['BBW_20_2.0'] # バンド幅
+    # 【修正】KeyError: 'BBL_20_2.0' 対策
+    # pandas_taのバージョンによってカラム名が異なる問題に対応するため、try-exceptでフォールバックします。
+    try:
+        # 1. 詳細なカラム名でアクセスを試行 (元のコードの意図)
+        df['BBL'] = bb_data['BBL_20_2.0']
+        df['BBM'] = bb_data['BBM_20_2.0']
+        df['BBU'] = bb_data['BBU_20_2.0']
+        df['BBW'] = bb_data['BBW_20_2.0'] # バンド幅
+    except KeyError:
+        # 2. KeyErrorが発生した場合、簡略化されたカラム名でフォールバック
+        df['BBL'] = bb_data['BBL']
+        df['BBM'] = bb_data['BBM']
+        df['BBU'] = bb_data['BBU']
+        df['BBW'] = bb_data['BBW'] # バンド幅
     
     # 5. OBV (On-Balance Volume)
     df['OBV'] = ta.obv(df['close'], df['volume'])
