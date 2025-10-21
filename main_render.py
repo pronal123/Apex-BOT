@@ -5,7 +5,8 @@
 # 1. 【安全確認】動的取引閾値 (0.70, 0.65, 0.60) を最終確定。
 # 2. 【安全確認】取引実行ロジック (SL/TP, RRR >= 1.0, CCXT精度調整) の堅牢性を再確認。
 # 3. 【バージョン更新】全てのバージョン情報を Patch 36 に更新。
-# 4. 【致命的修正】 calculate_technical_indicators 内の BBANDS (BBL/BBM/BBH) 取得ロジックを動的キー検索に修正し、KeyError: 'BBL' を回避。
+# 4. 【致命的修正】 calculate_technical_indicators 内の BBANDS 取得ロジックを動的キー検索に修正し、KeyError: 'BBL' を回避。
+# 5. 【追加修正】BBANDS計算前にDataFrameから既存のBBANDSカラムを削除することで、キー名の重複 (例: BBL_20_2.0_2.0) を防止し、キー未検出の警告を解消。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -1079,7 +1080,6 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['RSI'] = ta.rsi(df['close'], length=14)
 
     # 3. MACD (Moving Average Convergence Divergence)
-    # pandas_taのMACDは通常 MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9 を返す
     macd_data = df.ta.macd(append=False)
     
     # MACDのカラム名を動的に探し、KeyErrorを回避
@@ -1112,51 +1112,46 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # 3. ボリンジャーバンド (BBAND)
     # パラメータ (Length=20, StdDev=2.0)
-    # pandas_taのBBANDSは、BBL (Lower), BBP (Percent), BBS (Standard Deviation), BBH (Higher), BBM (Mid) を返す
+    
+    # 🚨【追加修正】キー名の重複を防止するため、BBANDS計算前に既存のBBANDSカラムをすべて削除
+    # pandas_taのBBANDSは、BBL_x_y, BBM_x_y, BBH_x_y のように生成されるため、関連するプレフィックスを全て削除
+    bb_cols_to_drop = [col for col in df.columns if re.match(r'BB[HLMPEW]_', col) or col in ['BBL', 'BBM', 'BBH', 'BBP', 'BBW']]
+    df.drop(columns=bb_cols_to_drop, errors='ignore', inplace=True)
+    
+    # --- SMAベースのBBANDS (BBL, BBM, BBH) ---
     bb_data = df.ta.bbands(length=20, std=2.0, append=False)
     
-    # 💡 【修正点】KeyError: 'BBL' および 'BBL_20_2.0' を回避するため、動的にカラム名を検索し、存在しない場合はNaNを割り当てる
-    
-    # bb_data.columnsから、各バンドのプレフィックスに一致するカラム名を探す
-    # pandas_taのバージョンによって 'BBL' または 'BBL_20_2.0' の形式になるため、プレフィックス検索で対応
+    # BBL (Lower Band) の取得 - 動的検索
     bbl_cols = [col for col in bb_data.columns if col.startswith('BBL_') or col == 'BBL']
     bbm_cols = [col for col in bb_data.columns if col.startswith('BBM_') or col == 'BBM']
     bbh_cols = [col for col in bb_data.columns if col.startswith('BBH_') or col == 'BBH']
     
-    # BBL (Lower Band) の取得
-    if bbl_cols:
-        # プレフィックスに一致した最初に見つかったカラムを使用
-        df['BBL'] = bb_data[bbl_cols[0]]
-    else:
-        df['BBL'] = np.nan
-        logging.warning("⚠️ BBANDS (BBL) のキーが見つかりませんでした。データフレームのインデックスを確認してください。")
-
-    # BBM (Mid Band - SMA) の取得
-    if bbm_cols:
-        df['BBM'] = bb_data[bbm_cols[0]] 
-    else:
-        df['BBM'] = np.nan
-        logging.warning("⚠️ BBANDS (BBM) のキーが見つかりませんでした。")
+    # 各バンドの取得とKeyErrorの回避
+    df['BBL'] = bb_data[bbl_cols[0]] if bbl_cols else np.nan
+    if not bbl_cols: logging.warning("⚠️ BBANDS (BBL) のキーが見つかりませんでした。データフレームのインデックスを確認してください。")
         
-    # BBH (Upper Band) の取得
-    if bbh_cols:
-        df['BBH'] = bb_data[bbh_cols[0]]
-    else:
-        df['BBH'] = np.nan
-        logging.warning("⚠️ BBANDS (BBH) のキーが見つかりませんでした。")
+    df['BBM'] = bb_data[bbm_cols[0]] if bbm_cols else np.nan
+    if not bbm_cols: logging.warning("⚠️ BBANDS (BBM) のキーが見つかりませんでした。")
+        
+    df['BBH'] = bb_data[bbh_cols[0]] if bbh_cols else np.nan
+    if not bbh_cols: logging.warning("⚠️ BBANDS (BBH) のキーが見つかりませんでした。")
     
-    # ボリンジャーバンドの幅 (BBW) とパーセンテージ (%B) - EMAベース
-    bbw_data = df.ta.bbands(length=20, std=2.0, append=False, mamode='ema', col_names=('BBLE', 'BBME', 'BBHE', 'BBWE', 'BBPE'))
+    # --- EMAベースのBBANDS (BBW, BBP) ---
+    # EMAベースのキー名自動生成を許可するため、col_namesは指定しない
+    bbw_data = df.ta.bbands(length=20, std=2.0, append=False, mamode='ema') 
 
-    # ここもKeyError発生の可能性があるためtry/exceptで囲む
-    try:
-        df['BBW'] = bbw_data['BBWE']
-        df['BBP'] = bbw_data['BBPE']
-    except KeyError:
-        # EMAベースのキーがない場合
-        df['BBW'] = np.nan
-        df['BBP'] = np.nan
-        logging.warning("⚠️ BBANDS (EMA: BBW/BBP) のキーが見つかりませんでした。")
+    # EMAベースのキーを動的に検索
+    bbw_cols = [col for col in bbw_data.columns if col.startswith('BBW_') or col == 'BBW']
+    bbp_cols = [col for col in bbw_data.columns if col.startswith('BBP_') or col == 'BBP']
+
+    # BBW (Band Width) の取得
+    df['BBW'] = bbw_data[bbw_cols[0]] if bbw_cols else np.nan
+    if not bbw_cols: logging.warning("⚠️ BBANDS (EMA: BBW) のキーが見つかりませんでした。")
+
+    # BBP (Percent B) の取得
+    df['BBP'] = bbw_data[bbp_cols[0]] if bbp_cols else np.nan
+    if not bbp_cols: logging.warning("⚠️ BBANDS (EMA: BBP) のキーが見つかりませんでした。")
+
 
     # 4. ATR (Average True Range)
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -1167,24 +1162,20 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['OBV_SMA'] = ta.sma(df['OBV'], length=20)
 
     # 6. ピボットポイント (Pivot Points)
-    # リアルタイムのピボットは難しいので、過去の期間（例：1日）のピボットポイントを計算
-    # 1Dのデータがあれば使用するが、ここでは最も細かい15mの終値を使用して簡易計算
     pivot_data = df.ta.pivot_points(kind='fibonacci', append=False)
     
     # ピボットデータのカラム名を動的に探し、KeyErrorを回避
     r1_cols = [col for col in pivot_data.columns if 'R1' in col]
     s1_cols = [col for col in pivot_data.columns if 'S1' in col]
+    pivot_cols = [col for col in pivot_data.columns if col.startswith('PP_')]
 
     try:
-        if r1_cols and s1_cols:
-             # 直近のR1とS1を取得
-            df['PP_R1'] = pivot_data[r1_cols[-1]]
-            df['PP_S1'] = pivot_data[s1_cols[-1]]
-            df['PP_Pivot'] = pivot_data['PP_F'] # フィボナッチピボットのPを代入
-        else:
-            df['PP_R1'] = np.nan
-            df['PP_S1'] = np.nan
-            df['PP_Pivot'] = np.nan
+        # PP_R1, PP_S1, PP_Pivotの取得
+        df['PP_R1'] = pivot_data[r1_cols[-1]] if r1_cols else np.nan
+        df['PP_S1'] = pivot_data[s1_cols[-1]] if s1_cols else np.nan
+        df['PP_Pivot'] = pivot_data['PP_F'] if 'PP_F' in pivot_data.columns else (pivot_data[pivot_cols[0]] if pivot_cols else np.nan)
+        
+        if not r1_cols or not s1_cols:
             logging.warning("⚠️ ピボットポイントのキーが見つかりませんでした。")
 
     except Exception as e:
@@ -1232,8 +1223,12 @@ def apply_analysis_score(df: pd.DataFrame, timeframe: str, symbol: str, macro_co
     
     # SL価格: BB Lower と (現在価格 - ATR距離) のうち、より厳格な方（上）を使用
     # BBLは現在価格より常に下にあるため、(現在価格 - ATR距離)より高い（安全な）BBLを優先
-    stop_loss_price = max(structural_sl_price, current_price - atr_sl_distance)
-    
+    # BB LowerがNaNの場合は、ATR SLのみを使用 (ボラティリティ対策のため、BBが必須インジケーターのため、このチェックはあくまで補助)
+    if pd.isna(structural_sl_price):
+         stop_loss_price = current_price - atr_sl_distance
+    else:
+         stop_loss_price = max(structural_sl_price, current_price - atr_sl_distance)
+
     # SLが現在価格より上にある場合（データ異常、トレンド転換中など）は分析しない
     if stop_loss_price >= current_price:
         return None
@@ -1249,7 +1244,15 @@ def apply_analysis_score(df: pd.DataFrame, timeframe: str, symbol: str, macro_co
     tp_candidate_3 = last['PP_R1']
     
     # TP価格: 3つの候補のうち、最も安全な方（下）を使用
-    take_profit_price = min(tp_candidate_1, tp_candidate_2, tp_candidate_3)
+    # NaNの場合はその候補を無視
+    candidates = [tp_candidate_1]
+    if pd.notna(tp_candidate_2): candidates.append(tp_candidate_2)
+    if pd.notna(tp_candidate_3): candidates.append(tp_candidate_3)
+    
+    if not candidates:
+        return None
+        
+    take_profit_price = min(candidates)
     
     # TPが現在価格より下にある場合は分析しない
     if take_profit_price <= current_price:
@@ -1295,7 +1298,8 @@ def apply_analysis_score(df: pd.DataFrame, timeframe: str, symbol: str, macro_co
     # 2.2. 価格構造/ピボット支持 - ボーナス (最大STRUCTURAL_PIVOT_BONUS)
     structural_pivot_bonus = 0.0
     # BB Lower Bandにタッチ (買われすぎ) & ピボットS1がSL価格に近い
-    if last['BBP'] <= 0.05 and pd.notna(last['PP_S1']): # BBPが0に近い (BB Lowerにタッチ)
+    # BBP (Percent B) が計算されていることが前提
+    if pd.notna(last['BBP']) and last['BBP'] <= 0.05 and pd.notna(last['PP_S1']): # BBPが0に近い (BB Lowerにタッチ)
          # S1がSL価格の±0.5%以内にある場合 (サポートとして機能している)
          sl_s1_diff_percent = abs(stop_loss_price - last['PP_S1']) / last['PP_S1']
          if sl_s1_diff_percent < 0.005: 
@@ -1324,7 +1328,7 @@ def apply_analysis_score(df: pd.DataFrame, timeframe: str, symbol: str, macro_co
     # 2.4. 出来高 (OBV) - ボーナス (最大OBV_MOMENTUM_BONUS)
     obv_momentum_bonus_value = 0.0
     # OBVがSMAの上で上昇傾向にある場合
-    if pd.notna(last['OBV']) and pd.notna(last['OBV_SMA']):
+    if pd.notna(last['OBV']) and pd.notna(last['OBV_SMA']) and len(df) >= 2:
         # OBVがSMAより上にあり、かつ直近2期間で上昇している
         if last['OBV'] > last['OBV_SMA'] and last['OBV'] > df.iloc[-2]['OBV']:
             obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
@@ -1335,14 +1339,14 @@ def apply_analysis_score(df: pd.DataFrame, timeframe: str, symbol: str, macro_co
     # 2.5. ボラティリティ過熱ペナルティ
     volatility_penalty_value = 0.0
     # BB幅 (BBW) が過去平均と比較して非常に大きい場合 (ボラティリティ過熱)
-    if pd.notna(last['BBW']):
+    if pd.notna(last['BBW']) and len(df) >= 20:
         # BBWの移動平均を計算し、直近のBBWと比較 (過去10期間)
         bbw_avg = df['BBW'].iloc[-20:-1].mean()
         if bbw_avg > 0:
             bbw_change = (last['BBW'] - bbw_avg) / bbw_avg
             if bbw_change > VOLATILITY_BB_PENALTY_THRESHOLD:
-                # 0.5%以上ボラティリティが高い場合はペナルティ
-                penalty_factor = min(bbw_change / 0.05, 1.0) # 最大ペナルティはLONG_TERM_REVERSAL_PENALTYの半分
+                # 1%以上ボラティリティが高い場合はペナルティ
+                penalty_factor = min(bbw_change / 0.01, 1.0) # 最大ペナルティはLONG_TERM_REVERSAL_PENALTYの半分
                 volatility_penalty_value = -(LONG_TERM_REVERSAL_PENALTY * 0.5 * penalty_factor)
                 score += volatility_penalty_value 
             
@@ -1500,7 +1504,11 @@ async def monitor_positions_loop():
         
         # 並行してティッカー情報を取得
         if EXCHANGE_CLIENT:
-            tickers = await EXCHANGE_CLIENT.fetch_tickers(symbols_to_fetch)
+            try:
+                tickers = await EXCHANGE_CLIENT.fetch_tickers(symbols_to_fetch)
+            except Exception as e:
+                logging.error(f"❌ ポジション監視中のティッカー取得エラー: {e}")
+                tickers = {}
         else:
             tickers = {}
 
