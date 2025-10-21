@@ -1601,6 +1601,11 @@ async def shutdown_event():
         await EXCHANGE_CLIENT.close()
         logging.info("CCXTクライアントをシャットダウンしました。")
 
+@app.get("/")
+def health_check():
+    """ルートパスで稼働中メッセージを返す"""
+    return {"message": "Bot Service is running"}
+
 @app.get("/status")
 def get_status():
     status_msg = {
