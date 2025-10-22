@@ -116,7 +116,7 @@ REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500}
 
 # テクニカル分析定数 (v19.0.28ベース)
 TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] # ★変更: 1m, 5mを追加
-BASE_SCORE = 0.60                   # ベースとなる取引基準点 (60点)
+BASE_SCORE = 0.40                   # ベースとなる取引基準点 (40点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
 LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンド逆行時のペナルティ
 STRUCTURAL_PIVOT_BONUS = 0.05       # 価格構造/ピボット支持時のボーナス
@@ -129,9 +129,9 @@ FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.67       
-SIGNAL_THRESHOLD_NORMAL = 0.63      
-SIGNAL_THRESHOLD_ACTIVE = 0.58      
+SIGNAL_THRESHOLD_SLUMP = 0.70       
+SIGNAL_THRESHOLD_NORMAL = 0.65      
+SIGNAL_THRESHOLD_ACTIVE = 0.60      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
