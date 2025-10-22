@@ -31,9 +31,9 @@ import re
 import ftplib 
 import uuid 
 
-# ★追加: CCXT固有のエラークラス群と数値計算ライブラリ★
-import ccxt.base.errors as ccxt_errors 
-import math                           
+# ★修正: CCXTエラークラスはccxtモジュールに直接マッピングされているため、import ccxt.base.errors は不要★
+import math # 数値計算ライブラリは残す
+# ccxt.AuthenticationError など、ccxtモジュールに存在するクラスを直接利用します。
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
