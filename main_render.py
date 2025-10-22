@@ -5,6 +5,7 @@
 # 1. 【ログ強化】CCXTエラー（認証、レート制限、ネットワークなど）の個別捕捉を追加。
 # 2. 【MEXC対応】最小取引数量と精度を考慮した自動数量調整ロジックを追加。
 # 3. 【バージョン更新】全てのバージョン情報を Patch 37 に更新。
+# 4. 【致命的修正】ccxt_errors NameErrorを修正し、ccxtから直接エラークラスを使用するように変更しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -17,7 +18,6 @@ import ccxt
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
-import math
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 import asyncio
@@ -144,13 +144,6 @@ OBV_MOMENTUM_BONUS = 0.04           # OBVトレンド一致時のボーナス
 # ====================================================================================
 # UTILITIES & FORMATTING
 # ====================================================================================
-
-# ( format_usdt, get_estimated_win_rate, get_current_threshold, get_score_breakdown, 
-# format_analysis_only_message, format_startup_message, format_telegram_message, 
-# send_telegram_notification, _to_json_compatible, log_signal, 
-# _sync_ftp_upload, upload_logs_to_webshare は元のコードから変更なし)
-
-# ... (元のコードの UTILITIES & FORMATTING セクションの内容が続きます)
 
 def format_usdt(amount: float) -> str:
     """USDT金額を整形する"""
@@ -719,12 +712,12 @@ async def initialize_exchange_client() -> bool:
         IS_CLIENT_READY = True
         return True
 
-    # 💡 CCXTエラーハンドリングの強化
-    except ccxt_errors.AuthenticationError as e: 
+    # 💡 CCXTエラーハンドリングの強化 (ccxt_errors -> ccxt に修正)
+    except ccxt.AuthenticationError as e: 
         logging.critical(f"❌ CCXT初期化失敗 - 認証エラー: APIキー/シークレットを確認してください。{e}", exc_info=True)
-    except ccxt_errors.ExchangeNotAvailable as e: 
+    except ccxt.ExchangeNotAvailable as e: 
         logging.critical(f"❌ CCXT初期化失敗 - 取引所接続エラー: サーバーが利用できません。{e}", exc_info=True)
-    except ccxt_errors.NetworkError as e:
+    except ccxt.NetworkError as e:
         logging.critical(f"❌ CCXT初期化失敗 - ネットワークエラー: 接続を確認してください。{e}", exc_info=True)
     except Exception as e:
         logging.critical(f"❌ CCXTクライアント初期化失敗 - 予期せぬエラー: {e}", exc_info=True)
@@ -820,14 +813,14 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
         df = df.set_index('timestamp')
         return df
 
-    # 💡 CCXTエラーハンドリングの強化
-    except ccxt_errors.RequestTimeout as e:
+    # 💡 CCXTエラーハンドリングの強化 (ccxt_errors -> ccxt に修正)
+    except ccxt.RequestTimeout as e:
         logging.error(f"❌ CCXTエラー (RequestTimeout): {symbol} ({timeframe}). APIコールがタイムアウトしました。{e}")
-    except ccxt_errors.RateLimitExceeded as e:
+    except ccxt.RateLimitExceeded as e:
         logging.error(f"❌ CCXTエラー (RateLimitExceeded): {symbol} ({timeframe}). APIコールの頻度制限を超過しました。{e}")
-    except ccxt_errors.BadSymbol as e:
+    except ccxt.BadSymbol as e:
         logging.error(f"❌ CCXTエラー (BadSymbol): {symbol} ({timeframe}). シンボルが取引所に存在しない可能性があります。{e}")
-    except ccxt_errors.ExchangeError as e: 
+    except ccxt.ExchangeError as e: 
         logging.error(f"❌ CCXTエラー (ExchangeError): {symbol} ({timeframe}). 取引所からの応答エラーです。{e}")
     except Exception as e:
         # 詳細なトレースバック情報を含めてロギング
@@ -838,9 +831,6 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
 # ====================================================================================
 # TRADING LOGIC
 # ====================================================================================
-
-# NOTE: 元のコードのロジックを維持するため、分析関数はダミー/簡略化しています。
-# 実際のインジケーター計算ロジックは元のコードに存在するはずです。
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """テクニカルインジケーターを計算する (ダミー)"""
@@ -975,13 +965,13 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
         return trade_result
 
     # 💡 注文実行時のCCXTエラーハンドリング強化
-    except ccxt_errors.InsufficientFunds as e:
+    except ccxt.InsufficientFunds as e:
         logging.error(f"❌ 注文失敗 - 残高不足: {symbol} {action}. {e}")
         return {'status': 'error', 'error_message': f'残高不足エラー: {e}'}
-    except ccxt_errors.InvalidOrder as e:
+    except ccxt.InvalidOrder as e:
         logging.error(f"❌ 注文失敗 - 無効な注文: 取引所ルール違反の可能性 (数量/価格/最小取引額)。{e}")
         return {'status': 'error', 'error_message': f'無効な注文エラー: {e}'}
-    except ccxt_errors.ExchangeError as e:
+    except ccxt.ExchangeError as e:
         logging.error(f"❌ 注文失敗 - 取引所エラー: API応答の問題。{e}")
         return {'status': 'error', 'error_message': f'取引所APIエラー: {e}'}
     except Exception as e:
