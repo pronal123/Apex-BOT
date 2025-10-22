@@ -14,9 +14,11 @@ import logging
 import requests
 import ccxt.async_support as ccxt_async
 import ccxt
+import ccxt.base.errors as ccxt_errors
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 import asyncio
