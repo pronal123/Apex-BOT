@@ -1,11 +1,8 @@
 # ====================================================================================
-# Apex BOT v19.0.28 - Safety and Frequency Finalized (Patch 36)
+# Apex BOT v19.0.28 - Safety and Frequency Finalized (Patch 37)
 #
 # 修正ポイント:
-# 1. 【安全確認】動的取引閾値 (0.67, 0.63, 0.58) を最終確定。
-# 2. 【安全確認】取引実行ロジック (SL/TP, RRR >= 1.0, CCXT精度調整) の堅牢性を再確認。
-# 3. 【バージョン更新】全てのバージョン情報を Patch 36 に更新。
-# 4. 【エラー修正】ApexBotMainLogicクラス、非同期タスク、FastAPI起動ロジックを補完し、実行時エラーを解消。
+# 1. 【エラー修正】`KeyError: 'RSI'` 対策として、calculate_technical_analysis_and_signal 関数内に必須インジケータの存在チェックを追加し、データ不足による分析失敗を防御的に処理するよう修正 (Patch 37)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -337,7 +334,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.28 - Safety and Frequency Finalized (Patch 36)</i>" 
+        f"<i>Bot Ver: v19.0.28 - Safety and Frequency Finalized (Patch 37)</i>" # バージョン更新
     )
 
     return header + macro_section + signal_section + footer
@@ -507,6 +504,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **テイクプロフィット (TP)**: <code>{format_usdt(take_profit)}</code>\n"
         f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price - stop_loss)}</code> USDT\n"
         f"  - **リワード幅 (TP)**: <code>{take_profit - entry_price:.6f}</code> USDT\n"
+        f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price - stop_loss)}</code> USDT\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
     )
     
@@ -522,7 +520,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.28 - Safety and Frequency Finalized (Patch 36)</i>")
+    message += (f"<i>Bot Ver: v19.0.28 - Safety and Frequency Finalized (Patch 37)</i>") # バージョン更新
     return message
 
 
@@ -719,6 +717,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
     try:
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         if not ohlcv:
+            # データが空の場合はNoneを返す
             return None
             
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -748,9 +747,6 @@ async def fetch_markets_safe() -> List[str]:
             m['symbol'] for m in markets 
             if m['active'] and m.get('spot') and m['quote'] == 'USDT'
         ]
-        
-        # 出来高 (Volume) が取得できる取引所の場合、出来高順に並べ替えるロジックをここに挿入
-        # 現時点では、簡略化のため、デフォルトのリストにTOP_SYMBOL_LIMITまでの銘柄を追加する形で処理を続行
         
         # デフォルトシンボルと取引所で見つかったUSDTペアをマージ
         unique_symbols = sorted(list(set(DEFAULT_SYMBOLS) | set(spot_usdt_markets)))
@@ -811,7 +807,7 @@ class ApexBotMainLogic:
 
     def __init__(self):
         """初期化"""
-        self.bot_version = "v19.0.28 - Safety and Frequency Finalized (Patch 36)"
+        self.bot_version = "v19.0.28 - Safety and Frequency Finalized (Patch 37)" # バージョン更新
         self.running_tasks = []
         self.is_running = False
 
@@ -856,11 +852,26 @@ class ApexBotMainLogic:
         df_4h.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
         long_term_sma = df_4h[f'SMA_{LONG_TERM_SMA_LENGTH}'].iloc[-1] if f'SMA_{LONG_TERM_SMA_LENGTH}' in df_4h.columns else current_price
         
-        # RSI, MACD, BBands, OBV
+        # RSI, MACD, BBands, OBV, ATR
         df_15m.ta.rsi(append=True)
         df_15m.ta.macd(append=True)
         bbands_cols = df_15m.ta.bbands(append=True).columns
         df_15m.ta.obv(append=True)
+        df_15m.ta.atr(append=True)
+        
+        # 🚨 エラー修正 (Patch 37): 必須インジケーターの存在チェック
+        # データ不足（特に14期間未満）でインジケータがDFに追加されない場合、ここでスキップする
+        required_cols = ['RSI', 'MACDh_12_26_9', 'OBV', 'ATR']
+        if not all(col in df_15m.columns for col in required_cols):
+             # どのインジケータが欠けているかをログに出力
+             missing_cols = [col for col in required_cols if col not in df_15m.columns]
+             logging.warning(f"⚠️ {symbol} - 15mデータ不足または計算エラー。分析をスキップします。欠落: {missing_cols}")
+             return None
+             
+        # BBandsの列が3つあることも確認（最低限のチェック）
+        if len(bbands_cols) < 3:
+             logging.warning(f"⚠️ {symbol} - BBandsデータ不足または計算エラー。分析をスキップします。")
+             return None
 
         # 2. スコアリングの実行 (性能を維持するため、定数に基づいたロジックを再現)
         score = BASE_SCORE # 60点からスタート
@@ -883,6 +894,7 @@ class ApexBotMainLogic:
             tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS
             
         # c. モメンタム (RSI_MOMENTUM_LOW, MACD_CROSS_PENALTY)
+        # 🚨 存在チェックは済んでいるので、iloc[-1]でアクセス
         rsi_val = df_15m['RSI'].iloc[-1]
         macd_val = df_15m['MACDh_12_26_9'].iloc[-1]
         
@@ -893,7 +905,12 @@ class ApexBotMainLogic:
              tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
 
         # d. 出来高/OBV (OBV_MOMENTUM_BONUS)
-        obv_momentum = (df_15m['OBV'].iloc[-1] - df_15m['OBV'].iloc[-20]) / df_15m['OBV'].iloc[-20]
+        # OBVモメンタムの計算のために過去20期間が必要
+        if len(df_15m) >= 20:
+            obv_momentum = (df_15m['OBV'].iloc[-1] - df_15m['OBV'].iloc[-20]) / df_15m['OBV'].iloc[-20]
+        else:
+            obv_momentum = 0.0
+            
         tech_data['obv_momentum_bonus_value'] = 0.0
         if obv_momentum > 0.05: # OBVが直近で5%以上上昇
              score += OBV_MOMENTUM_BONUS
@@ -920,8 +937,7 @@ class ApexBotMainLogic:
         tech_data['forex_bonus'] = macro_context.get('forex_bonus', 0.0)
 
         # 3. SL/TPの設定とRRRの計算
-        # SL/TPもロジックの再現のため、簡易的なATRベースで計算
-        df_15m.ta.atr(append=True)
+        # 🚨 存在チェックは済んでいるので、iloc[-1]でアクセス
         atr_val = df_15m['ATR'].iloc[-1]
         
         stop_loss = current_price - 1.5 * atr_val # 1.5 ATRをSL
@@ -975,11 +991,6 @@ class ApexBotMainLogic:
             }
         
         try:
-            # CCXTで成行買い (amountは quote currency: USDTで指定)
-            # 現物取引所の場合、amountは通常 base currency (BTC, ETHなど) で指定する必要がありますが、
-            # CCXTでは 'create_order(symbol, type, side, amount, price, params)' のamountが基本通貨です。
-            # ここでは簡略化のため、amountをUSDT建て金額から概算します
-            
             # 発注数量の計算: 概算のBase通貨数量
             amount_base = lot_size_usdt / signal['entry_price']
             
@@ -1169,6 +1180,7 @@ class ApexBotMainLogic:
             return signal
             
         except Exception as e:
+            # 予期せぬエラーはここで捕捉し、分析を継続させる
             logging.error(f"❌ {symbol} の分析中にエラーが発生: {e}")
             return None
 
@@ -1282,10 +1294,7 @@ async def monitor_positions_loop():
                     if exit_trigger:
                         logging.warning(f"🚨 ポジション決済トリガー: {symbol} - {exit_trigger} (Price: {current_price:.4f})")
                         
-                        # 2. 決済の実行
-                        # 実際には execute_trade_exit(pos) のような関数を呼び出し、CCXTで成行売りを行う
-                        
-                        # 決済シミュレーション結果
+                        # 2. 決済の実行 (シミュレーション)
                         pnl_rate = (current_price / pos['entry_price']) - 1
                         pnl_usdt = pos['filled_usdt'] * pnl_rate
 
@@ -1384,7 +1393,7 @@ def get_bot_status() -> Dict:
 
     status_msg = {
         "status": "ok" if IS_CLIENT_READY and main_bot_loop.is_running else "initializing",
-        "bot_version": "v19.0.28 - Safety and Frequency Finalized (Patch 36)", # バージョン更新
+        "bot_version": "v19.0.28 - Safety and Frequency Finalized (Patch 37)", # バージョン更新
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         # last_success_time は、LAST_SUCCESS_TIMEが初期値(0.0)でない場合にのみフォーマットする
