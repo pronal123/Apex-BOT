@@ -2,11 +2,10 @@
 # Apex BOT v19.0.28 - Safety, Frequency & CCXT Finalized (Patch 37)
 #
 # 改良・修正点:
-# 1. 【WebShare変更】FTPからHTTP POST (JSON送信) にロジックを変更。
-# 2. 【シンボル除外】MEXCに存在しない銘柄 (MATIC, FTM, EOS, MKR, THETA) をDEFAULT_SYMBOLSから除外。
-# 3. 【FIX】main_bot_loop内でLAST_WEBSHARE_UPLOAD_TIMEをglobal宣言し、UnboundLocalErrorを解消。
-# 4. 【FIX/致命的】execute_tradeで、order.get('filled')がNoneの場合に0.0に強制変換し、
-#     その後のログ/Telegram通知でのTypeError (NoneType.__format__) によるクラッシュを回避。
+# 1. 【FIX/致命的】format_usdt関数にNoneチェックを追加し、TypeErrorを回避。
+# 2. 【FIX/重要】fetch_account_status関数を追加し、初回起動時の口座ステータス（USDT残高）をCCXTからリアルタイムに取得するように修正。
+# 3. 【WebShare変更】FTPからHTTP POST (JSON送信) にロジックを変更。
+# 4. 【シンボル除外】MEXCに存在しない銘柄 (MATIC, FTM, EOS, MKR, THETA) をDEFAULT_SYMBOLSから除外。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -149,6 +148,10 @@ OBV_MOMENTUM_BONUS = 0.04           # OBVトレンド一致時のボーナス
 
 def format_usdt(amount: float) -> str:
     """USDT金額を整形する"""
+    # ★修正: NoneTypeエラー回避のため、Noneの場合は0.0に強制変換する
+    if amount is None:
+        amount = 0.0
+        
     if amount >= 1.0:
         return f"{amount:,.2f}"
     elif amount >= 0.01:
@@ -370,6 +373,7 @@ def format_startup_message(
             f"  - **USDT残高**: <code>{format_usdt(account_status['total_usdt_balance'])}</code> USDT\n"
         )
         
+        # ボットが管理しているポジション
         if OPEN_POSITIONS:
             total_managed_value = sum(p['filled_usdt'] for p in OPEN_POSITIONS)
             balance_section += (
@@ -383,9 +387,13 @@ def format_startup_message(
         else:
              balance_section += f"  - **管理中ポジション**: <code>なし</code>\n"
 
+        # CCXTから取得したがボットが管理していないポジション（現物保有資産）
         open_ccxt_positions = [p for p in account_status['open_positions'] if p['usdt_value'] >= 10]
         if open_ccxt_positions:
-             balance_section += f"  - **未管理の現物**: <code>{len(open_ccxt_positions)}</code> 銘柄 (CCXT参照)\n"
+             ccxt_value = sum(p['usdt_value'] for p in open_ccxt_positions)
+             balance_section += (
+                 f"  - **現物保有資産**: <code>{len(open_ccxt_positions)}</code> 銘柄 (概算価値: <code>{format_usdt(ccxt_value)}</code> USDT)\n"
+             )
         
     balance_section += f"\n"
 
@@ -434,7 +442,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         elif trade_result.get('status') == 'ok':
             trade_status_line = "✅ **自動売買 成功**: 現物ロング注文を執行しました。"
             
-            # filled_amountが0.0に修正されているため、ここでNoneTypeエラーは発生しない
+            # filled_amountがNoneになる可能性はformat_usdtで処理
             filled_amount = trade_result.get('filled_amount', 0.0) 
             filled_usdt = trade_result.get('filled_usdt', 0.0)
             
@@ -650,6 +658,65 @@ async def initialize_exchange_client() -> bool:
     EXCHANGE_CLIENT = None
     return False
 
+# ★新規追加★ 口座ステータスを取得する関数
+async def fetch_account_status() -> Dict:
+    """
+    CCXTから口座の残高と、USDT以外の保有資産の情報を取得する。
+    保有資産はUSDT換算してオープンポジションとして概算する。
+    """
+    global EXCHANGE_CLIENT
+    
+    if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
+        logging.error("❌ 口座ステータス取得失敗: CCXTクライアントが準備できていません。")
+        return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
+
+    try:
+        # 1. 残高の取得
+        balance = await EXCHANGE_CLIENT.fetch_balance()
+        
+        # USDTの合計残高 (free + used) を取得
+        total_usdt_balance = balance.get('total', {}).get('USDT', 0.0)
+        
+        # 2. オープンポジションの概算 (ここでは、USDT以外の資産をオープンポジションとして扱う)
+        open_positions = []
+        for currency, amount in balance.get('total', {}).items():
+            if currency not in ['USDT', 'USD'] and amount is not None and amount > 0.000001: 
+                # USDT換算価値を取得
+                try:
+                    symbol = f"{currency}/USDT"
+                    # 市場に存在するかチェック
+                    if symbol not in EXCHANGE_CLIENT.markets:
+                        continue # 取引所で取引できないシンボルはスキップ
+                        
+                    ticker = await EXCHANGE_CLIENT.fetch_ticker(symbol)
+                    usdt_value = amount * ticker['last']
+                    
+                    if usdt_value >= 10: # 10 USDT未満の微細な資産は無視
+                        open_positions.append({
+                            'symbol': symbol,
+                            'amount': amount,
+                            'usdt_value': usdt_value
+                        })
+                except Exception as e:
+                    # ログには残すが出力エラーではない
+                    logging.warning(f"⚠️ {currency} のUSDT価値を取得できませんでした（{e}）。")
+                    
+        return {
+            'total_usdt_balance': total_usdt_balance,
+            'open_positions': open_positions,
+            'error': False
+        }
+
+    except ccxt.NetworkError as e:
+        logging.error(f"❌ 口座ステータス取得失敗 (ネットワークエラー): {e}")
+    except ccxt.AuthenticationError as e:
+        logging.critical(f"❌ 口座ステータス取得失敗 (認証エラー): {e}")
+    except Exception as e:
+        logging.error(f"❌ 口座ステータス取得失敗 (予期せぬエラー): {e}")
+
+    return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
+
+
 # ------------------------------------------------------------------------------------
 # 最小取引数量の自動調整ロジック
 # ------------------------------------------------------------------------------------
@@ -842,22 +909,24 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
             logging.info(f"✅ 注文実行成功: {symbol} {action} Market. 数量: {adjusted_amount:.8f}")
 
         # -----------------------------------------------------------------------------------
-        # 🚨 致命的FIX: NoneTypeエラー回避
+        # 致命的FIX: NoneTypeエラー回避
         # -----------------------------------------------------------------------------------
         filled_amount_val = order.get('filled')
-        # NoneType.__format__エラー回避のため、filled_amountがNoneの場合は0.0に強制変換
+        price_used = order.get('price')
+
+        # NoneType.__format__エラー回避のため、filled_amount/priceがNoneの場合は0.0/entry_priceに強制変換
         if filled_amount_val is None:
             filled_amount_val = 0.0
         
-        price_used = order.get('price')
+        effective_price = price_used if price_used is not None else entry_price
 
         trade_result = {
             'status': 'ok',
             'order_id': order.get('id'),
-            'filled_amount': filled_amount_val, # ★修正: Noneチェック済みの値を使用
-            # filled_usdtの計算にもfilled_amount_valを使用
-            'filled_usdt': order.get('cost', filled_amount_val * (price_used if price_used is not None else entry_price)), 
-            'entry_price': price_used if price_used is not None else entry_price,
+            'filled_amount': filled_amount_val, 
+            # filled_usdtがNoneになる可能性も考慮し、costがNoneの場合は filled * price で計算
+            'filled_usdt': order.get('cost', filled_amount_val * effective_price), 
+            'entry_price': effective_price,
             'stop_loss': signal.get('stop_loss'),
             'take_profit': signal.get('take_profit'),
         }
@@ -901,9 +970,7 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
 
 async def main_bot_loop():
     """ボットのメイン実行ループ"""
-    global LAST_SUCCESS_TIME, IS_CLIENT_READY, CURRENT_MONITOR_SYMBOLS, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME
-    # 🚨 FIX: UnboundLocalErrorを解消するためにglobal宣言を追加
-    global LAST_WEBSHARE_UPLOAD_TIME 
+    global LAST_SUCCESS_TIME, IS_CLIENT_READY, CURRENT_MONITOR_SYMBOLS, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME, LAST_WEBSHARE_UPLOAD_TIME 
 
     if not IS_CLIENT_READY:
         logging.info("CCXTクライアントを初期化中...")
@@ -978,8 +1045,9 @@ async def main_bot_loop():
 
     # 7. 初回起動完了通知
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
-        # account_statusはCCXTから取得するロジックが別途必要だが、ここではダミー
-        account_status = {'total_usdt_balance': 10000.0, 'open_positions': [], 'error': False}
+        # ★修正: ダミーデータではなく、CCXTから実際の残高情報を取得する
+        account_status = await fetch_account_status() 
+
         await send_telegram_notification(
             format_startup_message(
                 account_status, 
