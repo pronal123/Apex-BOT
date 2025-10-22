@@ -1,15 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.28 - Safety and Frequency Finalized (Patch 36)
+# Apex BOT v19.0.29 - Critical Fixes and Win-Rate Patch
 #
 # 修正ポイント:
-# 1. 【エラー修正】FTPアップロード関数 (_sync_ftp_upload) に最大3回のリトライロジックを追加し、タイムアウトエラーに対応。
-# 2. 【堅牢化】OHLCV取得関数 (fetch_ohlcv_safe) のエラーハンドリングを強化し、CCXT APIエラーやレート制限に対応。
-# 3. 【安全確認】動的取引閾値 (0.67, 0.63, 0.58) を最終確定。
-#
-# 💡 ユーザー要望による追加修正:
-# 4. 【勝率向上】取引閾値を全体的に0.02pt引き上げ (0.69, 0.65, 0.60)。
-# 5. 【Telegramエラー修正】get_estimated_win_rate関数の '<' を '&lt;' にエスケープ。
-# 6. 【ログ強化】execute_trade関数にCCXTエラーハンドリングを追加し、取引権限や残高不足をログに出力。
+# 1. 【CRITICAL FIX】CCXT例外処理の記述を簡素化 (ccxt.base.errors -> ccxt.ExchangeErrorなど) し、'list' object has no attribute 'errors'エラーを解消。
+# 2. 【CRITICAL FIX】監視リストからMEXCで無効なシンボル (MATIC/USDT) を削除し、BadSymbolエラーを解消。
+# 3. 【勝率向上】取引閾値を全体的に0.02pt引き上げ (0.69, 0.65, 0.60)。
+# 4. 【Telegramエラー修正】get_estimated_win_rate関数の '<' を '&lt;' にエスケープ。
+# 5. 【ログ強化】execute_trade関数にCCXTエラーハンドリングを追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -77,9 +74,11 @@ TAKE_PROFIT_RATIO = float(os.getenv("TAKE_PROFIT_RATIO", 0.10)) # 10%
 STOP_LOSS_RATIO = float(os.getenv("STOP_LOSS_RATIO", 0.05))   # 5%
 
 # 📌 監視銘柄リスト (MEXCで流動性が高い銘柄)
+# 修正: MATIC/USDT は BadSymbol エラーの原因となるためリストから削除
 TARGET_SYMBOLS = [
     "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
-    "AVAX/USDT", "DOT/USDT", "LINK/USDT", "MATIC/USDT", "LTC/USDT", "BCH/USDT",
+    "AVAX/USDT", "DOT/USDT", "LINK/USDT", 
+    "LTC/USDT", "BCH/USDT",
     "TRX/USDT", "ETC/USDT", "ALGO/USDT", "XLM/USDT", "VET/USDT"
 ]
 
@@ -87,9 +86,9 @@ TARGET_SYMBOLS = [
 FGI_SLUMP_THRESHOLD = -0.02         # FGIプロキシがこの値未満の場合、市場低迷と見なす
 FGI_ACTIVE_THRESHOLD = 0.02         # FGIプロキシがこの値を超える場合、市場活発と見なす
 # 🚨 最終調整箇所: WIN-RATE優先のため、全体的に2pt引き上げ
-SIGNAL_THRESHOLD_SLUMP = 0.69       # 低迷時の閾値 (1銘柄/日を想定) <- 0.67から0.69に変更
-SIGNAL_THRESHOLD_NORMAL = 0.65      # 通常時の閾値 (1-2銘柄/日を想定) <- 0.63から0.65に変更
-SIGNAL_THRESHOLD_ACTIVE = 0.60      # 活発時の閾値 (2-3銘柄/日を想定) <- 0.58から0.60に変更
+SIGNAL_THRESHOLD_SLUMP = 0.69       # 低迷時の閾値 (1銘柄/日を想定) 
+SIGNAL_THRESHOLD_NORMAL = 0.65      # 通常時の閾値 (1-2銘柄/日を想定)
+SIGNAL_THRESHOLD_ACTIVE = 0.60      # 活発時の閾値 (2-3銘柄/日を想定)
 
 # ====================================================================================
 # GLOBAL STATE & INITIALIZATION
@@ -291,9 +290,10 @@ async def fetch_ohlcv_safe(exchange: ccxt_async.Exchange, symbol: str, timeframe
         df.set_index('timestamp', inplace=True)
         return df
 
-    except ccxt.base.errors.ExchangeError as e:
+    # 修正: ccxt.base.errors から ccxt のトップレベルエラーに切り替え、AttributeErrorを回避
+    except ccxt.ExchangeError as e:
         logging.error(f"❌ {symbol} のデータ取得中に取引所エラーが発生: {e}")
-    except ccxt.base.errors.NetworkError as e:
+    except ccxt.NetworkError as e:
         logging.error(f"❌ {symbol} のデータ取得中にネットワークエラーが発生: {e}")
     except Exception as e:
         logging.error(f"❌ {symbol} のOHLCV取得中に予期せぬエラーが発生: {e}", exc_info=True)
@@ -349,31 +349,31 @@ async def execute_trade(exchange: ccxt_async.Exchange, symbol: str, type: str, s
         logging.info(f"✅ TRADE EXECUTED: {symbol} - {side} {order_type} {amount} 注文ID: {order.get('id', 'N/A')}")
         return order
 
-    # 💡 ユーザー要望による修正: CCXT固有のエラーをキャッチし、詳細なログを出力
-    except ccxt.base.errors.PermissionDenied as e:
+    # 修正: ccxt.base.errors から ccxt のトップレベルエラーに切り替え
+    except ccxt.PermissionDenied as e:
         # APIキーの権限不足（取引権限がないなど）
         logging.error(f"❌ CCXT API ERROR: {symbol} ポジション取得失敗 (Permission Denied/権限不足). 詳細: {e}")
         send_telegram_alert(f"🚨 重大エラー: {symbol} ポジション取得失敗。\n**原因: APIキーに取引権限がありません。**\n\nログを確認してください。", level='CRITICAL')
         return None
         
-    except ccxt.base.errors.InsufficientFunds as e:
+    except ccxt.InsufficientFunds as e:
         # 残高不足
         logging.error(f"❌ CCXT API ERROR: {symbol} ポジション取得失敗 (Insufficient Funds/残高不足). 詳細: {e}")
         send_telegram_alert(f"⚠️ エラー: {symbol} ポジション取得失敗。\n**原因: USDT残高が不足しています。**\n\nログを確認してください。", level='WARNING')
         return None
         
-    except ccxt.base.errors.NetworkError as e:
+    except ccxt.NetworkError as e:
         # ネットワークまたはレート制限
         logging.error(f"❌ CCXT API ERROR: {symbol} ポジション取得失敗 (Network/Rate Limit). 詳細: {e}")
         return None
         
-    except ccxt.base.errors.AuthenticationError as e:
+    except ccxt.AuthenticationError as e:
         # APIキー/シークレットが間違っている
         logging.error(f"❌ CCXT API ERROR: {symbol} ポジション取得失敗 (Authentication Error). 詳細: {e}")
         send_telegram_alert(f"🚨 重大エラー: {symbol} ポジション取得失敗。\n**原因: API認証情報が誤っています。**\n\nログを確認してください。", level='CRITICAL')
         return None
 
-    except ccxt.base.errors.ExchangeError as e:
+    except ccxt.ExchangeError as e:
         # その他、取引所固有のエラー
         logging.error(f"❌ CCXT API ERROR: {symbol} ポジション取得失敗 (Exchange Specific Error). 詳細: {e}")
         return None
@@ -527,7 +527,6 @@ async def check_for_exits(exchange: ccxt_async.Exchange):
                     symbols_to_remove.append(symbol)
                     
                 else:
-                    # execute_trade内で詳細なエラーログは出力済み
                     logging.error(f"❌ {symbol} の決済注文の実行に失敗しました。ポジションは残っています。")
                     
         except Exception as e:
@@ -625,7 +624,6 @@ async def check_for_entries(exchange: ccxt_async.Exchange):
             write_trade_log_and_sync(log_data, is_entry=True)
         
         else:
-            # execute_trade内で詳細なエラーログは出力済み
             logging.error(f"❌ {symbol} のエントリー注文の実行に失敗しました。")
 
 async def update_macro_context(exchange: ccxt_async.Exchange):
@@ -670,6 +668,7 @@ async def main_bot_loop(exchange: ccxt_async.Exchange):
             logging.info("--- メインループ完了 ---")
             
         except Exception as e:
+            # 致命的なエラーログには、修正されたExceptionハンドリングが含まれていないため、ここでは予期せぬエラーとして処理
             logging.error(f"致命的なエラーが発生しました。BOTは続行します: {e}", exc_info=True)
             
         finally:
@@ -705,7 +704,7 @@ async def get_status():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.28 - Safety and Frequency Finalized (Patch 36) - WINRATE_PATCH", # バージョン更新
+        "bot_version": "v19.0.29 - Critical Fixes and Win-Rate Patch", # バージョン更新
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         # last_success_time は、LAST_SUCCESS_TIMEが初期値(0.0)でない場合にのみフォーマットする
