@@ -1,10 +1,9 @@
 # ====================================================================================
 # Apex BOT v19.0.28 - Safety, Frequency & CCXT Finalized (Patch 37)
 # 
-# 💡 【改良点】
-# 1. calculate_indicators関数に、SMA200, RSI, MACD, OBV, BBands, 価格構造(LL20)の計算を完全に実装。
-# 2. analyze_signals関数に、定義された定数に基づき、全テクニカル要因を評価し、動的にスコアとRRRを決定するロジックを完全に実装。
-# 3. get_score_breakdown関数が必要とするtech_dataをanalyze_signalsで完全に生成するように修正。
+# 💡 【最新改良点】
+# 1. タイムフレームに '1m' (1分足) と '5m' (5分足) を追加し、分析対象を拡張。
+# 2. すべての分析ロジック（スコアリング、SL/TP設定）が新しいタイムフレームに適用されるように設定。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -64,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)を40に引き上げ
-LOOP_INTERVAL = 60 * 10             # メインループの実行間隔 (秒) - 10分ごと
+LOOP_INTERVAL = 60                  # メインループの実行間隔 (秒) - 1分ごと
 ANALYSIS_ONLY_INTERVAL = 60 * 60    # 分析専用通知の実行間隔 (秒) - 1時間ごと
 WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
 MONITOR_INTERVAL = 10               # ポジション監視ループの実行間隔 (秒)
@@ -116,10 +115,9 @@ IS_CLIENT_READY: bool = False
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
 SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン (通常時の値 2-3銘柄/日を想定)
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
-REQUIRED_OHLCV_LIMITS = {'15m': 500, '1h': 500, '4h': 500} # 取得するOHLCVの足数
 
 # テクニカル分析定数 (v19.0.28ベース)
-TARGET_TIMEFRAMES = ['15m', '1h', '4h']
+TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] # ★1分足と5分足を追加★
 BASE_SCORE = 0.60                   # ベースとなる取引基準点 (60点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
 LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンド逆行時のペナルティ
@@ -129,6 +127,9 @@ MACD_CROSS_PENALTY = 0.15           # MACDが不利なクロス/発散時のペ�
 LIQUIDITY_BONUS_MAX = 0.06          # 流動性(板の厚み)による最大ボーナス
 FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ
 FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設定
+
+# 取得するOHLCVの足数
+REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # ★1分足と5分足の足数を設定★
 
 # 市場環境に応じた動的閾値調整のための定数 (ユーザー要望に合わせて調整 - Patch 36確定)
 FGI_SLUMP_THRESHOLD = -0.02         # FGIプロキシがこの値未満の場合、市場低迷と見なす
