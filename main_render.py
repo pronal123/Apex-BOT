@@ -1,11 +1,11 @@
 # ====================================================================================
 # Apex BOT v19.0.28 - Safety, Frequency & CCXT Finalized (Patch 37)
 #
-# 修正ポイント:
-# 1. 【ログ強化】CCXTエラー（認証、レート制限、ネットワークなど）の個別捕捉を追加。
-# 2. 【MEXC対応】最小取引数量と精度を考慮した自動数量調整ロジックを追加。
-# 3. 【バージョン更新】全てのバージョン情報を Patch 37 に更新。
-# 4. 【致命的修正】ccxt_errors NameErrorを修正し、ccxtから直接エラークラスを使用するように変更しました。
+# 改良点:
+# 1. 【WebShare変更】FTPからHTTP POST (JSON送信) にロジックを変更。
+# 2. 【シンボル除外】MEXCに存在しない銘柄 (MATIC, FTM, EOS, MKR, THETA) をDEFAULT_SYMBOLSから除外。
+# 3. 【FIX】main_bot_loop内でLAST_WEBSHARE_UPLOAD_TIMEをglobal宣言し、UnboundLocalErrorを解消。
+# 4. 【FIX】execute_tradeのfilled_usdt計算でNoneチェックを追加し、TypeErrorを解消。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -29,12 +29,9 @@ import sys
 import random
 import json
 import re
-import ftplib 
+# import ftplib  # 🚨 FTPロジック削除に伴い不要だが、既存コードに合わせてコメントアウトまたは削除
 import uuid 
-
-# ★修正: CCXTエラークラスはccxtモジュールに直接マッピングされているため、import ccxt.base.errors は不要★
-import math # 数値計算ライブラリは残す
-# ccxt.AuthenticationError など、ccxtモジュールに存在するクラスを直接利用します。
+import math # 数値計算ライブラリ
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -52,13 +49,20 @@ logging.basicConfig(
 JST = timezone(timedelta(hours=9))
 
 # 出来高TOP40に加えて、主要な基軸通貨をDefaultに含めておく (現物シンボル形式 BTC/USDT)
+# 🚨 修正: MEXCに存在しない銘柄を削除
 DEFAULT_SYMBOLS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT",
-    "DOGE/USDT", "DOT/USDT", "TRX/USDT", "MATIC/USDT", 
+    "DOGE/USDT", "DOT/USDT", "TRX/USDT", 
+    # "MATIC/USDT", # 削除
     "LTC/USDT", "AVAX/USDT", "LINK/USDT", "UNI/USDT", "ETC/USDT", "BCH/USDT",
-    "NEAR/USDT", "ATOM/USDT", "FTM/USDT", "ALGO/USDT", "XLM/USDT", "SAND/USDT",
-    "GALA/USDT", "FIL/USDT", "EOS/USDT", "AXS/USDT", "MANA/USDT", "AAVE/USDT",
-    "MKR/USDT", "THETA/USDT", "FLOW/USDT", "IMX/USDT", 
+    "NEAR/USDT", "ATOM/USDT", 
+    # "FTM/USDT", # 削除
+    "ALGO/USDT", "XLM/USDT", "SAND/USDT",
+    "GALA/USDT", "FIL/USDT", 
+    # "EOS/USDT", # 削除
+    "AXS/USDT", "MANA/USDT", "AAVE/USDT",
+    # "MKR/USDT", "THETA/USDT", # 削除
+    "FLOW/USDT", "IMX/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)を40に引き上げ
 LOOP_INTERVAL = 60 * 10             # メインループの実行間隔 (秒) - 10分ごと
@@ -86,11 +90,16 @@ if BASE_TRADE_SIZE_USDT < 10:
     logging.warning("⚠️ BASE_TRADE_SIZE_USDTが10 USDT未満です。ほとんどの取引所の最小取引額を満たさない可能性があります。")
 
 
-# 💡 WEBSHARE設定 (FTP/WebDAVなど、外部ログストレージを想定)
-WEBSHARE_HOST = os.getenv("WEBSHARE_HOST")
-WEBSHARE_PORT = int(os.getenv("WEBSHARE_PORT", "21")) # デフォルトはFTPポート
-WEBSHARE_USER = os.getenv("WEBSHARE_USER")
-WEBSHARE_PASS = os.getenv("WEBSHARE_PASS")
+# 💡 WEBSHARE設定 (HTTP POSTへ変更)
+WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") # デフォルトはHTTPに変更
+WEBSHARE_POST_URL = os.getenv("WEBSHARE_POST_URL", "http://your-webshare-endpoint.com/upload") # HTTP POST用のエンドポイント
+
+# 削除: FTP関連の定数
+# WEBSHARE_HOST = os.getenv("WEBSHARE_HOST")
+# WEBSHARE_PORT = int(os.getenv("WEBSHARE_PORT", "21"))
+# WEBSHARE_USER = os.getenv("WEBSHARE_USER")
+# WEBSHARE_PASS = os.getenv("WEBSHARE_PASS")
+
 
 # グローバル変数 (状態管理用)
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
@@ -600,69 +609,37 @@ def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -
     except Exception as e:
         logging.error(f"❌ ログ書き込みエラー: {e}", exc_info=True)
 
-def _sync_ftp_upload(local_file: str, remote_file: str):
-    """ 同期的にFTPアップロードを実行するヘルパー関数。 asyncio.to_threadで使用される。 """
-    if not WEBSHARE_HOST or not WEBSHARE_USER or not WEBSHARE_PASS:
-        logging.error("❌ WEBSHARE設定 (HOST/USER/PASS) が不足しています。")
-        return False
-    if not os.path.exists(local_file):
-        logging.warning(f"⚠️ ローカルファイル {local_file} が見つかりません。アップロードをスキップします。")
-        return True # ファイルがないのはエラーではない
-    try:
-        # FTP接続とログイン
-        ftp = ftplib.FTP()
-        # 💡 タイムアウトを30秒に延長 (FTPタイムアウト対策)
-        ftp.connect(WEBSHARE_HOST, WEBSHARE_PORT, timeout=30)
-        ftp.login(WEBSHARE_USER, WEBSHARE_PASS)
-        # ファイルのアップロード (バイナリモード)
-        # リモートパスは /<filename> の形式を想定
-        ftp.storbinary(f'STOR {remote_file}', open(local_file, 'rb'))
-        ftp.quit()
-        return True
-    except ftplib.all_errors as e:
-        logging.error(f"❌ FTPアップロードエラー ({WEBSHARE_HOST}): {e}")
-        return False
-    except Exception as e:
-        logging.error(f"❌ ログアップロードの予期せぬエラー: {e}")
-        return False
+
+# ====================================================================================
+# WEBSHARE FUNCTION (HTTP POST) - 🚨 FTPロジックをこの関数に置き換え
+# ====================================================================================
+
+async def send_webshare_update(data: Dict[str, Any]):
+    """取引データをHTTP POSTで外部サーバーに送信する"""
     
-async def upload_logs_to_webshare():
-    """ローカルログファイルを外部ストレージ (WebShare/FTP) にアップロードする"""
-    if not WEBSHARE_HOST:
-        logging.info("ℹ️ WEBSHARE HOSTが設定されていません。ログアップロードをスキップします。")
-        return 
-    
-    log_files = [
-        "apex_bot_trade_signal_log.jsonl",
-        "apex_bot_hourly_analysis_log.jsonl",
-        "apex_bot_trade_exit_log.jsonl",
-    ]
-    now_jst = datetime.now(JST)
-    upload_timestamp = now_jst.strftime("%Y%m%d_%H%M%S")
+    if WEBSHARE_METHOD == "HTTP":
+        if not WEBSHARE_POST_URL or "your-webshare-endpoint.com/upload" in WEBSHARE_POST_URL:
+            logging.warning("⚠️ WEBSHARE_POST_URLが設定されていません。またはデフォルト値のままです。送信をスキップします。")
+            return
 
-    logging.info(f"📤 WEBSHAREログアップロード処理を開始します...")
+        try:
+            # JSONシリアライズエラーを回避するために辞書をクリーニング
+            cleaned_data = _to_json_compatible(data)
+            
+            # HTTP POSTで送信 (requestsはブロッキングなので、asyncio.to_threadで実行)
+            response = await asyncio.to_thread(requests.post, WEBSHARE_POST_URL, json=cleaned_data, timeout=10)
+            response.raise_for_status() # 200以外のステータスコードはエラーにする
 
-    tasks = []
-    for log_file in log_files:
-        if os.path.exists(log_file):
-            # リモートファイル名にはタイムスタンプとファイル名を含める
-            remote_filename = f"apex_log_{upload_timestamp}_{log_file}"
-            # 同期FTP処理を別スレッドで実行
-            tasks.append(
-                asyncio.to_thread(_sync_ftp_upload, log_file, remote_filename)
-            )
+            logging.info(f"✅ WebShareデータ (HTTP POST) を送信しました。ステータス: {response.status_code}")
 
-    if not tasks:
-        logging.info("ℹ️ アップロード対象のログファイルがありませんでした。")
-        return
-        
-    # 全てのタスクを並行実行
-    results = await asyncio.gather(*tasks)
+        except requests.exceptions.RequestException as e:
+            logging.error(f"❌ WebShare (HTTP POST) エラー: {e}")
+            await send_telegram_notification(f"🚨 <b>WebShareエラー (HTTP POST)</b>\nデータ送信に失敗しました: <code>{e}</code>")
 
-    if all(results):
-        logging.info(f"✅ すべてのログファイル ({len(tasks)} 件) を WEBSHARE にアップロードしました。")
     else:
-        logging.error("❌ 一部またはすべてのログファイルの WEBSHARE へのアップロードに失敗しました。")
+        logging.warning("⚠️ WEBSHARE_METHOD が 'HTTP' 以外に設定されています。WebShare送信をスキップします。")
+        
+# 🚨 以前の _sync_ftp_upload と upload_logs_to_webshare は削除されました
 
 
 # ====================================================================================
@@ -768,7 +745,12 @@ async def adjust_order_amount(symbol: str, target_usdt_size: float) -> Optional[
     adjusted_amount = target_base_amount
     if amount_precision_value is not None and amount_precision_value > 0:
         # 小数点以下の桁数を計算
-        precision_places = int(round(-math.log10(amount_precision_value)))
+        # CCXTのprecisionは小数点以下の桁数ではなく、ステップサイズ(例: 0.0001)で提供されることが多い
+        try:
+             precision_places = int(round(-math.log10(amount_precision_value)))
+        except ValueError:
+             # precision_valueがゼロや非数値の場合
+             precision_places = 8 
         
         # 指定された桁数に切り捨て (floor)
         adjusted_amount = math.floor(target_base_amount * math.pow(10, precision_places)) / math.pow(10, precision_places)
@@ -813,7 +795,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
         df = df.set_index('timestamp')
         return df
 
-    # 💡 CCXTエラーハンドリングの強化 (ccxt_errors -> ccxt に修正)
+    # 💡 CCXTエラーハンドリングの強化
     except ccxt.RequestTimeout as e:
         logging.error(f"❌ CCXTエラー (RequestTimeout): {symbol} ({timeframe}). APIコールがタイムアウトしました。{e}")
     except ccxt.RateLimitExceeded as e:
@@ -936,12 +918,18 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
             logging.info(f"✅ 注文実行成功: {symbol} {action} Market. 数量: {adjusted_amount:.8f}")
 
         # ポジション管理用の結果を整形
+        
+        # 🚨 FIX: NoneTypeエラー回避のための修正
+        filled_amount = order.get('filled')
+        price_used = order.get('price')
+        
         trade_result = {
             'status': 'ok',
             'order_id': order.get('id'),
-            'filled_amount': order.get('filled', 0.0),
-            'filled_usdt': order.get('cost', order.get('filled', 0.0) * order.get('price', entry_price)), 
-            'entry_price': order.get('price', entry_price),
+            'filled_amount': filled_amount,
+            # 🐛 修正: filled/priceがNoneの場合に備え、Noneチェックを追加
+            'filled_usdt': order.get('cost', (filled_amount if filled_amount is not None else 0.0) * (price_used if price_used is not None else entry_price)), 
+            'entry_price': price_used if price_used is not None else entry_price,
             'stop_loss': signal.get('stop_loss'),
             'take_profit': signal.get('take_profit'),
         }
@@ -986,6 +974,8 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
 async def main_bot_loop():
     """ボットのメイン実行ループ"""
     global LAST_SUCCESS_TIME, IS_CLIENT_READY, CURRENT_MONITOR_SYMBOLS, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME
+    # 🚨 FIX: UnboundLocalErrorを解消するためにglobal宣言を追加
+    global LAST_WEBSHARE_UPLOAD_TIME 
 
     # 1. CCXTクライアントの初期化/再確認
     if not IS_CLIENT_READY:
@@ -1080,9 +1070,17 @@ async def main_bot_loop():
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
-    # 8. ログの外部アップロード
+    # 8. ログの外部アップロード (WebShare - HTTP POSTへ変更)
     if now - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
-        await upload_logs_to_webshare()
+        logging.info("WebShareデータをアップロードします (HTTP POST)。")
+        webshare_data = {
+            "timestamp": datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+            "positions": OPEN_POSITIONS,
+            "analysis_signals": LAST_ANALYSIS_SIGNALS,
+            "global_context": GLOBAL_MACRO_CONTEXT,
+            "is_test_mode": TEST_MODE,
+        }
+        await send_webshare_update(webshare_data)
         LAST_WEBSHARE_UPLOAD_TIME = now
 
 
