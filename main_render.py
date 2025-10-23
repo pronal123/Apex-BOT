@@ -630,7 +630,11 @@ async def fetch_account_status() -> Dict:
 
     try:
         # 💡【前回の修正箇所】MEXCで fetch_balance({'type': 'future'}) がエラーになるため、引数なしで呼び出す。
-        balance = await EXCHANGE_CLIENT.fetch_balance()
+        params = {}
+        if EXCHANGE_CLIENT.id == 'mexc':
+             params = {'type': 'future'} 
+
+        balance = await EXCHANGE_CLIENT.fetch_balance(params=params)
         
         # MEXCの場合、USDT建てのフューチャー残高 (equity/total) を総資産として扱う
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
