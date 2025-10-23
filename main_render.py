@@ -1,11 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)
+# Apex BOT v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)
 #
 # 改良・修正点:
 # 1. 【ロジック調整】BASE_SCORE, 動的閾値, ペナルティ値を調整し、市場環境に応じて
 #    取引頻度を制御するロジックを強化。 (低迷: 0-1, 通常: 2-3, 活発: 4+ 回/日を目標)
-# 2. 【機能修正】メインループ内でハードコードされていた恐怖・貪欲指数 (FGI) を外部APIから動的に取得するように修正。
-# 3. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
+# 2. 【機能追加】流動性ボーナスを固定値から、**オーダーブックに基づく動的計算**に変更。
+# 3. 【機能修正】メインループ内でハードコードされていた恐怖・貪欲指数 (FGI) を外部APIから動的に取得するように修正。
+# 4. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -131,7 +132,7 @@ RSI_MOMENTUM_LOW = 40               # RSIが40以下でロングモメンタム�
 # ★調整: MACDが不利なクロス/発散時のペナルティを増加★
 MACD_CROSS_PENALTY = 0.20           # MACDが不利なクロス/発散時のペナルティ (0.20 <- 0.15)
 
-# ★調整: 流動性ボーナスを微減 (仮想値のため)★
+# ★修正: 流動性ボーナスを動的に適用するため、これは最大値とする
 LIQUIDITY_BONUS_MAX = 0.05          # 流動性(板の厚み)による最大ボーナス (0.05 <- 0.06)
 FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ
 FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設定
@@ -156,7 +157,7 @@ VOLATILITY_BB_PENALTY_THRESHOLD = 0.01
 OBV_MOMENTUM_BONUS = 0.05           # 0.05 <- 0.04
 
 # ====================================================================================
-# UTILITIES & FORMATTING (変更なし)
+# UTILITIES & FORMATTING
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -241,9 +242,12 @@ def get_score_breakdown(signal: Dict) -> str:
         breakdown_list.append(f"  - ✅ 出来高/OBV確証: <code>+{obv_bonus*100:.1f}</code> 点")
     
     # 4. 流動性/マクロ要因
-    liquidity_bonus = tech_data.get('liquidity_bonus_value', 0.0)
-    if liquidity_bonus > 0.0:
-        breakdown_list.append(f"  - ✅ 流動性 (板の厚み) 優位: <code>+{LIQUIDITY_BONUS_POINT_CONST*100:.1f}</code> 点")
+    liquidity_bonus = tech_data.get('liquidity_bonus_value', 0.0) # ★修正: 動的に取得した値
+    if liquidity_bonus > 0.001:
+        breakdown_list.append(f"  - ✅ 流動性 (板の厚み) 優位: <code>+{liquidity_bonus*100:.1f}</code> 点 (最大 {LIQUIDITY_BONUS_POINT_CONST*100:.1f} 点)")
+    elif liquidity_bonus == 0.0:
+        breakdown_list.append(f"  - ⚪ 流動性 (板の厚み) 影響: <code>0.0</code> 点 (スプレッド広すぎ)")
+
         
     fgi_bonus = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
     if abs(fgi_bonus) > 0.001:
@@ -346,7 +350,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)</i>" 
+        f"<i>Bot Ver: v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)</i>" 
     )
 
     return header + macro_section + signal_section + footer
@@ -528,7 +532,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)</i>")
+    message += (f"<i>Bot Ver: v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)</i>")
     return message
 
 
@@ -626,11 +630,11 @@ async def send_webshare_update(data: Dict[str, Any]):
         
 
 # ====================================================================================
-# CCXT & DATA ACQUISITION (変更なし)
+# CCXT & DATA ACQUISITION
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-    """CCXTクライアントを初期化し、市場情報をロードする"""
+    """CCXTクライアントを初期化し、市場情報をロードする (変更なし)"""
     global EXCHANGE_CLIENT, IS_CLIENT_READY
     
     IS_CLIENT_READY = False
@@ -680,10 +684,55 @@ async def initialize_exchange_client() -> bool:
     EXCHANGE_CLIENT = None
     return False
 
+# ★新規追加: 流動性メトリクス (スプレッド係数) の取得関数
+async def fetch_liquidity_metrics(symbol: str) -> float:
+    """
+    オーダーブックのBid-Askスプレッドを計算し、流動性ボーナス係数 (0.0 - 1.0) を返す。
+    スプレッドが狭いほど係数が高くなる。
+    """
+    global EXCHANGE_CLIENT
+    
+    if not EXCHANGE_CLIENT:
+        return 0.0
+
+    try:
+        # オーダーブックを取得 (深さ50件程度)
+        orderbook = await EXCHANGE_CLIENT.fetch_order_book(symbol, limit=50) 
+        
+        best_bid = orderbook['bids'][0][0] if orderbook['bids'] else None
+        best_ask = orderbook['asks'][0][0] if orderbook['asks'] else None
+        
+        if not best_bid or not best_ask or best_bid <= 0 or best_ask <= 0:
+            return 0.0 
+
+        # スプレッド率（％）の計算
+        spread_percent = (best_ask - best_bid) / best_ask 
+        
+        # スプレッド率に応じたボーナス係数 (0.0〜1.0) の決定
+        # 閾値は取引所の平均的な流動性に応じて調整が必要
+        
+        if spread_percent < 0.0001:  # 0.01% 未満: 非常に狭い
+            coefficient = 1.0
+        elif spread_percent < 0.0003: # 0.03% 未満: 狭い
+            coefficient = 0.5
+        elif spread_percent < 0.0005: # 0.05% 未満: 標準
+            coefficient = 0.2
+        else: # 0.05% 以上: 広い
+            coefficient = 0.0
+
+        # logging.info(f"✅ {symbol} 流動性計算: スプレッド {spread_percent*100:.4f}% -> 係数 {coefficient:.1f}")
+        return coefficient
+
+    except ccxt.ExchangeError as e:
+        logging.warning(f"⚠️ 流動性データ取得失敗 ({symbol} - ExchangeError): {e}")
+    except Exception as e:
+        logging.error(f"❌ 流動性データ取得失敗 ({symbol} - 予期せぬエラー): {e}")
+        
+    return 0.0
+
+
 async def fetch_account_status() -> Dict:
-    """
-    CCXTから口座の残高と、USDT以外の保有資産の情報を取得する。
-    """
+    """CCXTから口座の残高と、USDT以外の保有資産の情報を取得する (変更なし)"""
     global EXCHANGE_CLIENT
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -730,7 +779,7 @@ async def fetch_account_status() -> Dict:
     return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
 
-# 最小取引数量の自動調整ロジック
+# 最小取引数量の自動調整ロジック (変更なし)
 async def adjust_order_amount(symbol: str, target_usdt_size: float) -> Optional[float]:
     """
     指定されたUSDT建ての目標取引サイズを、取引所の最小数量および数量精度に合わせて調整する。
@@ -783,7 +832,7 @@ async def adjust_order_amount(symbol: str, target_usdt_size: float) -> Optional[
     return adjusted_amount
 
 async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-    """OHLCVデータを安全に取得する"""
+    """OHLCVデータを安全に取得する (変更なし)"""
     global EXCHANGE_CLIENT
     if not EXCHANGE_CLIENT:
         return None
@@ -814,9 +863,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
     return None
 
 async def fetch_fear_greed_index() -> Dict[str, Any]:
-    """
-    外部API (Alternative.me) からFGIを取得し、プロキシ値を計算する。
-    """
+    """外部API (Alternative.me) からFGIを取得し、プロキシ値を計算する (変更なし)"""
     FGI_API_URL = "https://api.alternative.me/fng/?limit=1"
     
     try:
@@ -896,7 +943,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Optional[Dict]:
+# ★修正: liquidity_coefficient を引数に追加
+def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict, liquidity_coefficient: float) -> Optional[Dict]:
     """分析ロジックに基づき、取引シグナルを生成する"""
     if df.empty or df['SMA200'].isnull().any(): 
         return None
@@ -970,7 +1018,9 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     sentiment_fgi_proxy_bonus = (fgi_proxy / FGI_ACTIVE_THRESHOLD) * FGI_PROXY_BONUS_MAX if abs(fgi_proxy) <= FGI_ACTIVE_THRESHOLD else (FGI_PROXY_BONUS_MAX if fgi_proxy > 0 else -FGI_PROXY_BONUS_MAX)
     
-    liquidity_bonus_value = LIQUIDITY_BONUS_MAX # 0.05
+    # ★修正: 流動性ボーナスを動的に計算 (LIQUIDITY_BONUS_MAX は最大値)
+    liquidity_bonus_value = liquidity_coefficient * LIQUIDITY_BONUS_MAX
+    
     forex_bonus = 0.0 # 機能削除済みのため0.0
 
     
@@ -985,7 +1035,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         (MACD_CROSS_PENALTY - macd_penalty_value) + 
         structural_pivot_bonus + 
         obv_momentum_bonus_value + 
-        liquidity_bonus_value + 
+        liquidity_bonus_value +       # ★修正: 動的に計算された値
         sentiment_fgi_proxy_bonus +
         forex_bonus +
         volatility_penalty_value + 
@@ -998,7 +1048,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         'structural_pivot_bonus': structural_pivot_bonus,
         'macd_penalty_value': macd_penalty_value,
         'obv_momentum_bonus_value': obv_momentum_bonus_value,
-        'liquidity_bonus_value': liquidity_bonus_value,
+        'liquidity_bonus_value': liquidity_bonus_value, # ★修正: 動的に計算された値
         'sentiment_fgi_proxy_bonus': sentiment_fgi_proxy_bonus,
         'forex_bonus': forex_bonus,
         'volatility_penalty_value': volatility_penalty_value,
@@ -1045,9 +1095,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
 
 
 async def liquidate_position(position: Dict, exit_type: str, current_price: float) -> Optional[Dict]:
-    """
-    ポジションを決済する (成行売りを想定)。
-    """
+    """ポジションを決済する (成行売りを想定) (変更なし)"""
     global EXCHANGE_CLIENT
     symbol = position['symbol']
     amount = position['amount']
@@ -1112,7 +1160,7 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
         logging.error(f"❌ 決済失敗 ({exit_type}): {symbol}. {e}", exc_info=True)
         return {'status': 'error', 'error_message': f'決済エラー: {e}'}
 
-# TP/SL監視ロジックの実装
+# TP/SL監視ロジックの実装 (変更なし)
 async def position_management_loop_async():
     """オープンポジションを監視し、SL/TPをチェックして決済する (TP/SL監視更新)"""
     global OPEN_POSITIONS, GLOBAL_MACRO_CONTEXT
@@ -1170,9 +1218,7 @@ async def position_management_loop_async():
 
 
 async def execute_trade(signal: Dict) -> Optional[Dict]:
-    """
-    取引シグナルに基づき、取引所に対して注文を実行する。
-    """
+    """取引シグナルに基づき、取引所に対して注文を実行する (変更なし)"""
     global OPEN_POSITIONS, EXCHANGE_CLIENT, IS_CLIENT_READY
     
     symbol = signal.get('symbol')
@@ -1287,15 +1333,22 @@ async def main_bot_loop():
 
     logging.info(f"--- 💡 {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} - BOT LOOP START (M1 Frequency) ---")
 
-    new_signals: List[Dict] = []
+    all_signals: List[Dict] = []
     
     # マクロコンテキストの動的取得 (FGI)
     GLOBAL_MACRO_CONTEXT = await fetch_fear_greed_index()
     current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
     
-    # ポジション管理は position_monitor_scheduler が別で実行
+    # 流動性取得のタスクを並列で実行
+    liquidity_tasks = {symbol: fetch_liquidity_metrics(symbol) for symbol in CURRENT_MONITOR_SYMBOLS}
+    liquidity_results = await asyncio.gather(*liquidity_tasks.values())
+    
+    # 結果をシンボルにマップ
+    symbol_liquidity = dict(zip(CURRENT_MONITOR_SYMBOLS, liquidity_results))
 
     for symbol in CURRENT_MONITOR_SYMBOLS:
+        liquidity_coefficient = symbol_liquidity.get(symbol, 0.0) # 係数 (0.0 - 1.0)
+        
         for timeframe in TARGET_TIMEFRAMES:
             limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 500)
             df = await fetch_ohlcv_safe(symbol, timeframe=timeframe, limit=limit)
@@ -1305,17 +1358,22 @@ async def main_bot_loop():
             
             df = calculate_indicators(df)
             
-            signal = analyze_signals(df, symbol, timeframe, GLOBAL_MACRO_CONTEXT)
+            # ★修正: 流動性係数を analyze_signals に渡す
+            signal = analyze_signals(df, symbol, timeframe, GLOBAL_MACRO_CONTEXT, liquidity_coefficient)
             
             if signal and signal['score'] >= current_threshold:
                 if time.time() - LAST_SIGNAL_TIME.get(symbol, 0.0) > TRADE_SIGNAL_COOLDOWN:
-                    new_signals.append(signal)
+                    all_signals.append(signal)
                     LAST_SIGNAL_TIME[symbol] = time.time()
                 else:
                     logging.info(f"スキップ: {symbol} はクールダウン期間中です。")
 
 
-    LAST_ANALYSIS_SIGNALS = sorted(new_signals, key=lambda s: s.get('score', 0.0), reverse=True)[:TOP_SIGNAL_COUNT] 
+    # 取引は最もスコアの高いシグナルから順に行う
+    all_signals.sort(key=lambda s: s.get('score', 0.0), reverse=True)
+    
+    # 通知用のシグナルはトップ3
+    LAST_ANALYSIS_SIGNALS = all_signals[:TOP_SIGNAL_COUNT] 
 
     for signal in LAST_ANALYSIS_SIGNALS:
         symbol = signal['symbol']
@@ -1336,17 +1394,18 @@ async def main_bot_loop():
     
     # 6. 分析専用通知 (1時間ごと)
     if now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME >= ANALYSIS_ONLY_INTERVAL:
-        if LAST_ANALYSIS_SIGNALS or not IS_FIRST_MAIN_LOOP_COMPLETED:
+        # 通知対象となるシグナルは、クールダウンが考慮されていない all_signals を使用
+        if all_signals or not IS_FIRST_MAIN_LOOP_COMPLETED:
             await send_telegram_notification(
                 format_analysis_only_message(
-                    LAST_ANALYSIS_SIGNALS, 
+                    all_signals, 
                     GLOBAL_MACRO_CONTEXT, 
                     current_threshold, 
                     len(CURRENT_MONITOR_SYMBOLS)
                 )
             )
             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
-            log_signal({'signals': LAST_ANALYSIS_SIGNALS, 'macro': GLOBAL_MACRO_CONTEXT}, 'Hourly Analysis')
+            log_signal({'signals': all_signals, 'macro': GLOBAL_MACRO_CONTEXT}, 'Hourly Analysis')
 
     # 7. 初回起動完了通知
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
@@ -1358,7 +1417,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)"
+                "v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)"
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1379,7 +1438,7 @@ async def main_bot_loop():
 
     # 9. 最終処理
     LAST_SUCCESS_TIME = time.time()
-    logging.info(f"--- 💡 BOT LOOP END. Positions: {len(OPEN_POSITIONS)}, New Signals: {len(LAST_ANALYSIS_SIGNALS)} ---")
+    logging.info(f"--- 💡 BOT LOOP END. Positions: {len(OPEN_POSITIONS)}, Total Signals Found: {len(all_signals)} ---")
 
 
 # ====================================================================================
@@ -1397,7 +1456,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)",
+        "bot_version": "v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)",
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME > 0 else "N/A",
