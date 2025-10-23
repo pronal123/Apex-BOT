@@ -1,9 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)
+# Apex BOT v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Hourly Status Report)
 #
 # 改良・修正点:
-# 1. 【機能修正】グローバルマクロ分析において、ダミーだったFGI (恐怖・貪欲指数) を外部APIから実際に取得するように修正。
-# 2. 【ロジック維持】シグナルスコアとテクニカル要因に基づき、SL/TPを動的に設定するロジックを維持。
+# 1. 【機能修正】1時間ごとの「分析通知」を拡張し、「 hourly Status Report 」に変更。残高、管理ポジション、現物保有資産を必ず含めるように修正。
+# 2. 【ロジック修正】 hourly 通知をシグナル有無にかかわらず、1時間ごとに無条件で実行するように修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -126,16 +126,16 @@ FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
-SIGNAL_THRESHOLD_ACTIVE = 0.75      
+SIGNAL_THRESHOLD_SLUMP = 0.70       
+SIGNAL_THRESHOLD_NORMAL = 0.65      
+SIGNAL_THRESHOLD_ACTIVE = 0.60      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
 OBV_MOMENTUM_BONUS = 0.04           
 
 # ====================================================================================
-# UTILITIES & FORMATTING (変更なし)
+# UTILITIES & FORMATTING
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -235,21 +235,61 @@ def get_score_breakdown(signal: Dict) -> str:
     return "\n".join(breakdown_list)
 
 
-def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, current_threshold: float, monitoring_count: int) -> str:
-    """1時間ごとの分析専用メッセージを作成する"""
+# ★修正: account_statusを引数に追加し、口座情報をメッセージに含めるように変更
+def format_analysis_only_message(
+    all_signals: List[Dict], 
+    macro_context: Dict, 
+    current_threshold: float, 
+    monitoring_count: int,
+    account_status: Dict # ★新規追加
+) -> str:
+    """1時間ごとの分析専用メッセージ (口座状況を含む) を作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     sorted_signals = sorted(all_signals, key=lambda s: s.get('score', 0.0), reverse=True)
     
     header = (
-        f"📊 **Apex Market Snapshot (Hourly Analysis)**\n"
+        f"📊 **Apex Hourly Status Report**\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - **確認日時**: {now_jst} (JST)\n"
-        f"  - **取引ステータス**: <b>分析通知のみ</b>\n"
         f"  - **対象銘柄数**: <code>{monitoring_count}</code>\n"
         f"  - **監視取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code>\n"
-        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
+        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
     )
+
+    # 💰 口座ステータスセクション
+    balance_section = f"💰 <b>口座ステータス</b>\n"
+    if account_status.get('error'):
+        balance_section += f"<pre>⚠️ ステータス取得失敗 (セキュリティのため詳細なエラーは表示しません。ログを確認してください)</pre>\n"
+    else:
+        balance_section += (
+            f"  - **USDT残高**: <code>{format_usdt(account_status['total_usdt_balance'])}</code> USDT\n"
+        )
+        
+        # ボットが管理しているポジション
+        if OPEN_POSITIONS:
+            total_managed_value = sum(p['filled_usdt'] for p in OPEN_POSITIONS)
+            balance_section += (
+                f"  - **管理中ポジション**: <code>{len(OPEN_POSITIONS)}</code> 銘柄 (投入合計: <code>{format_usdt(total_managed_value)}</code> USDT)\n"
+            )
+            for i, pos in enumerate(OPEN_POSITIONS[:3]): # Top 3のみ表示
+                base_currency = pos['symbol'].replace('/USDT', '')
+                balance_section += f"    - Top {i+1}: {base_currency} (SL: {format_usdt(pos['stop_loss'])} / TP: {format_usdt(pos['take_profit'])})\n"
+            if len(OPEN_POSITIONS) > 3:
+                balance_section += f"    - ...他 {len(OPEN_POSITIONS) - 3} 銘柄\n"
+        else:
+             balance_section += f"  - **管理中ポジション**: <code>なし</code>\n"
+
+        # CCXTから取得したがボットが管理していないポジション（現物保有資産）
+        open_ccxt_positions = [p for p in account_status['open_positions'] if p['usdt_value'] >= 10]
+        if open_ccxt_positions:
+             ccxt_value = sum(p['usdt_value'] for p in open_ccxt_positions)
+             balance_section += (
+                 f"  - **現物保有資産**: <code>{len(open_ccxt_positions)}</code> 銘柄 (概算価値: <code>{format_usdt(ccxt_value)}</code> USDT)\n"
+             )
+    
+    balance_section += f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
+    # 💰 口座ステータスセクション 終了
 
     fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
@@ -316,10 +356,10 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)</i>" 
+        f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Hourly Status Report)</i>" 
     )
 
-    return header + macro_section + signal_section + footer
+    return header + balance_section + macro_section + signal_section + footer
 
 def format_startup_message(
     account_status: Dict, 
@@ -496,7 +536,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)</i>")
+    message += (f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Hourly Status Report)</i>")
     return message
 
 
@@ -649,8 +689,8 @@ async def initialize_exchange_client() -> bool:
     return False
 
 async def fetch_account_status() -> Dict:
-    """CCXTから口座の残高と、USDT以外の保有資産の情報を取得する。 (変更なし)"""
-    global EXCHANGE_CLIENT
+    """CCXTから口座の残高と、USDT以外の保有資産の情報を取得する。"""
+    global EXCHANGE_CLIENT, OPEN_POSITIONS
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
         logging.error("❌ 口座ステータス取得失敗: CCXTクライアントが準備できていません。")
@@ -661,10 +701,17 @@ async def fetch_account_status() -> Dict:
         
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0)
         open_positions = []
+        
+        # ボットが管理していない現物ポジションをCCXTから取得
         for currency, amount in balance.get('total', {}).items():
             if currency not in ['USDT', 'USD'] and amount is not None and amount > 0.000001: 
+                symbol = f"{currency}/USDT"
+                
+                # ボットが管理中のポジションは除外
+                if symbol in [p['symbol'] for p in OPEN_POSITIONS]:
+                    continue
+                    
                 try:
-                    symbol = f"{currency}/USDT"
                     if symbol not in EXCHANGE_CLIENT.markets:
                         continue 
                         
@@ -682,7 +729,7 @@ async def fetch_account_status() -> Dict:
                     
         return {
             'total_usdt_balance': total_usdt_balance,
-            'open_positions': open_positions,
+            'open_positions': open_positions, # ボット管理外の現物保有資産
             'error': False
         }
 
@@ -778,7 +825,6 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
 
     return None
 
-# ★新規追加: FGIデータ取得関数★
 async def fetch_fgi_data() -> Dict[str, Any]:
     """
     外部API (Alternative.me) から現在の恐怖・貪欲指数(FGI)を取得する。
@@ -898,6 +944,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         # 2. TP (リワード幅) の動的設定 (総合スコアを考慮)
         BASE_RRR = 1.5  
         MAX_SCORE_FOR_RRR = 0.85
+        SIGNAL_THRESHOLD = get_current_threshold(macro_context)
         MAX_RRR = 3.0
         
         if score > SIGNAL_THRESHOLD:
@@ -1173,7 +1220,7 @@ async def main_bot_loop():
 
     logging.info(f"--- 💡 {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} - BOT LOOP START (M1 Frequency) ---")
 
-    # ★修正: FGIデータを取得し、GLOBAL_MACRO_CONTEXTを更新★
+    # FGIデータを取得し、GLOBAL_MACRO_CONTEXTを更新
     GLOBAL_MACRO_CONTEXT = await fetch_fgi_data() 
     current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
     
@@ -1220,19 +1267,24 @@ async def main_bot_loop():
             
     now = time.time()
     
-    # 6. 分析専用通知 (1時間ごと)
+    # 6. 分析専用通知 (1時間ごと) - ユーザーの要望に基づき、無条件で口座情報と市場状況を報告
     if now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME >= ANALYSIS_ONLY_INTERVAL:
-        if LAST_ANALYSIS_SIGNALS or not IS_FIRST_MAIN_LOOP_COMPLETED:
-            await send_telegram_notification(
-                format_analysis_only_message(
-                    LAST_ANALYSIS_SIGNALS, 
-                    GLOBAL_MACRO_CONTEXT, 
-                    current_threshold, 
-                    len(CURRENT_MONITOR_SYMBOLS)
-                )
+        
+        # 口座状況の取得
+        account_status = await fetch_account_status() 
+        
+        # 1時間ごとに無条件で実行するように修正
+        await send_telegram_notification(
+            format_analysis_only_message(
+                LAST_ANALYSIS_SIGNALS, 
+                GLOBAL_MACRO_CONTEXT, 
+                current_threshold, 
+                len(CURRENT_MONITOR_SYMBOLS),
+                account_status # ★新規追加
             )
-            LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
-            log_signal({'signals': LAST_ANALYSIS_SIGNALS, 'macro': GLOBAL_MACRO_CONTEXT}, 'Hourly Analysis')
+        )
+        LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
+        log_signal({'signals': LAST_ANALYSIS_SIGNALS, 'macro': GLOBAL_MACRO_CONTEXT}, 'Hourly Analysis')
 
     # 7. 初回起動完了通知
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
@@ -1244,7 +1296,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)"
+                "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Hourly Status Report)"
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1283,7 +1335,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)",
+        "bot_version": "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Hourly Status Report)",
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME > 0 else "N/A",
