@@ -1,12 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)
+# Apex BOT v19.0.32 - High-Freq/TP/SL/M1M5 Added (Patch 42 - Dynamic TP/SL)
 #
 # 改良・修正点:
-# 1. 【ロジック調整】BASE_SCORE, 動的閾値, ペナルティ値を調整し、市場環境に応じて
-#    取引頻度を制御するロジックを強化。 (低迷: 0-1, 通常: 2-3, 活発: 4+ 回/日を目標)
-# 2. 【機能追加】流動性ボーナスを固定値から、**オーダーブックに基づく動的計算**に変更。
+# 1. 【ロジック調整】TP/SL設定を固定パーセンテージから**ボリンジャーバンドに基づく動的なテクニカル支持/抵抗レベル**へ変更。
+# 2. 【ロジック調整】動的TP/SL設定後、最低限のRRR (1.5) を満たさないシグナルは破棄するよう修正。
 # 3. 【機能修正】メインループ内でハードコードされていた恐怖・貪欲指数 (FGI) を外部APIから動的に取得するように修正。
-# 4. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
+# 4. 【機能修正】流動性ボーナスをオーダーブックに基づく動的計算に維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -155,6 +154,9 @@ VOLATILITY_BB_PENALTY_THRESHOLD = 0.01
 
 # ★調整: OBVモメンタムボーナスを微増★
 OBV_MOMENTUM_BONUS = 0.05           # 0.05 <- 0.04
+
+# ★新規追加: テクニカルTP/SLに必要な定数★
+MIN_RR_RATIO = 1.5                  # 最低限必要なリスクリワード比率 (1:1.5)
 
 # ====================================================================================
 # UTILITIES & FORMATTING
@@ -350,7 +352,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)</i>" 
+        f"<i>Bot Ver: v19.0.32 - Dynamic TP/SL (BBands)</i>" 
     )
 
     return header + macro_section + signal_section + footer
@@ -532,7 +534,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)</i>")
+    message += (f"<i>Bot Ver: v19.0.32 - Dynamic TP/SL (BBands)</i>")
     return message
 
 
@@ -684,7 +686,7 @@ async def initialize_exchange_client() -> bool:
     EXCHANGE_CLIENT = None
     return False
 
-# ★新規追加: 流動性メトリクス (スプレッド係数) の取得関数
+# 流動性メトリクス (スプレッド係数) の取得関数 (変更なし)
 async def fetch_liquidity_metrics(symbol: str) -> float:
     """
     オーダーブックのBid-Askスプレッドを計算し、流動性ボーナス係数 (0.0 - 1.0) を返す。
@@ -916,19 +918,26 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     bbands_data = ta.bbands(df['close'], length=20, std=2)
     df = df.join(bbands_data)
     
-    # Key Error回避ロジック
+    # Key Error回避ロジック (BBandsの列名を取得)
     bb_cols = [col for col in df.columns if re.match(r'BBL_\d+_\d+\.\d+|BBL', col)]
     bu_cols = [col for col in df.columns if re.match(r'BBU_\d+_\d+\.\d+|BBU', col)]
+    bm_cols = [col for col in df.columns if re.match(r'BBM_\d+_\d+\.\d+|BBM', col)]
 
-    if not bb_cols or not bu_cols:
+
+    if not bb_cols or not bu_cols or not bm_cols:
         logging.error(f"❌ BBandsの列名が見つかりません。計算をスキップします。columns: {df.columns.tolist()}")
         df['BB_PCT'] = 0.5
         df['BB_WIDTH'] = 0.0
         df['VOL_CHANGE'] = 0.0
+        df['BBL'] = df['close'] 
+        df['BBU'] = df['close']
         return df
 
     BBL_COL = bb_cols[0]
     BBU_COL = bu_cols[0]
+    
+    df['BBL'] = df[BBL_COL]
+    df['BBU'] = df[BBU_COL]
     
     df['BB_PCT'] = (df['close'] - df[BBL_COL]) / (df[BBU_COL] - df[BBL_COL])
     df['BB_WIDTH'] = df[BBU_COL] - df[BBL_COL]
@@ -953,7 +962,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     last_row = df.iloc[-1]
     
     # ----------------------------------------------------
-    # 1. ロングシグナルの基本的なトリガー条件（簡易RSI + SMAトレンド）
+    # 1. ロングシグナルの基本的なトリガー条件
     # ----------------------------------------------------
     
     # 条件1: 価格が長期SMA (200) の上にある
@@ -967,7 +976,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         return None 
     
     # ----------------------------------------------------
-    # 2. スコアリングとペナルティ/ボーナス計算
+    # 2. スコアリングとペナルティ/ボーナス計算 (変更なし)
     # ----------------------------------------------------
     
     score = BASE_SCORE # 0.50
@@ -980,6 +989,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     
     # 2.2. 価格構造/ピボット支持ボーナス
     structural_pivot_bonus = 0.0
+    # BBands下限近く (BB_PCT < 0.1) で直近の安値を更新 (IS_LOWEST_LOW_5) している
     if last_row['BB_PCT'] < 0.1 and last_row['IS_LOWEST_LOW_5']: 
         structural_pivot_bonus = STRUCTURAL_PIVOT_BONUS # 0.05
         
@@ -1018,7 +1028,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     sentiment_fgi_proxy_bonus = (fgi_proxy / FGI_ACTIVE_THRESHOLD) * FGI_PROXY_BONUS_MAX if abs(fgi_proxy) <= FGI_ACTIVE_THRESHOLD else (FGI_PROXY_BONUS_MAX if fgi_proxy > 0 else -FGI_PROXY_BONUS_MAX)
     
-    # ★修正: 流動性ボーナスを動的に計算 (LIQUIDITY_BONUS_MAX は最大値)
+    # 流動性ボーナス
     liquidity_bonus_value = liquidity_coefficient * LIQUIDITY_BONUS_MAX
     
     forex_bonus = 0.0 # 機能削除済みのため0.0
@@ -1035,61 +1045,94 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         (MACD_CROSS_PENALTY - macd_penalty_value) + 
         structural_pivot_bonus + 
         obv_momentum_bonus_value + 
-        liquidity_bonus_value +       # ★修正: 動的に計算された値
+        liquidity_bonus_value +       
         sentiment_fgi_proxy_bonus +
         forex_bonus +
         volatility_penalty_value + 
         rsi_divergence_bonus_value
     )
     
-    # tech_dataの保存 (get_score_breakdown関数で使用)
-    tech_data = {
-        'long_term_reversal_penalty_value': long_term_reversal_penalty_value,
-        'structural_pivot_bonus': structural_pivot_bonus,
-        'macd_penalty_value': macd_penalty_value,
-        'obv_momentum_bonus_value': obv_momentum_bonus_value,
-        'liquidity_bonus_value': liquidity_bonus_value, # ★修正: 動的に計算された値
-        'sentiment_fgi_proxy_bonus': sentiment_fgi_proxy_bonus,
-        'forex_bonus': forex_bonus,
-        'volatility_penalty_value': volatility_penalty_value,
-        'rsi_divergence_bonus_value': rsi_divergence_bonus_value,
-        # 定数を保存
-        'long_term_reversal_penalty_const': LONG_TERM_REVERSAL_PENALTY, 
-        'macd_cross_penalty_const': MACD_CROSS_PENALTY,                 
-        'liquidity_bonus_const': LIQUIDITY_BONUS_MAX                   
-    }
-
-
     # ----------------------------------------------------
-    # 4. 最終フィルタとRRR/SL/TP設定
+    # 4. テクニカルな SL/TP 設定と RRR フィルタリング ★修正箇所★
     # ----------------------------------------------------
-
-    # 簡易的なRRR/SL/TP設定 
-    risk_percent = 0.015 # 1.5% リスク
-    rr_ratio = 2.0       # 1:2 リスクリワード比
     
-    stop_loss = current_price * (1 - risk_percent)
-    take_profit = current_price * (1 + risk_percent * rr_ratio)
+    # E. エントリー価格
+    entry_price = current_price
     
-    # RRRが最低限満たされていること
-    if rr_ratio < 1.0:
+    # SL (ストップロス): 直近のテクニカルな支持レベル (BBL)
+    # SL候補はBBL
+    sl_candidate = last_row['BBL']
+    
+    # SLがエントリー価格より上にある場合、または極端に狭すぎる場合は、直前のローソク足の安値の少し下に設定する
+    if sl_candidate >= entry_price or (entry_price - sl_candidate) / entry_price < 0.005: # 0.5%より狭い場合
+        # 直前のローソク足の安値を支持線として使用 (少し余裕を持たせる)
+        sl_candidate = df['low'].iloc[-2] * 0.999
+        
+    stop_loss = sl_candidate
+    
+    # TP (テイクプロフィット): 直近のテクニカルな抵抗レベル (BBU)
+    # TP候補はBBU
+    tp_candidate = last_row['BBU']
+    
+    # TPがエントリー価格より下にある場合 (通常ありえないが念のため)
+    if tp_candidate <= entry_price:
+        # TPが設定できない場合は、シグナルを破棄
         return None
         
+    take_profit = tp_candidate
+    
+    # RRRの計算
+    risk_amount = entry_price - stop_loss
+    reward_amount = take_profit - entry_price
+    
+    if risk_amount <= 0:
+        # SLがエントリー価格より上に来た場合 (ロジックミスまたは極端な場合)
+        return None 
+        
+    rr_ratio = reward_amount / risk_amount
+    
+    # ----------------------------------------------------
+    # 5. 最終フィルタリング
+    # ----------------------------------------------------
+
+    # フィルタ1: RRRが最低基準 (MIN_RR_RATIO) を満たしているか
+    if rr_ratio < MIN_RR_RATIO:
+        logging.info(f"スキップ: {symbol} ({timeframe}). RRR {rr_ratio:.2f} が最低基準 {MIN_RR_RATIO} を満たしません。")
+        return None
+
     current_threshold = get_current_threshold(macro_context)
     
-    # 最終シグナルとして返す
+    # フィルタ2: スコアが動的閾値を満たしているか
     if score >= current_threshold:
+         
+         # tech_dataの保存 (get_score_breakdown関数で使用)
+        tech_data = {
+            'long_term_reversal_penalty_value': long_term_reversal_penalty_value,
+            'structural_pivot_bonus': structural_pivot_bonus,
+            'macd_penalty_value': macd_penalty_value,
+            'obv_momentum_bonus_value': obv_momentum_bonus_value,
+            'liquidity_bonus_value': liquidity_bonus_value, 
+            'sentiment_fgi_proxy_bonus': sentiment_fgi_proxy_bonus,
+            'forex_bonus': forex_bonus,
+            'volatility_penalty_value': volatility_penalty_value,
+            'rsi_divergence_bonus_value': rsi_divergence_bonus_value,
+            # 定数を保存
+            'long_term_reversal_penalty_const': LONG_TERM_REVERSAL_PENALTY, 
+            'macd_cross_penalty_const': MACD_CROSS_PENALTY,                 
+            'liquidity_bonus_const': LIQUIDITY_BONUS_MAX                   
+        }
+         
          return {
             'symbol': symbol,
             'timeframe': timeframe,
-            'action': 'buy', # 現物ロング（買い）のみを想定
+            'action': 'buy', 
             'score': score,
-            'rr_ratio': rr_ratio,
-            'entry_price': current_price,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
+            'rr_ratio': rr_ratio, # 動的に計算された RRR
+            'entry_price': entry_price,
+            'stop_loss': stop_loss, # 動的に計算された SL
+            'take_profit': take_profit, # 動的に計算された TP
             'lot_size_usdt': BASE_TRADE_SIZE_USDT,
-            'tech_data': tech_data, # ブレークダウンロジックのために埋める
+            'tech_data': tech_data,
         }
     return None
 
@@ -1417,7 +1460,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)"
+                "v19.0.32 - Dynamic TP/SL (BBands)"
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1456,7 +1499,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.31 - High-Freq/TP/SL/M1M5 Added (Patch 41 - Dynamic Liquidity Bonus)",
+        "bot_version": "v19.0.32 - Dynamic TP/SL (BBands)",
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME > 0 else "N/A",
