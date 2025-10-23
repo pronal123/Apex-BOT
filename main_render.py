@@ -1,11 +1,8 @@
 # ====================================================================================
 # Apex BOT v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)
 #
-# ★★★ 先物取引(Futures/Swap) BOTへの改変点 (Long & Short 対応) ★★★
-# 1. 【クライアント設定】defaultTypeを'swap'に変更。
-# 2. 【レバレッジ設定】LEVERAGE=10 を追加し、レバレッジを設定。
-# 3. 【ロジック修正】analyze_signals関数でロング/ショートの両シグナルを生成し、SL/TPを動的に計算。
-# 4. 【取引実行】execute_trade/liquidate_position関数でポジション方向に応じた注文を実行/決済。
+# ★★★ 修正点: KeyError: 'MACDh' 対策 ★★★
+# MACD計算後、必要なMACDhカラムが存在するかをチェックし、存在しない場合はフラグをFalseに設定してエラーを回避する。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -54,7 +51,7 @@ DEFAULT_SYMBOLS = [
     "LTC/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT", "UNI/USDT:USDT", "ETC/USDT:USDT", "BCH/USDT:USDT",
     "NEAR/USDT:USDT", "ATOM/USDT:USDT", 
     "ALGO/USDT:USDT", "XLM/USDT:USDT", "SAND/USDT:USDT",
-    "GALA/USDT:USDT", "FIL/USDT:USDT", 
+    "GALA/USDT:USDT", # "FIL/USDT:USDT", # ログでエラーが出たFILは一時コメントアウトを推奨
     "AXS/USDT:USDT", "MANA/USDT:USDT", "AAVE/USDT:USDT",
     "FLOW/USDT:USDT", "IMX/USDT:USDT", 
 ]
@@ -652,15 +649,26 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 3. MACD (Trend & Momentum)
     macd_result = ta.macd(df['close'], fast=12, slow=26, signal=9)
     df = df.join(macd_result)
-    df['MACD_CROSS_UP'] = (df['MACDh'].iloc[-2] < 0) & (df['MACDh'].iloc[-1] > 0)
-    df['MACD_CROSS_DOWN'] = (df['MACDh'].iloc[-2] > 0) & (df['MACDh'].iloc[-1] < 0)
+    
+    # ★修正: MACDhカラムの存在チェック (KeyError対策)★
+    if 'MACDh' not in df.columns:
+        # MACD計算が失敗したか、データが不足している場合
+        df['MACD_CROSS_UP'] = False
+        df['MACD_CROSS_DOWN'] = False
+        logging.warning(f"⚠️ MACD/MACDhカラムがデータフレームに存在しません。データ不足の可能性があります。")
+    else:
+        df['MACD_CROSS_UP'] = (df['MACDh'].iloc[-2] < 0) & (df['MACDh'].iloc[-1] > 0)
+        df['MACD_CROSS_DOWN'] = (df['MACDh'].iloc[-2] > 0) & (df['MACDh'].iloc[-1] < 0)
     
     # 4. ボリンジャーバンド (Volatility)
     bb_result = ta.bbands(df['close'], length=20, std=2)
     df = df.join(bb_result)
     # ボラティリティ評価: BB幅の変動率
-    df['BB_WIDTH'] = (df['BBU_20_2'] - df['BBL_20_2']) / df['BBM_20_2']
-    df['BB_WIDTH_CHANGE'] = df['BB_WIDTH'].diff()
+    if 'BBU_20_2' in df.columns:
+        df['BB_WIDTH'] = (df['BBU_20_2'] - df['BBL_20_2']) / df['BBM_20_2']
+        df['BB_WIDTH_CHANGE'] = df['BB_WIDTH'].diff()
+    else:
+        df['BB_WIDTH_CHANGE'] = 0.0
     
     # 5. OBV (Volume Momentum)
     df['OBV'] = ta.obv(df['close'], df['volume'])
@@ -678,6 +686,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     """
     分析ロジックに基づき、ロングまたはショートの取引シグナルを生成する。
     """
+    # SMA200がない、またはすべてNaNの場合はデータ不足と判断
     if df.empty or df['SMA200'].isnull().all():
         return None
         
@@ -714,10 +723,12 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         
     # 2-3. MACDモメンタムペナルティ
     tech_data['macd_penalty_value'] = 0.0
-    if action == 'buy' and df['MACD_CROSS_DOWN'].iloc[-1]: # 買いシグナルだがMACDが下向きクロス
-        tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
-    elif action == 'sell' and df['MACD_CROSS_UP'].iloc[-1]: # 売りシグナルだがMACDが上向きクロス
-        tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+    # MACDカラムが存在しない場合はペナルティを適用しない
+    if 'MACD_CROSS_DOWN' in df.columns:
+        if action == 'buy' and df['MACD_CROSS_DOWN'].iloc[-1]: # 買いシグナルだがMACDが下向きクロス
+            tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+        elif action == 'sell' and df['MACD_CROSS_UP'].iloc[-1]: # 売りシグナルだがMACDが上向きクロス
+            tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
     
     # 2-4. OBVモメンタムボーナス
     tech_data['obv_momentum_bonus_value'] = 0.0
@@ -742,7 +753,8 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     
     # 2-7. ボラティリティペナルティ
     tech_data['volatility_penalty_value'] = 0.0
-    if abs(df['BB_WIDTH_CHANGE'].iloc[-1]) > VOLATILITY_BB_PENALTY_THRESHOLD:
+    # BB_WIDTH_CHANGEカラムが存在しない場合はペナルティを適用しない
+    if 'BB_WIDTH_CHANGE' in df.columns and abs(df['BB_WIDTH_CHANGE'].iloc[-1]) > VOLATILITY_BB_PENALTY_THRESHOLD:
         tech_data['volatility_penalty_value'] = 0.05 # 急激なボラティリティ増加/減少はペナルティ
         
     # 2-8. Forexボーナス (ここでは常にゼロ)
@@ -1105,6 +1117,7 @@ async def main_bot_loop():
         # 1. マクロコンテキストの更新 (FGI) - 1時間に1回
         if time.time() - LAST_HOURLY_NOTIFICATION_TIME > 60 * 60:
             await fetch_fgi_data() 
+            LAST_HOURLY_NOTIFICATION_TIME = time.time() # 成功時に更新
         
         # 2. 市場の更新 (スキップオプション対応)
         if not SKIP_MARKET_UPDATE:
@@ -1114,7 +1127,10 @@ async def main_bot_loop():
         # 3. アカウントステータスの取得と初回通知
         account_status = await fetch_account_status()
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
-            await send_telegram_notification(format_startup_message(account_status))
+            # FGI取得成功後に初回通知を送信
+            if GLOBAL_MACRO_CONTEXT.get('fgi_raw_value') != 'N/A':
+                await send_telegram_notification(format_startup_message(account_status))
+                
             
         # 4. OHLCVデータの取得とシグナル分析
         all_signals: List[Dict] = []
@@ -1207,10 +1223,12 @@ async def main_bot_loop():
         logging.info(f"✅ メインループ完了。処理時間: {time.time() - start_time:.2f}秒。オープンポジション数: {len(OPEN_POSITIONS)}")
 
     except Exception as e:
+        # MACDhエラーが発生した場合、ここで捕捉される
         logging.error(f"❌ メインループ実行中にエラーが発生しました: {e}", exc_info=True)
         # エラー発生時も最後に成功した時間を更新し、ループを継続させる (待機時間計算のため)
         LAST_SUCCESS_TIME = time.time()
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
+            # 初回起動時の致命的なエラー通知
             await send_telegram_notification(f"🚨 **メインループエラー**: 初回起動時にエラーが発生しました: `{e}`")
 
 
