@@ -1,8 +1,9 @@
 # ====================================================================================
-# Apex BOT v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)
+# Apex BOT v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)
 #
 # 改良・修正点:
-# 1. 【バグ修正】CCXTのinitialize_exchange_client関数内で、safe_marketに不正な引数 defaultType='future' を渡していた箇所を修正。
+# 1. 【バグ修正】calculate_indicators関数内で、ATR計算結果 (Series) に不適切な多次元インデックス (iloc[:, 0]) を使用していたため、
+#    "Too many indexers" エラーが発生していた問題を修正。Seriesを直接代入するように変更。
 # 2. 【ロジック維持】リスクベースの動的ポジションサイジングとATRに基づく動的SL設定を維持。
 # ====================================================================================
 
@@ -76,7 +77,7 @@ LEVERAGE = 10 # 取引倍率
 TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
-# 💡 リスクベースの動的ポジションサイジング設定 ★変更
+# 💡 リスクベースの動的ポジションサイジング設定 
 # BASE_TRADE_SIZE_USDTはリスクベースサイジングにより無視されますが、互換性のために残します。
 try:
     BASE_TRADE_SIZE_USDT = float(os.getenv("BASE_TRADE_SIZE_USDT", "100")) 
@@ -127,7 +128,7 @@ LIQUIDITY_BONUS_MAX = 0.06
 FGI_PROXY_BONUS_MAX = 0.05         
 FOREX_BONUS_MAX = 0.0               
 
-# ボラティリティ指標 (ATR) の設定 ★追加
+# ボラティリティ指標 (ATR) の設定 
 ATR_LENGTH = 14
 ATR_MULTIPLIER_SL = 2.0 # SLをATRの2.0倍に設定 (動的SLのベース)
 MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
@@ -168,7 +169,7 @@ def format_price(price: float) -> str:
         return f"{price:,.2f}"
     return f"{price:,.8f}".rstrip('0').rstrip('.')
 
-# ★新規追加: 清算価格の計算関数★
+# 清算価格の計算関数
 def calculate_liquidation_price(entry_price: float, leverage: int, side: str = 'long', maintenance_margin_rate: float = MIN_MAINTENANCE_MARGIN_RATE) -> float:
     """
     指定されたエントリー価格、レバレッジ、維持証拠金率に基づき、
@@ -306,8 +307,8 @@ def format_startup_message(
         f"  - **確認日時**: {now_jst} (JST)\n"
         f"  - **取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code> (先物モード / **{LEVERAGE}x**)\n" 
         f"  - **自動売買**: <b>{trade_status}</b>\n"
-        f"  - **取引ロット**: **リスクベースサイジング**\n" # ★変更
-        f"  - **最大リスク/取引**: <code>{MAX_RISK_PER_TRADE_PERCENT*100:.2f}</code> %\n" # ★追加
+        f"  - **取引ロット**: **リスクベースサイジング**\n" 
+        f"  - **最大リスク/取引**: <code>{MAX_RISK_PER_TRADE_PERCENT*100:.2f}</code> %\n" 
         f"  - **監視銘柄数**: <code>{monitoring_count}</code>\n"
         f"  - **BOTバージョン**: <code>{bot_version}</code>\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
@@ -366,7 +367,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     entry_price = signal.get('entry_price', trade_result.get('entry_price', 0.0) if trade_result else 0.0)
     stop_loss = signal.get('stop_loss', trade_result.get('stop_loss', 0.0) if trade_result else 0.0)
     take_profit = signal.get('take_profit', trade_result.get('take_profit', 0.0) if trade_result else 0.0)
-    liquidation_price = signal.get('liquidation_price', 0.0) # ★追加
+    liquidation_price = signal.get('liquidation_price', 0.0) 
     rr_ratio = signal.get('rr_ratio', 0.0)
     
     estimated_wr = get_estimated_win_rate(score)
@@ -395,7 +396,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
                 f"💰 **取引実行結果**\n"
                 f"  - **注文タイプ**: <code>先物 (Future) / 成行買い (Long)</code>\n" 
                 f"  - **レバレッジ**: <code>{LEVERAGE}</code> 倍\n" 
-                f"  - **リスク許容額**: <code>{format_usdt(risk_usdt)}</code> USDT ({MAX_RISK_PER_TRADE_PERCENT*100:.2f}%)\n" # ★追加
+                f"  - **リスク許容額**: <code>{format_usdt(risk_usdt)}</code> USDT ({MAX_RISK_PER_TRADE_PERCENT*100:.2f}%)\n" 
                 f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
                 f"  - **名目約定額**: <code>{format_usdt(filled_usdt_notional)}</code> USDT\n" 
             )
@@ -434,7 +435,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **エントリー**: <code>{format_price(entry_price)}</code>\n"
         f"  - **ストップロス (SL)**: <code>{format_price(stop_loss)}</code>\n"
         f"  - **テイクプロフィット (TP)**: <code>{format_price(take_profit)}</code>\n"
-        f"  - **清算価格 (Liq. Price)**: <code>{format_price(liquidation_price)}</code>\n" # ★追加
+        f"  - **清算価格 (Liq. Price)**: <code>{format_price(liquidation_price)}</code>\n" 
         f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price - stop_loss)}</code> USDT\n"
         f"  - **リワード幅 (TP)**: <code>{format_usdt(take_profit - entry_price)}</code> USDT\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
@@ -450,7 +451,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)</i>") # ★変更
+    message += (f"<i>Bot Ver: v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)</i>") # ★変更
     return message
 
 
@@ -552,7 +553,7 @@ async def send_webshare_update(data: Dict[str, Any]):
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-    """CCXTクライアントを初期化し、市場情報をロードする (バグ修正適用)"""
+    """CCXTクライアントを初期化し、市場情報をロードする (変更なし)"""
     global EXCHANGE_CLIENT, IS_CLIENT_READY
     
     IS_CLIENT_READY = False
@@ -590,7 +591,7 @@ async def initialize_exchange_client() -> bool:
         if EXCHANGE_CLIENT.id == 'mexc':
             symbols_to_set_leverage = []
             for s in CURRENT_MONITOR_SYMBOLS:
-                # 💡【修正箇所】safe_marketに'defaultType'を渡さないように修正 
+                # 💡【前回の修正箇所】safe_marketに'defaultType'を渡さないように修正 
                 market = EXCHANGE_CLIENT.safe_market(s) 
                 if market and market['type'] in ['future', 'swap'] and market['active']:
                     symbols_to_set_leverage.append(market['symbol']) 
@@ -628,8 +629,8 @@ async def fetch_account_status() -> Dict:
         return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
     try:
-        # 先物ウォレットの残高を取得
-        balance = await EXCHANGE_CLIENT.fetch_balance({'type': TRADE_TYPE})
+        # 💡【前回の修正箇所】MEXCで fetch_balance({'type': 'future'}) がエラーになるため、引数なしで呼び出す。
+        balance = await EXCHANGE_CLIENT.fetch_balance()
         
         # MEXCの場合、USDT建てのフューチャー残高 (equity/total) を総資産として扱う
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
@@ -652,7 +653,7 @@ async def fetch_account_status() -> Dict:
 
     return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
-# ★変更: 注文数量調整を base units (数量) で行う関数に更新★
+# 注文数量調整を base units (数量) で行う関数に更新 (変更なし)
 async def adjust_order_amount_by_base_units(symbol: str, target_base_amount: float) -> Optional[float]:
     """
     指定されたBase通貨建ての目標取引数量を、取引所の最小数量および数量精度に合わせて調整する。
@@ -787,49 +788,50 @@ async def fetch_fgi_data() -> Dict[str, Any]:
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """テクニカルインジケーターを計算する (ATRを追加)"""
+    """テクニカルインジケーターを計算する"""
     if df.empty:
         return df
     
     df['SMA200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH)
     
-    # MACDを計算 (変更なし)
+    # MACDを計算
     macd_data = ta.macd(df['close'], fast=12, slow=26, signal=9)
     if macd_data is not None and not macd_data.empty:
         df['MACD'] = macd_data.iloc[:, 0]
         df['MACDh'] = macd_data.iloc[:, 1]
         df['MACDs'] = macd_data.iloc[:, 2]
 
-    # RSIを計算 (変更なし)
+    # RSIを計算
     df['RSI'] = ta.rsi(df['close'], length=14)
     
-    # OBVを計算 (変更なし)
+    # OBVを計算
     df['OBV'] = ta.obv(df['close'], df['volume'])
     
-    # ボリンジャーバンドを計算 (変更なし)
+    # ボリンジャーバンドを計算 
     bbands = ta.bbands(df['close'], length=20, std=2)
     if bbands is not None and not bbands.empty:
         df['BBL'] = bbands.iloc[:, 0] 
         df['BBM'] = bbands.iloc[:, 1] 
         df['BBU'] = bbands.iloc[:, 2] 
         
-    # ATR (Average True Range) を計算 ★新規追加
+    # ATR (Average True Range) を計算 
     atr_data = ta.atr(df['high'], df['low'], df['close'], length=ATR_LENGTH)
     if atr_data is not None and not atr_data.empty:
-        df['ATR'] = atr_data.iloc[:, 0]
+        # 💡 【修正箇所】atr_data は Series のため、iloc[:, 0] はエラー。直接代入する。
+        df['ATR'] = atr_data
     else:
         df['ATR'] = np.nan
     
     return df
 
 def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Optional[Dict]:
-    """分析ロジックに基づき、取引シグナルを生成する (SL設定ロジックをATRベースに修正)"""
+    """分析ロジックに基づき、取引シグナルを生成する (変更なし)"""
 
-    if df.empty or df['SMA200'].isnull().all() or df['close'].isnull().iloc[-1] or df['ATR'].isnull().iloc[-1]: # ★ATRチェック追加
+    if df.empty or df['SMA200'].isnull().all() or df['close'].isnull().iloc[-1] or df['ATR'].isnull().iloc[-1]: 
         return None
         
     current_price = df['close'].iloc[-1]
-    current_atr = df['ATR'].iloc[-1] # ★ATRの取得
+    current_atr = df['ATR'].iloc[-1] 
     
     # 簡易的なロングシグナル (終値がSMA200を上回っているかをチェック)
     if df['SMA200'].iloc[-1] is not None and current_price > df['SMA200'].iloc[-1]:
@@ -866,7 +868,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         
         
         ##############################################################
-        # 動的なSL/TPとRRRの設定ロジック (ATRをSLに使用) ★変更
+        # 動的なSL/TPとRRRの設定ロジック (ATRをSLに使用) 
         ##############################################################
         
         # 1. SL (リスク幅) の動的設定 (ATRに基づく)
@@ -903,7 +905,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         # 最終的なRRRを記録用として算出
         rr_ratio = dynamic_rr_ratio 
         
-        # 3. 清算価格の計算 ★新規追加
+        # 3. 清算価格の計算 
         liquidation_price = calculate_liquidation_price(current_price, LEVERAGE, side='long', maintenance_margin_rate=MIN_MAINTENANCE_MARGIN_RATE)
 
         ##############################################################
@@ -930,7 +932,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
                 'entry_price': current_price,
                 'stop_loss': stop_loss, 
                 'take_profit': take_profit, 
-                'liquidation_price': liquidation_price, # ★追加
+                'liquidation_price': liquidation_price, 
                 'risk_usdt_per_unit': risk_usdt_per_unit, # 1単位あたりのリスク
                 'risk_usdt': max_risk_usdt, # 許容リスク総額
                 'notional_value': notional_value, # 計算された名目価値 (取引サイズ)
@@ -1067,7 +1069,7 @@ async def position_management_loop_async():
 
 async def execute_trade(signal: Dict) -> Optional[Dict]:
     """
-    取引シグナルに基づき、先物取引所に対してロング注文を実行する。 (リスクベースサイジングに更新)
+    取引シグナルに基づき、先物取引所に対してロング注文を実行する。 (変更なし)
     """
     global OPEN_POSITIONS, EXCHANGE_CLIENT, IS_CLIENT_READY
     
@@ -1253,7 +1255,7 @@ async def main_bot_loop():
                     GLOBAL_MACRO_CONTEXT, 
                     len(CURRENT_MONITOR_SYMBOLS), 
                     current_threshold, 
-                    "v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)" 
+                    "v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)" # ★変更
                 )
             )
             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
@@ -1267,7 +1269,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)" 
+                "v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)" # ★変更
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1306,7 +1308,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)", 
+        "bot_version": "v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)", # ★変更
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, # 互換性のため残す
         "max_risk_per_trade_percent": MAX_RISK_PER_TRADE_PERCENT, # ★追加
         "current_equity_usdt": ACCOUNT_EQUITY_USDT, # ★追加
