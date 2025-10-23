@@ -1,9 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)
+# Apex BOT v20.0.5 - Future Trading / 10x Leverage (Patch 47: MEXC fetchBalance Fix Retry)
 #
 # 改良・修正点:
-# 1. 【バグ修正】calculate_indicators関数内で、ATR計算結果 (Series) に不適切な多次元インデックス (iloc[:, 0]) を使用していたため、
-#    "Too many indexers" エラーが発生していた問題を修正。Seriesを直接代入するように変更。
+# 1. 【バグ修正】fetch_account_status関数内で、MEXCクライアント使用時に発生していた 
+#    "mexc fetchBalance() not support self method" エラーを再修正。
+#    fetch_balance() 呼び出し時に、MEXC向けに明示的に 通貨コード: 'USDT' と type='future' の 
+#    params を渡すことで、CCXT内部で適切な先物残高取得ロジックが実行されるように強制した。
 # 2. 【ロジック維持】リスクベースの動的ポジションサイジングとATRに基づく動的SL設定を維持。
 # ====================================================================================
 
@@ -451,7 +453,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)</i>") # ★変更
+    message += (f"<i>Bot Ver: v20.0.5 - Future Trading / 10x Leverage (Patch 47: MEXC fetchBalance Fix Retry)</i>") # ★変更
     return message
 
 
@@ -559,7 +561,7 @@ async def initialize_exchange_client() -> bool:
     IS_CLIENT_READY = False
     
     if not API_KEY or not SECRET_KEY:
-         logging.critical("❌ CCXT初期化スキップ: API_KEY または SECRET_KEY が設定されていません。")
+         logging.critical("❌ CCXT初期化スキップ: APIキー または SECRET_KEY が設定されていません。")
          return False
          
     try:
@@ -629,15 +631,36 @@ async def fetch_account_status() -> Dict:
         return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
     try:
-        # 💡【前回の修正箇所】MEXCで fetch_balance({'type': 'future'}) がエラーになるため、引数なしで呼び出す。
         params = {}
+        currency = None # デフォルトでは全通貨
+        
         if EXCHANGE_CLIENT.id == 'mexc':
-             params = {'type': 'future'} 
+             # 💡 【修正箇所再試行: Patch 47】MEXCで発生する 'fetchBalance() not support self method'
+             # エラー回避のため、先物取引の基軸通貨である 'USDT' の残高のみを明示的に取得するよう強制する。
+             currency = 'USDT'
+             params = {'type': 'future'} # 先物口座を指定
 
-        balance = await EXCHANGE_CLIENT.fetch_balance(params=params)
+        # 通貨を指定して fetch_balance を呼び出す
+        balance = await EXCHANGE_CLIENT.fetch_balance(currency, params=params)
         
         # MEXCの場合、USDT建てのフューチャー残高 (equity/total) を総資産として扱う
+        # balance['total']['USDT'] にアクセス
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
+        
+        # フォールバック: total_usdt_balance が 0.0 の場合、infoセクションからtotalEquityを探す
+        if total_usdt_balance == 0.0 and EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
+            # infoセクションからtotalEquityを探す (MEXC特有の処理)
+            # MEXC先物APIのレスポンス構造を解析して、totalEquityを取得する
+            mexc_data = balance['info'].get('data')
+            if mexc_data and mexc_data.get('assets'):
+                for asset in mexc_data['assets']:
+                    if asset.get('currency') == 'USDT':
+                        # totalEquityがMEXCの先物総資産
+                        total_usdt_balance_fallback = float(asset.get('totalEquity', 0.0))
+                        if total_usdt_balance_fallback > 0:
+                            total_usdt_balance = total_usdt_balance_fallback
+                            logging.warning("⚠️ fetch_balanceのtotalが0のため、MEXC専用のフォールバックロジックでEquityを再取得しました。")
+                        break
         
         # グローバル変数に最新の総資産を保存
         ACCOUNT_EQUITY_USDT = total_usdt_balance
@@ -653,11 +676,10 @@ async def fetch_account_status() -> Dict:
     except ccxt.AuthenticationError as e:
         logging.critical(f"❌ 口座ステータス取得失敗 (認証エラー): {e}")
     except Exception as e:
-        logging.error(f"❌ 口座ステータス取得失敗 (予期せぬエラー): {e}")
+        logging.error(f"❌ 口座ステータス取得失敗 (予期せぬエラー): {e}", exc_info=True)
 
     return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
-# 注文数量調整を base units (数量) で行う関数に更新 (変更なし)
 async def adjust_order_amount_by_base_units(symbol: str, target_base_amount: float) -> Optional[float]:
     """
     指定されたBase通貨建ての目標取引数量を、取引所の最小数量および数量精度に合わせて調整する。
@@ -792,7 +814,7 @@ async def fetch_fgi_data() -> Dict[str, Any]:
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """テクニカルインジケーターを計算する"""
+    """テクニカルインジケーターを計算する (変更なし)"""
     if df.empty:
         return df
     
@@ -821,7 +843,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # ATR (Average True Range) を計算 
     atr_data = ta.atr(df['high'], df['low'], df['close'], length=ATR_LENGTH)
     if atr_data is not None and not atr_data.empty:
-        # 💡 【修正箇所】atr_data は Series のため、iloc[:, 0] はエラー。直接代入する。
+        # Patch 45で修正済み: Seriesを直接代入
         df['ATR'] = atr_data
     else:
         df['ATR'] = np.nan
@@ -1198,7 +1220,11 @@ async def main_bot_loop():
     if account_status.get('error') or ACCOUNT_EQUITY_USDT <= 0:
         if IS_FIRST_MAIN_LOOP_COMPLETED:
             logging.critical("🚨 総資産の取得失敗または残高がゼロです。取引をスキップします。")
-            return
+            # AccountStatusの取得エラー時も、FGIは取得されているはずなので、次の通知処理へ進む
+        else:
+            # 初回は初期化メッセージを出すために続行
+             logging.critical("🚨 初回起動時の総資産取得に失敗したか、残高がゼロです。初期化メッセージを送信します。")
+            
         
     logging.info(f"--- 💡 {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} - BOT LOOP START (M1 Frequency) - Equity: {format_usdt(ACCOUNT_EQUITY_USDT)} USDT ---")
 
@@ -1208,42 +1234,48 @@ async def main_bot_loop():
     
     new_signals: List[Dict] = []
     
-    for symbol in CURRENT_MONITOR_SYMBOLS:
-        # ATRの計算に十分なデータが必要なため、最も小さい時間枠のOHLCVが重要
-        for timeframe in TARGET_TIMEFRAMES:
-            limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 1000)
-            df = await fetch_ohlcv_safe(symbol, timeframe=timeframe, limit=limit)
-            
-            if df is None or df.empty:
-                continue
-            
-            df = calculate_indicators(df)
-            
-            signal = analyze_signals(df, symbol, timeframe, GLOBAL_MACRO_CONTEXT)
-            
-            if signal and signal['score'] >= current_threshold:
-                if time.time() - LAST_SIGNAL_TIME.get(symbol, 0.0) > TRADE_SIGNAL_COOLDOWN:
-                    new_signals.append(signal)
-                    LAST_SIGNAL_TIME[symbol] = time.time()
-                else:
-                    logging.info(f"スキップ: {symbol} はクールダウン期間中です。")
+    # 総資産がゼロまたはエラーの場合はシグナル生成をスキップ
+    if ACCOUNT_EQUITY_USDT > 0 and not account_status.get('error'):
+        for symbol in CURRENT_MONITOR_SYMBOLS:
+            # ATRの計算に十分なデータが必要なため、最も小さい時間枠のOHLCVが重要
+            for timeframe in TARGET_TIMEFRAMES:
+                limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 1000)
+                df = await fetch_ohlcv_safe(symbol, timeframe=timeframe, limit=limit)
+                
+                if df is None or df.empty:
+                    continue
+                
+                df = calculate_indicators(df)
+                
+                signal = analyze_signals(df, symbol, timeframe, GLOBAL_MACRO_CONTEXT)
+                
+                if signal and signal['score'] >= current_threshold:
+                    if time.time() - LAST_SIGNAL_TIME.get(symbol, 0.0) > TRADE_SIGNAL_COOLDOWN:
+                        new_signals.append(signal)
+                        LAST_SIGNAL_TIME[symbol] = time.time()
+                    else:
+                        logging.info(f"スキップ: {symbol} はクールダウン期間中です。")
 
 
-    LAST_ANALYSIS_SIGNALS = sorted(new_signals, key=lambda s: s.get('score', 0.0), reverse=True)[:TOP_SIGNAL_COUNT] 
+        LAST_ANALYSIS_SIGNALS = sorted(new_signals, key=lambda s: s.get('score', 0.0), reverse=True)[:TOP_SIGNAL_COUNT] 
 
-    for signal in LAST_ANALYSIS_SIGNALS:
-        symbol = signal['symbol']
-        
-        if symbol not in [p['symbol'] for p in OPEN_POSITIONS]:
-            trade_result = await execute_trade(signal)
-            log_signal(signal, 'Trade Signal', trade_result)
+        for signal in LAST_ANALYSIS_SIGNALS:
+            symbol = signal['symbol']
             
-            if trade_result and trade_result.get('status') == 'ok':
-                await send_telegram_notification(
-                    format_telegram_message(signal, "取引シグナル", current_threshold, trade_result=trade_result)
-                )
-        else:
-            logging.info(f"スキップ: {symbol} には既にオープンポジションがあります。")
+            if symbol not in [p['symbol'] for p in OPEN_POSITIONS]:
+                trade_result = await execute_trade(signal)
+                log_signal(signal, 'Trade Signal', trade_result)
+                
+                if trade_result and trade_result.get('status') == 'ok':
+                    await send_telegram_notification(
+                        format_telegram_message(signal, "取引シグナル", current_threshold, trade_result=trade_result)
+                    )
+            else:
+                logging.info(f"スキップ: {symbol} には既にオープンポジションがあります。")
+    else:
+        # 総資産がゼロの場合はシグナルを生成しない
+        LAST_ANALYSIS_SIGNALS = []
+        logging.warning("⚠️ 総資産が0または取得エラーのため、新規シグナル生成をスキップしました。")
             
     now = time.time()
     
@@ -1259,7 +1291,7 @@ async def main_bot_loop():
                     GLOBAL_MACRO_CONTEXT, 
                     len(CURRENT_MONITOR_SYMBOLS), 
                     current_threshold, 
-                    "v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)" # ★変更
+                    "v20.0.5 - Future Trading / 10x Leverage (Patch 47: MEXC fetchBalance Fix Retry)" # ★変更
                 )
             )
             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
@@ -1273,7 +1305,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)" # ★変更
+                "v20.0.5 - Future Trading / 10x Leverage (Patch 47: MEXC fetchBalance Fix Retry)" # ★変更
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1312,7 +1344,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v20.0.3 - Future Trading / 10x Leverage (Patch 45: Pandas ATR Indexing Fix)", # ★変更
+        "bot_version": "v20.0.5 - Future Trading / 10x Leverage (Patch 47: MEXC fetchBalance Fix Retry)", # ★変更
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, # 互換性のため残す
         "max_risk_per_trade_percent": MAX_RISK_PER_TRADE_PERCENT, # ★追加
         "current_equity_usdt": ACCOUNT_EQUITY_USDT, # ★追加
