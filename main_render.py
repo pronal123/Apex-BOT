@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 39 - FGI Dynamic Fetch)
+# Apex BOT v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)
 #
 # 改良・修正点:
-# 1. 【機能修正】メインループ内でハードコードされていた恐怖・貪欲指数 (FGI) を外部APIから動的に取得するように修正。
-# 2. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
-# 3. 【機能修正】ボリンジャーバンドの Key Error を回避するため、列名を動的に取得するロジックを維持。
+# 1. 【ロジック調整】BASE_SCORE, 動的閾値, ペナルティ値を調整し、市場環境に応じて
+#    取引頻度を制御するロジックを強化。 (低迷: 0-1, 通常: 2-3, 活発: 4+ 回/日を目標)
+# 2. 【機能修正】メインループ内でハードコードされていた恐怖・貪欲指数 (FGI) を外部APIから動的に取得するように修正。
+# 3. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -35,7 +36,6 @@ import math # 数値計算ライブラリ
 load_dotenv()
 
 # 💡 【ログ確認対応】ロギング設定を明示的に定義
-# 修正: formatに (%(funcName)s) を追加し、関数名を自動でログ出力に含める
 logging.basicConfig(
     level=logging.INFO, # INFOレベル以上のメッセージを出力
     format='%(asctime)s - %(levelname)s - (%(funcName)s) - %(message)s' 
@@ -59,10 +59,10 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-LOOP_INTERVAL = 60 * 1              # ★変更: メインループの実行間隔 (秒) - 1分ごと
+LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
 ANALYSIS_ONLY_INTERVAL = 60 * 60    # 分析専用通知の実行間隔 (秒) - 1時間ごと
 WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
-MONITOR_INTERVAL = 10               # ★追加: ポジション監視ループの実行間隔 (秒) - 10秒ごと
+MONITOR_INTERVAL = 10               # ポジション監視ループの実行間隔 (秒) - 10秒ごと
 
 # 💡 クライアント設定
 CCXT_CLIENT_NAME = os.getenv("EXCHANGE_CLIENT", "mexc")
@@ -85,8 +85,8 @@ if BASE_TRADE_SIZE_USDT < 10:
 
 
 # 💡 WEBSHARE設定 (HTTP POSTへ変更)
-WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") # デフォルトはHTTPに変更
-WEBSHARE_POST_URL = os.getenv("WEBSHARE_POST_URL", "http://your-webshare-endpoint.com/upload") # HTTP POST用のエンドポイント
+WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") 
+WEBSHARE_POST_URL = os.getenv("WEBSHARE_POST_URL", "http://your-webshare-endpoint.com/upload") 
 
 # グローバル変数 (状態管理用)
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
@@ -113,31 +113,50 @@ SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
 REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを追加
 
-# テクニカル分析定数 (v19.0.28ベース)
-TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] # 1m, 5mを追加
-BASE_SCORE = 0.60                   # ベースとなる取引基準点 (60点)
+# ====================================================================================
+# ★取引頻度/スコアリングロジック調整エリア★
+# ====================================================================================
+
+TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
+
+# ★調整: ベーススコアを増加し、取引の基本基準を引き上げる★
+BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点 <- 40点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
-LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンド逆行時のペナルティ
+
+# ★調整: 長期トレンド逆行時のペナルティを増加★
+LONG_TERM_REVERSAL_PENALTY = 0.25   # 長期トレンド逆行時のペナルティ (0.25 <- 0.20)
 STRUCTURAL_PIVOT_BONUS = 0.05       # 価格構造/ピボット支持時のボーナス
 RSI_MOMENTUM_LOW = 40               # RSIが40以下でロングモメンタム候補
-MACD_CROSS_PENALTY = 0.15           # MACDが不利なクロス/発散時のペナルティ
-LIQUIDITY_BONUS_MAX = 0.06          # 流動性(板の厚み)による最大ボーナス
+
+# ★調整: MACDが不利なクロス/発散時のペナルティを増加★
+MACD_CROSS_PENALTY = 0.20           # MACDが不利なクロス/発散時のペナルティ (0.20 <- 0.15)
+
+# ★調整: 流動性ボーナスを微減 (仮想値のため)★
+LIQUIDITY_BONUS_MAX = 0.05          # 流動性(板の厚み)による最大ボーナス (0.05 <- 0.06)
 FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ
 FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設定
 
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.70       
-SIGNAL_THRESHOLD_NORMAL = 0.65      
-SIGNAL_THRESHOLD_ACTIVE = 0.60      
 
-RSI_DIVERGENCE_BONUS = 0.10         
+# ★調整: 動的閾値を大幅に増加し、取引頻度を市場環境に連動させる★
+# 低迷期 (0-1回/日): 0.90点を要求
+SIGNAL_THRESHOLD_SLUMP = 0.90       # 0.90 <- 0.70
+# 通常期 (2-3回/日): 0.85点を要求
+SIGNAL_THRESHOLD_NORMAL = 0.85      # 0.85 <- 0.65
+# 活発期 (4+回/日): 0.80点を要求
+SIGNAL_THRESHOLD_ACTIVE = 0.80      # 0.80 <- 0.60
+
+# ★調整: RSIダイバージェンスボーナスを増加 (高精度シグナルの価値向上)★
+RSI_DIVERGENCE_BONUS = 0.15         # 0.15 <- 0.10
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
-OBV_MOMENTUM_BONUS = 0.04           
+
+# ★調整: OBVモメンタムボーナスを微増★
+OBV_MOMENTUM_BONUS = 0.05           # 0.05 <- 0.04
 
 # ====================================================================================
-# UTILITIES & FORMATTING
+# UTILITIES & FORMATTING (変更なし)
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -154,12 +173,15 @@ def format_usdt(amount: float) -> str:
 
 def get_estimated_win_rate(score: float) -> str:
     """スコアに基づいて推定勝率を返す (通知用)"""
-    if score >= 0.90: return "90%+"
+    # 閾値の上昇に伴い、勝率推定の基準も調整
+    if score >= 0.95: return "95%+"
+    if score >= 0.90: return "90-95%"
     if score >= 0.85: return "85-90%"
-    if score >= 0.75: return "75-85%"
-    if score >= 0.65: return "65-75%" 
-    if score >= 0.60: return "60-65%"
-    return "<60% (低)"
+    if score >= 0.80: return "80-85%"
+    if score >= 0.75: return "75-80%"
+    if score >= 0.70: return "70-75%" 
+    if score >= 0.65: return "65-70%"
+    return "<65% (低)"
 
 def get_current_threshold(macro_context: Dict) -> float:
     """現在の市場環境に合わせた動的な取引閾値を決定し、返す。"""
@@ -169,22 +191,23 @@ def get_current_threshold(macro_context: Dict) -> float:
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     
     if fgi_proxy < FGI_SLUMP_THRESHOLD:
-        return SIGNAL_THRESHOLD_SLUMP
+        return SIGNAL_THRESHOLD_SLUMP # 0.90
     
     elif fgi_proxy > FGI_ACTIVE_THRESHOLD:
-        return SIGNAL_THRESHOLD_ACTIVE
+        return SIGNAL_THRESHOLD_ACTIVE # 0.80
         
     else:
-        return SIGNAL_THRESHOLD_NORMAL
+        return SIGNAL_THRESHOLD_NORMAL # 0.85
 
 def get_score_breakdown(signal: Dict) -> str:
     """分析スコアの詳細なブレークダウンメッセージを作成する (Telegram通知用)"""
     tech_data = signal.get('tech_data', {})
     timeframe = signal.get('timeframe', 'N/A')
     
-    LONG_TERM_REVERSAL_PENALTY_CONST = LONG_TERM_REVERSAL_PENALTY 
-    MACD_CROSS_PENALTY_CONST = MACD_CROSS_PENALTY                 
-    LIQUIDITY_BONUS_POINT_CONST = LIQUIDITY_BONUS_MAX           
+    # 調整後の定数をTechDataから取得
+    LONG_TERM_REVERSAL_PENALTY_CONST = tech_data.get('long_term_reversal_penalty_const', LONG_TERM_REVERSAL_PENALTY)
+    MACD_CROSS_PENALTY_CONST = tech_data.get('macd_cross_penalty_const', MACD_CROSS_PENALTY)                 
+    LIQUIDITY_BONUS_POINT_CONST = tech_data.get('liquidity_bonus_const', LIQUIDITY_BONUS_MAX)           
     
     breakdown_list = []
 
@@ -196,7 +219,7 @@ def get_score_breakdown(signal: Dict) -> str:
     if penalty_applied > 0.0:
         breakdown_list.append(f"  - ❌ 長期トレンド逆行 (SMA{LONG_TERM_SMA_LENGTH}): <code>-{penalty_applied*100:.1f}</code> 点")
     else:
-        # NOTE: ペナルティ回避が実質的な加点要因として表示される
+        # ペナルティ回避が実質的な加点要因として表示される
         breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}): <code>+{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点 (ペナルティ回避)")
 
     pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
@@ -210,7 +233,7 @@ def get_score_breakdown(signal: Dict) -> str:
     if total_momentum_penalty > 0.0:
         breakdown_list.append(f"  - ❌ モメンタム/クロス不利: <code>-{total_momentum_penalty*100:.1f}</code> 点")
     else:
-        # NOTE: ペナルティ回避が実質的な加点要因として表示される
+        # ペナルティ回避が実質的な加点要因として表示される
         breakdown_list.append(f"  - ✅ MACD/RSIモメンタム加速: <code>+{MACD_CROSS_PENALTY_CONST*100:.1f}</code> 点相当 (ペナルティ回避)")
 
     obv_bonus = tech_data.get('obv_momentum_bonus_value', 0.0)
@@ -262,7 +285,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     forex_bonus = macro_context.get('forex_bonus', 0.0) 
 
-    fgi_sentiment = "リスクオン" if fgi_proxy > FGI_ACTIVE_THRESHOLD else ("リスクオフ" if fgi_proxy < FGI_SLUMP_THRESHOLD else "中立")
+    fgi_sentiment = "活発/リスクオン" if fgi_proxy > FGI_ACTIVE_THRESHOLD else ("低迷/リスクオフ" if fgi_proxy < FGI_SLUMP_THRESHOLD else "通常/中立")
     forex_display = "中立 (機能削除済)"
     
     if current_threshold == SIGNAL_THRESHOLD_SLUMP:
@@ -323,7 +346,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 39 - FGI Dynamic Fetch)</i>" 
+        f"<i>Bot Ver: v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)</i>" 
     )
 
     return header + macro_section + signal_section + footer
@@ -400,7 +423,7 @@ def format_startup_message(
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - **取引閾値 (Score)**: <code>{current_threshold*100:.0f} / 100</code>\n"
         f"  - **現在の市場環境**: <code>{market_condition_text}</code>\n"
-        f"  - **FGI (恐怖・貪欲)**: <code>{fgi_raw_value}</code> ({'リスクオン' if fgi_proxy > FGI_ACTIVE_THRESHOLD else ('リスクオフ' if fgi_proxy < FGI_SLUMP_THRESHOLD else '中立')})\n"
+        f"  - **FGI (恐怖・貪欲)**: <code>{fgi_raw_value}</code> ({'活発/リスクオン' if fgi_proxy > FGI_ACTIVE_THRESHOLD else ('低迷/リスクオフ' if fgi_proxy < FGI_SLUMP_THRESHOLD else '通常/中立')})\n"
         f"  - **総合マクロ影響**: <code>{((fgi_proxy + forex_bonus) * 100):.2f}</code> 点\n\n"
     )
 
@@ -505,7 +528,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 39 - FGI Dynamic Fetch)</i>")
+    message += (f"<i>Bot Ver: v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)</i>")
     return message
 
 
@@ -575,7 +598,7 @@ def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -
 
 
 # ====================================================================================
-# WEBSHARE FUNCTION (HTTP POST) 
+# WEBSHARE FUNCTION (HTTP POST) (変更なし)
 # ====================================================================================
 
 async def send_webshare_update(data: Dict[str, Any]):
@@ -603,7 +626,7 @@ async def send_webshare_update(data: Dict[str, Any]):
         
 
 # ====================================================================================
-# CCXT & DATA ACQUISITION
+# CCXT & DATA ACQUISITION (変更なし)
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
@@ -807,8 +830,6 @@ async def fetch_fear_greed_index() -> Dict[str, Any]:
             fgi_classification = fgi_entry['value_classification']
             
             # FGIのプロキシ値を計算 (50が中立。-0.5〜+0.5の範囲をFGI_PROXY_BONUS_MAX(0.05)の最大値に合わせる)
-            # FGI_PROXY_BONUS_MAX=0.05なので、ここでは約-0.075から+0.075の範囲になる。
-            # (50が中立) / 50 * FGI_PROXY_BONUS_MAX(0.05) * 1.5倍
             fgi_proxy = (fgi_value - 50) / 50.0 * FGI_PROXY_BONUS_MAX * 1.5 
             
             logging.info(f"✅ FGI取得成功: {fgi_value} ({fgi_classification})")
@@ -832,7 +853,7 @@ async def fetch_fear_greed_index() -> Dict[str, Any]:
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """テクニカルインジケーターを計算する (KeyError修正済)"""
+    """テクニカルインジケーターを計算する (変更なし)"""
     if df.empty:
         return df
     
@@ -848,8 +869,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     bbands_data = ta.bbands(df['close'], length=20, std=2)
     df = df.join(bbands_data)
     
-    # ★KeyError修正: BBandsの実際の列名を動的に取得する★
-    # 'BBL' (Lower Band) と 'BBU' (Upper Band) の列名を取得
+    # Key Error回避ロジック
     bb_cols = [col for col in df.columns if re.match(r'BBL_\d+_\d+\.\d+|BBL', col)]
     bu_cols = [col for col in df.columns if re.match(r'BBU_\d+_\d+\.\d+|BBU', col)]
 
@@ -863,9 +883,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     BBL_COL = bb_cols[0]
     BBU_COL = bu_cols[0]
     
-    # BBands %B (BBP) を使用して、価格がバンド内のどこにあるかを判断
     df['BB_PCT'] = (df['close'] - df[BBL_COL]) / (df[BBU_COL] - df[BBL_COL])
-    # BBands幅を計算し、前日のBB_WIDTHに対する比率を簡易的なボラティリティ過熱指標とする
     df['BB_WIDTH'] = df[BBU_COL] - df[BBL_COL]
     df['VOL_CHANGE'] = (df['BB_WIDTH'].diff() / df['BB_WIDTH'].shift(1)).fillna(0)
 
@@ -874,14 +892,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['OBV_SMA'] = ta.sma(df['OBV'], length=20) 
     
     # 5. 価格構造/ピボット（簡易版）
-    # 終値が直近5本で最低価格であるかをチェック
     df['IS_LOWEST_LOW_5'] = (df['low'] == df['low'].rolling(5).min())
     
     return df
 
 def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Optional[Dict]:
     """分析ロジックに基づき、取引シグナルを生成する"""
-    if df.empty or df['SMA200'].isnull().any(): # SMA200が計算できない場合はスキップ
+    if df.empty or df['SMA200'].isnull().any(): 
         return None
         
     current_price = df['close'].iloc[-1]
@@ -905,36 +922,35 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     # 2. スコアリングとペナルティ/ボーナス計算
     # ----------------------------------------------------
     
-    score = BASE_SCORE # 0.40
+    score = BASE_SCORE # 0.50
     tech_data = {}
     
     # 2.1. 長期トレンド逆行ペナルティ 
     long_term_reversal_penalty_value = 0.0
     if not long_term_trend_ok: # SMA200を下回った場合
-        long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
+        long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY # 0.25
     
     # 2.2. 価格構造/ピボット支持ボーナス
     structural_pivot_bonus = 0.0
-    if last_row['BB_PCT'] < 0.1 and last_row['IS_LOWEST_LOW_5']: # ボトムバンド付近で直近安値更新
+    if last_row['BB_PCT'] < 0.1 and last_row['IS_LOWEST_LOW_5']: 
         structural_pivot_bonus = STRUCTURAL_PIVOT_BONUS # 0.05
         
     # 2.3. MACD/モメンタムクロス不利ペナルティ
     macd_penalty_value = 0.0
     if last_row['MACDh_12_26_9'] < 0: # MACDヒストグラムがマイナス（下降モメンタム）
-        macd_penalty_value = MACD_CROSS_PENALTY # 0.15
+        macd_penalty_value = MACD_CROSS_PENALTY # 0.20
     
     # 2.4. 出来高/OBV確証ボーナス
     obv_momentum_bonus_value = 0.0
     if last_row['OBV'] > last_row['OBV_SMA']: # OBVがSMAを上回っている
-        obv_momentum_bonus_value = OBV_MOMENTUM_BONUS # 0.04
+        obv_momentum_bonus_value = OBV_MOMENTUM_BONUS # 0.05
         
     # 2.5. ボラティリティ過熱ペナルティ
     volatility_penalty_value = 0.0
-    # BBands幅が前日比で急拡大した場合 
     if last_row['VOL_CHANGE'] > VOLATILITY_BB_PENALTY_THRESHOLD: 
-        volatility_penalty_value = -0.05 # ペナルティ値を仮設定
+        volatility_penalty_value = -0.05 
         
-    # 2.6. RSIダイバージェンスボーナス (簡易版: 最後の2つのボトムを比較)
+    # 2.6. RSIダイバージェンスボーナス
     rsi_divergence_bonus_value = 0.0
     if len(df) >= 10:
         price_lows = df['low'].tail(10)
@@ -945,16 +961,16 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         recent_rsi = rsi_values.iloc[-1]
         past_rsi = rsi_values.iloc[-5]
         
-        # 強気のレギュラーダイバージェンス: 価格は安値切り下げ (Recent Low < Past Low)、RSIは安値切り上げ (Recent RSI > Past RSI)
+        # 強気のレギュラーダイバージェンス
         if (recent_low < past_low) and (recent_rsi > past_rsi):
-             rsi_divergence_bonus_value = RSI_DIVERGENCE_BONUS # 0.10
+             rsi_divergence_bonus_value = RSI_DIVERGENCE_BONUS # 0.15
 
 
-    # 2.7. マクロ/流動性要因 (マクロコンテキストから計算)
+    # 2.7. マクロ/流動性要因
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     sentiment_fgi_proxy_bonus = (fgi_proxy / FGI_ACTIVE_THRESHOLD) * FGI_PROXY_BONUS_MAX if abs(fgi_proxy) <= FGI_ACTIVE_THRESHOLD else (FGI_PROXY_BONUS_MAX if fgi_proxy > 0 else -FGI_PROXY_BONUS_MAX)
     
-    liquidity_bonus_value = LIQUIDITY_BONUS_MAX # 実際の板情報取得ロジックは省略し、最大ボーナスを付与と仮定 (0.06)
+    liquidity_bonus_value = LIQUIDITY_BONUS_MAX # 0.05
     forex_bonus = 0.0 # 機能削除済みのため0.0
 
     
@@ -987,6 +1003,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         'forex_bonus': forex_bonus,
         'volatility_penalty_value': volatility_penalty_value,
         'rsi_divergence_bonus_value': rsi_divergence_bonus_value,
+        # 定数を保存
         'long_term_reversal_penalty_const': LONG_TERM_REVERSAL_PENALTY, 
         'macd_cross_penalty_const': MACD_CROSS_PENALTY,                 
         'liquidity_bonus_const': LIQUIDITY_BONUS_MAX                   
@@ -1272,7 +1289,7 @@ async def main_bot_loop():
 
     new_signals: List[Dict] = []
     
-    # ★修正点: マクロコンテキストの動的取得 (FGI)★
+    # マクロコンテキストの動的取得 (FGI)
     GLOBAL_MACRO_CONTEXT = await fetch_fear_greed_index()
     current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
     
@@ -1341,7 +1358,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 39 - FGI Dynamic Fetch)"
+                "v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)"
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1366,7 +1383,7 @@ async def main_bot_loop():
 
 
 # ====================================================================================
-# FASTAPI & ASYNC EXECUTION
+# FASTAPI & ASYNC EXECUTION (変更なし)
 # ====================================================================================
 
 app = FastAPI()
@@ -1380,7 +1397,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 39 - FGI Dynamic Fetch)",
+        "bot_version": "v19.0.30 - High-Freq/TP/SL/M1M5 Added (Patch 40 - FGI Trade Freq Adjusted)",
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME > 0 else "N/A",
