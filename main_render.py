@@ -1,12 +1,9 @@
 # ====================================================================================
 # Apex BOT v19.0.31 - True Dynamic Scoring & Enhanced Analysis Logic (Final Production Build)
 #
-# 主要な改良・修正点:
-# 1. 【動的修正】analyze_signals内のRSI, Volatility, Liquidityのボーナス/ペナルティをデータに基づき動的に変動するロジックに修正。
-# 2. 【ロジック強化】MACD、RSI、OBV、ATRに基づいた多角的なスコアリングロジックを追加し、銘柄ごとのスコアに明確な差を付与。
-# 3. 【リスク管理強化】SL/TPを固定値ではなく、ATR（ボラティリティ）に応じて動的に設定するロジックを採用。
-# 4. 【環境修正】ダミーロジックを完全に排除し、外部APIによるマクロコンテキスト更新を要件化。
-# 5. 【機能追加】ポジションのストップロス(SL)/テイクプロフィット(TP)をリアルタイム (10秒ごと) に監視し、自動決済するロジックを実装。
+# 【重要修正】BBW計算時のKeyError対応
+# calculate_indicators関数において、OHLCVデータ不足などでBBW_20_2.0列が欠損する KeyErro
+# に対応するため、列の存在チェックとNaN埋めロジックを追加し、クラッシュを防止しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -827,8 +824,14 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 4. ボラティリティ
     # BBWの計算に必要なため、BBandsも計算
     bbands_data = ta.bbands(df['close'], length=20, std=2.0)
-    if bbands_data is not None and not bbands_data.empty:
-        df = pd.concat([df, bbands_data[['BBW_20_2.0']]], axis=1)
+    
+    # 【✅ 修正: BBW列の存在チェックとNaN埋め】
+    bbw_col_name = 'BBW_20_2.0'
+    if bbands_data is not None and not bbands_data.empty and bbw_col_name in bbands_data.columns:
+        df = pd.concat([df, bbands_data[[bbw_col_name]]], axis=1)
+    else:
+        # BBWの計算に失敗した場合 (データ不足等)、KeyErrorを防ぐためにNaNでダミー列を追加
+        df[bbw_col_name] = np.nan
         
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     
@@ -850,6 +853,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     # 判定に必要なインジケーター値が全て揃っていることを確認
     # MACDhの列名がpandas_taの出力に合わせています
     required_cols = ['RSI', 'MACDh_12_26_9', 'ATR', 'SMA200', 'BBW_20_2.0', 'pivot_low']
+    # 必須インジケーターの最新値がNaNではないことをチェック
     if any(df.loc[last_idx, col] is None or pd.isna(df.loc[last_idx, col]) for col in required_cols):
         return None
 
@@ -916,6 +920,8 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     # e) ボラティリティ過熱ペナルティ (BBWベース)
     volatility_penalty_value = 0.0
     bbw_recent = df['BBW_20_2.0'].loc[last_idx]
+    
+    # BBWの最新値がNaNの場合は、必須チェックで処理されるため、ここではNaNでないことを前提とする
     
     # 直近100期間のBBWの中央値
     bbw_median = df['BBW_20_2.0'].iloc[-100:-1].median() if len(df) >= 100 else 0.0
