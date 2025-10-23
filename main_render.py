@@ -1267,6 +1267,13 @@ async def main_bot_loop():
     LAST_SUCCESS_TIME = time.time()
     logging.info(f"--- 💡 BOT LOOP END. Positions: {len(OPEN_POSITIONS)}, New Signals: {len(LAST_ANALYSIS_SIGNALS)} ---")
 
+
+# ====================================================================================
+# FASTAPI & ASYNC EXECUTION
+# ====================================================================================
+
+app = FastAPI()
+
 # ====================================================================================
 # 【追加】UptimeRobotなどの監視用エンドポイント
 # ====================================================================================
@@ -1280,10 +1287,6 @@ async def health_check():
     return JSONResponse(content={"status": "ok", "message": "Apex BOT is running."}, status_code=200)
 
 # ====================================================================================
-# FASTAPI & ASYNC EXECUTION (変更なし)
-# ====================================================================================
-
-app = FastAPI()
 
 @app.get("/status")
 def get_status_info():
