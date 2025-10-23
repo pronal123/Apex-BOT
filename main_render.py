@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 38)
+# Apex BOT v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 39 - Dynamic SL/TP)
 #
 # 改良・修正点:
 # 1. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
 # 2. 【頻度変更】メインループの実行間隔を 10分ごとから 1分ごと (60秒) に変更。
 # 3. 【機能追加】ポジションのストップロス(SL)/テイクプロフィット(TP)をリアルタイム (10秒ごと) に監視し、自動決済するロジックを実装。
-# 4. 【ロジック維持】元のブレークダウンロジックが正常に機能するよう、analyze_signals関数内でtech_dataを適切に構築。
+# 4. 【ロジック変更】analyze_signals関数内で、シグナルスコアとテクニカル要因に基づき、SL/TPを動的に設定するロジックを実装。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -320,7 +320,7 @@ def format_analysis_only_message(all_signals: List[Dict], macro_context: Dict, c
     footer = (
         f"\n<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<pre>※ この通知は取引実行を伴いません。</pre>"
-        f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 38)</i>" 
+        f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 39 - Dynamic SL/TP)</i>" 
     )
 
     return header + macro_section + signal_section + footer
@@ -499,7 +499,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 38)</i>")
+    message += (f"<i>Bot Ver: v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 39 - Dynamic SL/TP)</i>")
     return message
 
 
@@ -807,7 +807,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     if current_price > df['SMA200'].iloc[-1]:
         
         # --- スコアリングロジックの簡易実装 (ブレークダウン対応) ---
-        score = BASE_SCORE # 0.60
+        score = BASE_SCORE # 0.40
         
         # マクロコンテキストからFGIの影響を計算 (簡易版: FGIプロキシが0.02でMAXボーナス, -0.02でMAXペナルティを想定)
         fgi_proxy = macro_context.get('fgi_proxy', 0.0)
@@ -839,12 +839,49 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
             tech_data['macd_penalty_value']
         )
         
-        # 簡易的なRRR/SL/TP設定
-        rr_ratio = 2.0             
-        risk_percent = 0.015
-        stop_loss = current_price * (1 - risk_percent)
-        take_profit = current_price * (1 + risk_percent * rr_ratio)
         
+        ##############################################################
+        # ★修正開始: 動的なSL/TPとRRRの設定ロジック (スコアと構造を考慮)★
+        ##############################################################
+        
+        # 1. SL (リスク幅) の動的設定 (サポートラインの強さを考慮)
+        BASE_RISK_PERCENT = 0.015  # ベースリスク: 1.5%
+        PIVOT_SUPPORT_BONUS = tech_data.get('structural_pivot_bonus', 0.0) # 構造的ボーナス (最大0.05)
+
+        # 構造的ボーナスが高いほど、サポートが近いと判断し、リスク幅を狭くする
+        # 0.05のボーナスで最大0.2%のリスク削減 (例: 1.5% -> 1.3%)
+        # NOTE: STRUCTURAL_PIVOT_BONUS (0.05) は定数として定義済み
+        sl_adjustment = (PIVOT_SUPPORT_BONUS / STRUCTURAL_PIVOT_BONUS) * 0.002 if STRUCTURAL_PIVOT_BONUS > 0 else 0.0
+        dynamic_risk_percent = max(0.010, BASE_RISK_PERCENT - sl_adjustment) # 最低1.0%のリスクは確保
+        
+        # SL価格の計算
+        stop_loss = current_price * (1 - dynamic_risk_percent)
+        
+        # 2. TP (リワード幅) の動的設定 (総合スコアを考慮)
+        BASE_RRR = 1.5  # ベースRRR: 1.5倍に設定
+        
+        # スコアが高いほどRRRを高く設定 (例: スコア 0.85 で RRR 3.0倍)
+        # スコアを正規化し、RRRの上限を3.0とする
+        MAX_SCORE_FOR_RRR = 0.85
+        MAX_RRR = 3.0
+        
+        # スコアに基づき線形的にRRRを調整 (SIGNAL_THRESHOLD=0.65 から MAX_SCORE_FOR_RRR=0.85 の間で調整)
+        if score > SIGNAL_THRESHOLD:
+            score_ratio = min(1.0, (score - SIGNAL_THRESHOLD) / (MAX_SCORE_FOR_RRR - SIGNAL_THRESHOLD))
+            dynamic_rr_ratio = BASE_RRR + (MAX_RRR - BASE_RRR) * score_ratio
+        else:
+            dynamic_rr_ratio = BASE_RRR # 閾値未満ならベースRRRを使用
+            
+        # TP価格の計算
+        take_profit = current_price * (1 + dynamic_risk_percent * dynamic_rr_ratio)
+        
+        # 最終的なRRRを記録用として算出
+        rr_ratio = dynamic_rr_ratio 
+        
+        ##############################################################
+        # ★修正終了: 動的なSL/TPとRRRの設定ロジック★
+        ##############################################################
+
         current_threshold = get_current_threshold(macro_context)
         
         # SMAチェックが満たされている場合のみ、簡易的なスコアリングを適用
@@ -854,10 +891,10 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
                 'timeframe': timeframe,
                 'action': 'buy', # 現物ロング（買い）のみを想定
                 'score': score,
-                'rr_ratio': rr_ratio,
+                'rr_ratio': rr_ratio, # ★動的RRRを使用★
                 'entry_price': current_price,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
+                'stop_loss': stop_loss, # ★動的SLを使用★
+                'take_profit': take_profit, # ★動的TPを使用★
                 'lot_size_usdt': BASE_TRADE_SIZE_USDT,
                 'tech_data': tech_data, # ★ブレークダウンロジックのために埋める★
             }
@@ -1182,7 +1219,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 38)"
+                "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 39 - Dynamic SL/TP)"
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1221,7 +1258,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 38)",
+        "bot_version": "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 39 - Dynamic SL/TP)",
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, 
         "managed_positions_count": len(OPEN_POSITIONS), 
         "last_success_time_utc": datetime.fromtimestamp(LAST_SUCCESS_TIME, timezone.utc).isoformat() if LAST_SUCCESS_TIME > 0 else "N/A",
