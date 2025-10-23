@@ -1,11 +1,9 @@
 # ====================================================================================
-# Apex BOT v20.0.0 - Future Trading / 10x Leverage (Patch 42: Risk-Based Sizing & ATR)
+# Apex BOT v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)
 #
 # 改良・修正点:
-# 1. 【リスク管理】BASE_TRADE_SIZE_USDTを廃止し、総資産に対する最大リスク (MAX_RISK_PER_TRADE_PERCENT) に基づく動的ポジションサイジングを導入。
-# 2. 【リスク管理】ポジション執行時に推定清算価格 (Liquidation Price) を算出し、通知に追加。
-# 3. 【指標追加】ATR (Average True Range) を導入し、ボラティリティに基づきSL幅を動的に設定。
-# 4. 【ロジック維持】シグナルスコアとテクニカル要因に基づき、SL/TPを動的に設定するロジックを維持。
+# 1. 【バグ修正】CCXTのinitialize_exchange_client関数内で、safe_marketに不正な引数 defaultType='future' を渡していた箇所を修正。
+# 2. 【ロジック維持】リスクベースの動的ポジションサイジングとATRに基づく動的SL設定を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -452,7 +450,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.0 - Future Trading / 10x Leverage (Patch 42: Risk-Based Sizing & ATR)</i>") # ★変更
+    message += (f"<i>Bot Ver: v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)</i>") # ★変更
     return message
 
 
@@ -554,7 +552,7 @@ async def send_webshare_update(data: Dict[str, Any]):
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-    """CCXTクライアントを初期化し、市場情報をロードする (変更なし)"""
+    """CCXTクライアントを初期化し、市場情報をロードする (バグ修正適用)"""
     global EXCHANGE_CLIENT, IS_CLIENT_READY
     
     IS_CLIENT_READY = False
@@ -592,7 +590,8 @@ async def initialize_exchange_client() -> bool:
         if EXCHANGE_CLIENT.id == 'mexc':
             symbols_to_set_leverage = []
             for s in CURRENT_MONITOR_SYMBOLS:
-                market = EXCHANGE_CLIENT.safe_market(s, defaultType='future')
+                # 💡【修正箇所】safe_marketに'defaultType'を渡さないように修正 
+                market = EXCHANGE_CLIENT.safe_market(s) 
                 if market and market['type'] in ['future', 'swap'] and market['active']:
                     symbols_to_set_leverage.append(market['symbol']) 
             
@@ -1246,12 +1245,15 @@ async def main_bot_loop():
     if now - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME >= ANALYSIS_ONLY_INTERVAL:
         if LAST_ANALYSIS_SIGNALS or not IS_FIRST_MAIN_LOOP_COMPLETED:
             # account_statusはループの冒頭で取得済み
+            # format_analysis_only_message が定義されていないため、ここでは startup_message に準拠した通知を使用するか、ログのみとする
+            # 現行コードでは format_analysis_only_message が欠落しているため、初回通知ロジックを再利用する代替処理を実装。
             await send_telegram_notification(
-                format_analysis_only_message(
-                    LAST_ANALYSIS_SIGNALS, 
+                format_startup_message(
+                    account_status, 
                     GLOBAL_MACRO_CONTEXT, 
+                    len(CURRENT_MONITOR_SYMBOLS), 
                     current_threshold, 
-                    len(CURRENT_MONITOR_SYMBOLS)
+                    "v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)" 
                 )
             )
             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
@@ -1265,7 +1267,7 @@ async def main_bot_loop():
                 GLOBAL_MACRO_CONTEXT, 
                 len(CURRENT_MONITOR_SYMBOLS), 
                 current_threshold,
-                "v20.0.0 - Future Trading / 10x Leverage (Patch 42: Risk-Based Sizing & ATR)" 
+                "v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)" 
             )
         )
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1304,7 +1306,7 @@ def get_status_info():
 
     status_msg = {
         "status": "ok",
-        "bot_version": "v20.0.0 - Future Trading / 10x Leverage (Patch 42: Risk-Based Sizing & ATR)", 
+        "bot_version": "v20.0.1 - Future Trading / 10x Leverage (Patch 43: CCXT Initialization Fix)", 
         "base_trade_size_usdt": BASE_TRADE_SIZE_USDT, # 互換性のため残す
         "max_risk_per_trade_percent": MAX_RISK_PER_TRADE_PERCENT, # ★追加
         "current_equity_usdt": ACCOUNT_EQUITY_USDT, # ★追加
