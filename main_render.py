@@ -5,7 +5,7 @@
 # 1. 【機能追加】分析対象の時間足に '1m' (1分足) と '5m' (5分足) を追加。
 # 2. 【頻度変更】メインループの実行間隔を 10分ごとから 1分ごと (60秒) に変更。
 # 3. 【機能追加】ポジションのストップロス(SL)/テイクプロフィット(TP)をリアルタイム (10秒ごと) に監視し、自動決済するロジックを実装。
-# 4. 【ロジック復元】analyze_signals関数内で、元のブレークダウンロジックに基づいた詳細なテクニカル分析とスコアリングロジックを復元・実装。
+# 4. 【ロジック復元/修正】analyze_signals関数内で、元のブレークダウンロジックに基づいた詳細なテクニカル分析とスコアリングロジックを復元・実装し、**KeyError: 'BBL_20_2.0' を修正**。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -17,7 +17,7 @@ import ccxt.async_support as ccxt_async
 import ccxt
 import numpy as np
 import pandas as pd
-import pandas_ta as ta # 復元ロジックで使用
+import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 import asyncio
@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 import sys
 import random
 import json
-import re
+import re # ★追加: 正規表現ライブラリをインポート
 import uuid 
 import math # 数値計算ライブラリ
 
@@ -795,7 +795,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
 # TRADING LOGIC (ロジック復元箇所)
 # ====================================================================================
 
-# ★復元された関数 1: calculate_indicators★
+# ★修正された関数 1: calculate_indicators★
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """テクニカルインジケーターを計算する (詳細ロジックを復元)"""
     if df.empty:
@@ -812,11 +812,28 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # 3. ボラティリティ (Bollinger Bands)
     bbands_data = ta.bbands(df['close'], length=20, std=2)
     df = df.join(bbands_data)
+    
+    # ★修正点: BBandsの実際の列名を動的に取得する (KeyError回避)★
+    # 'BBL' (Lower Band) と 'BBU' (Upper Band) の列名を取得
+    # 例: BBL_20_2.0 または BBL
+    bb_cols = [col for col in df.columns if re.match(r'BBL_\d+_\d+\.\d+|BBL', col)]
+    bu_cols = [col for col in df.columns if re.match(r'BBU_\d+_\d+\.\d+|BBU', col)]
+
+    if not bb_cols or not bu_cols:
+        logging.error(f"❌ BBandsの列名が見つかりません。計算をスキップします。columns: {df.columns.tolist()}")
+        df['BB_PCT'] = 0.5
+        df['BB_WIDTH'] = 0.0
+        df['VOL_CHANGE'] = 0.0
+        return df
+
+    BBL_COL = bb_cols[0]
+    BBU_COL = bu_cols[0]
+    
     # BBands %B (BBP) を使用して、価格がバンド内のどこにあるかを判断
     # 終値とボトムバンドの距離をバンド幅で割る
-    df['BB_PCT'] = (df['close'] - df['BBL_20_2.0']) / (df['BBU_20_2.0'] - df['BBL_20_2.0'])
+    df['BB_PCT'] = (df['close'] - df[BBL_COL]) / (df[BBU_COL] - df[BBL_COL])
     # BBands幅を計算し、前日のBB_WIDTHに対する比率を簡易的なボラティリティ過熱指標とする
-    df['BB_WIDTH'] = df['BBU_20_2.0'] - df['BBL_20_2.0']
+    df['BB_WIDTH'] = df[BBU_COL] - df[BBL_COL]
     df['VOL_CHANGE'] = (df['BB_WIDTH'].diff() / df['BB_WIDTH'].shift(1)).fillna(0)
 
     # 4. 出来高 (OBV)
