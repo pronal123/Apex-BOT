@@ -339,7 +339,7 @@ def format_startup_message(
     )
 
     balance_section = f"💰 <b>先物口座ステータス</b>\n" 
-    if account_status.get('error'):
+    if account_status is not None and account_status.get('error'):
         balance_section += f"<pre>⚠️ ステータス取得失敗 (致命的エラーにより取引停止中)</pre>\n"
     else:
         equity_display = account_status['total_usdt_balance'] # equity (総資産)として扱う
