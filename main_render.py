@@ -79,7 +79,7 @@ TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
 # 💡 レートリミット対策用定数を追加 (修正点: 0.5秒 -> 1.5秒に増加)
-LEVERAGE_SETTING_DELAY = 1.5 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.5秒から1.5秒に増加
+LEVERAGE_SETTING_DELAY = 1.2 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.5秒から1.5秒に増加
 
 # 💡 リスクベースの動的ポジションサイジング設定 
 # BASE_TRADE_SIZE_USDTはリスクベースサイジングにより無視されますが、互換性のために残します。
@@ -1457,7 +1457,7 @@ async def main_bot_loop():
     
     # 1. アカウントステータスとマクロ情報の取得
     account_status = await fetch_account_status()
-    if account_status.get('error'):
+    if account_status is not None and account_status.get('error'):
         logging.critical("❌ 致命的: 口座ステータス取得エラー。取引を停止します。")
         return
         
