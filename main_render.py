@@ -1,14 +1,14 @@
 # ====================================================================================
-# Apex BOT v20.0.8 - Future Trading / 10x Leverage 
-# (Patch 50: mexc.fetch_balance() TypeError Fix)
+# Apex BOT v20.0.9 - Future Trading / 10x Leverage 
+# (Patch 51: mexc fetchBalance() NotSupported Fix)
 #
 # 改良・修正点:
-# 1. 【新規修正: Patch 50 - 残高取得修正】fetch_account_status() における mexc.fetch_balance() の呼び出しで
-#    TypeErrorが発生する問題を修正。CCXT Unified APIの仕様に合わせ、positional argument (currency) を削除し、
-#    paramsのみをキーワード引数として渡すように変更。
-# 2. 【継続修正: Patch 49 - ヘルスチェック】ルートパス "/" にシンプルな 200 OK を返すエンドポイント(@app.get("/"))を維持。
-#    これにより、UptimeRobotなどの監視サービスがBOTを正常稼働中と判断できるようになります。
-# 3. 【継続修正: Patch 48】initialize_exchange_client関数内での、既存クライアントセッションの明示的な close() ロジックを維持。
+# 1. 【新規修正: Patch 51 - MEXC残高取得修正】fetch_account_status() において、
+#    mexc.fetch_balance() が NotSupported エラーを返す問題を修正。
+#    MEXCクライアントの場合、先物口座の総資産 (Equity) 取得には 
+#    ccxt.fetch_margin_balance('USDT', params={'defaultType': 'swap'}) を使用するように変更。
+# 2. 【継続修正: Patch 50】fetch_balance() の引数TypeError回避ロジックを維持。
+# 3. 【継続修正: Patch 49】ヘルスチェックエンドポイントを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -455,7 +455,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.8 - Future Trading / 10x Leverage (Patch 50: Balance Fix)</i>") 
+    message += (f"<i>Bot Ver: v20.0.9 - Future Trading / 10x Leverage (Patch 51: Balance Fix)</i>") 
     return message
 
 
@@ -643,26 +643,33 @@ async def fetch_account_status() -> Dict:
         return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
     try:
-        # 💡 【新規修正箇所: Patch 50】CCXTのUnified APIに合わせ、fetch_balanceにcurrencyを渡すのをやめ、
-        # paramsのみをキーワード引数として渡すことでTypeErrorを回避
-        
-        fetch_params = {}
+        balance = None
         
         if EXCHANGE_CLIENT.id == 'mexc':
-             # 先物口座を指定 (currencyはNoneのまま)
-             fetch_params = {'type': 'future'} 
-        
-        # Unified APIに沿って、fetch_balanceをparamsのみで呼び出す
-        balance = await EXCHANGE_CLIENT.fetch_balance(params=fetch_params)
-        
-        # MEXCの場合、USDT建てのフューチャー残高 (equity/total) を総資産として扱う
-        # balance['total']['USDT'] にアクセス
+            # 💡 【新規修正箇所: Patch 51】
+            # mexc.fetch_balance() が NotSupported のため、先物口座の Equity 取得には
+            # 統一 APIの fetch_margin_balance を使用する
+            
+            # USDT建ての先物口座情報を取得 (currency=USDT, type=swapを指定)
+            # CCXTのUnified APIに沿って、fetch_margin_balanceを呼び出す
+            balance = await EXCHANGE_CLIENT.fetch_margin_balance('USDT', params={'defaultType': 'swap'})
+            
+        else:
+            # 他の取引所向け
+            fetch_params = {'type': 'future'} if TRADE_TYPE == 'future' else {} 
+            # 💡 【継続修正: Patch 50】fetch_balanceにparamsのみをキーワード引数として渡す
+            balance = await EXCHANGE_CLIENT.fetch_balance(params=fetch_params)
+
+        # balanceが取得できなかった場合はエラー
+        if not balance:
+             raise Exception("Balance object is empty.")
+
+        # 1. total_usdt_balance (総資産: Equity) の取得
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
         
-        # フォールバック: total_usdt_balance が 0.0 の場合、infoセクションからtotalEquityを探す
-        if total_usdt_balance == 0.0 and EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
+        # 2. MEXC特有のフォールバックロジック (infoからtotalEquityを探す)
+        if EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
             # infoセクションからtotalEquityを探す (MEXC特有の処理)
-            # MEXC先物APIのレスポンス構造を解析して、totalEquityを取得する
             mexc_data = balance['info'].get('data')
             if mexc_data and mexc_data.get('assets'):
                 for asset in mexc_data['assets']:
@@ -671,7 +678,7 @@ async def fetch_account_status() -> Dict:
                         total_usdt_balance_fallback = float(asset.get('totalEquity', 0.0))
                         if total_usdt_balance_fallback > 0:
                             total_usdt_balance = total_usdt_balance_fallback
-                            logging.warning("⚠️ fetch_balanceのtotalが0のため、MEXC専用のフォールバックロジックでEquityを再取得しました。")
+                            logging.warning("⚠️ fetch_margin_balance の total が 0 のため、MEXC専用のフォールバックロジックで Equity を再取得しました。")
                         break
         
         # グローバル変数に最新の総資産を保存
@@ -688,6 +695,7 @@ async def fetch_account_status() -> Dict:
     except ccxt.AuthenticationError as e:
         logging.critical(f"❌ 口座ステータス取得失敗 (認証エラー): {e}")
     except Exception as e:
+        # Patch 51では NotSupported が発生しにくくなるが、念のため捕捉
         logging.error(f"❌ 口座ステータス取得失敗 (予期せぬエラー): {e}", exc_info=True)
 
     return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
@@ -1373,7 +1381,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.8 (Patch 50)"
+            "v20.0.9 (Patch 51)"
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1469,7 +1477,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.8", "timestamp": datetime.now(JST).isoformat()}
+        content={"status": message, "version": "v20.0.9", "timestamp": datetime.now(JST).isoformat()}
     )
 
 
