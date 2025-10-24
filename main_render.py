@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.16 - Future Trading / 10x Leverage 
-# (Patch 62: MEXC Symbol ID FIX for Future Trading)
+# Apex BOT v20.0.17 - Future Trading / 10x Leverage 
+# (Patch 63: MEXC set_leverage FIX for Cross Margin)
 #
 # 改良・修正点:
-# 1. 【バグ修正: Patch 62】execute_trade関数で、取引所シンボルIDを先物/スワップ市場から確実に取得するように修正。
-# 2. 【ロジック維持: Patch 61】TRADE_SIGNAL_COOLDOWN を 12時間で維持。
-# 3. 【ロジック維持: Patch 59】Trade only the Single Highest Score Signal (Top 1) を維持。
+# 1. 【バグ修正: Patch 63】MEXCでの set_leverage 呼び出し時に、クロスマージン ('openType': 2) を明示的に指定するように修正し、
+#    set_leverage エラー ("mexc setLeverage() requires a positionId parameter or a symbol argument...") を解決。
+# 2. 【ロジック維持: Patch 62】取引所シンボルID取得ロジックの修正を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -474,7 +474,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.16 - Future Trading / 10x Leverage (Patch 62: MEXC Symbol ID FIX)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.17 - Future Trading / 10x Leverage (Patch 63: MEXC set_leverage FIX)</i>") # BOTバージョンを更新
     return message
 
 
@@ -633,12 +633,30 @@ async def initialize_exchange_client() -> bool:
             # 💡 NOTE: load_marketsで全ての市場をロードしたため、ここでFuture/Swap市場を探してレバレッジを設定する
             for mkt in EXCHANGE_CLIENT.markets.values():
                  # USDT建てのSwap/Future市場を探す
+                 # symbol: 'BTC/USDT:USDT' の形式を想定
                  if mkt['quote'] == 'USDT' and mkt['type'] in ['swap', 'future'] and mkt['active']:
-                     symbols_to_set_leverage.append(mkt['symbol'])
+                     # ユーザーが指定するCCXT標準のシンボル形式
+                     symbols_to_set_leverage.append(mkt['symbol']) 
             
             for symbol in symbols_to_set_leverage:
                 try:
-                    await EXCHANGE_CLIENT.set_leverage(LEVERAGE, symbol, params={'marginMode': 'cross'}) 
+                    # ★ Patch 63 FIX: MEXCのset_leverageエラーに対応するため、
+                    #   'openType': 2 (Cross Margin) と 'positionType': 3 (Both sides - One-Way) を指定。
+                    #   MEXCでは 'marginMode' の代わりに 'openType' を使用する。
+                    #   'positionType: 3' (Both sides - One-Way) はデフォルトのモードを維持するために入れているが、
+                    #   openType=2 だけでもクロス設定が可能か確認。CCXTドキュメントに基づき openType=2 を追加。
+                    
+                    # 💡 set_leverage はシンボル形式 (BTC/USDT:USDT) で実行
+                    await EXCHANGE_CLIENT.set_leverage(
+                        LEVERAGE, 
+                        symbol, 
+                        params={
+                            # 'cross' の設定を示す。openType: 1=isolated, 2=cross
+                            'openType': 2, 
+                            'positionType': 3, # 3: Both sides (一方向モードを維持)
+                            # 'marginMode': 'cross' # CCXT標準だが、MEXC APIが直接要求しないため削除
+                        }
+                    ) 
                 except Exception as e:
                     logging.warning(f"⚠️ {symbol} のレバレッジ設定 ({LEVERAGE}x) に失敗しました: {e}")
             
@@ -1184,6 +1202,7 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
     # 1. 注文実行（先物ポジションの決済: 反対売買の成行注文）
     try:
         # closePosition: True はポジションを全て決済するためのCCXT共通パラメータ
+        # MEXCでは positionSide をパラメーターとして渡す必要がある
         params = {'positionSide': position_side, 'closePosition': True} 
         
         if TEST_MODE:
@@ -1443,7 +1462,7 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
         order_side = 'buy' if side == 'long' else 'sell'
         position_side = 'LONG' if side == 'long' else 'SHORT'
         
-        # 先物注文パラメータ
+        # 先物注文パラメータ: MEXCでは positionSide をパラメーターとして渡す必要がある
         params = {'positionSide': position_side} 
         
         order = await EXCHANGE_CLIENT.create_order(
@@ -1638,7 +1657,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.16 (Patch 62)" # BOTバージョンを更新
+            "v20.0.17 (Patch 63)" # BOTバージョンを更新
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1734,7 +1753,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.16", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.17", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
