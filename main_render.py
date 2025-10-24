@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v20.0.9 - Future Trading / 10x Leverage 
-# (Patch 52: mexc balance AttributeError Fix)
+# Apex BOT v20.0.10 - Future Trading / 10x Leverage 
+# (Patch 53: CCXT Request Timeout Extension)
 #
 # 改良・修正点:
-# 1. 【新規修正: Patch 52 - MEXC残高取得再修正】fetch_account_status() において、
-#    前回の修正 (fetch_margin_balance) が AttributeError を引き起こしたため、
-#    MEXC専用のプライベートAPI呼び出し (privateGetAccountAssets) に切り替え、
-#    生のAPI応答から総資産 (Equity) を取得するように変更。
-# 2. 【継続修正: Patch 50】fetch_balance() の引数TypeError回避ロジックを維持。
+# 1. 【新規修正: Patch 53 - ネットワークタイムアウト延長】initialize_exchange_client() にて、
+#    CCXTクライアントのリクエストタイムアウトを30秒 (30000ms) に延長。
+#    これにより、API接続の不安定さに起因する RequestTimeout エラーの発生頻度を低減。
+# 2. 【継続修正: Patch 52】MEXC残高取得メソッドの専用API呼び出しロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -454,7 +453,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.9 - Future Trading / 10x Leverage (Patch 52: Balance Re-Fix)</i>") 
+    message += (f"<i>Bot Ver: v20.0.10 - Future Trading / 10x Leverage (Patch 53: Timeout Fix)</i>") 
     return message
 
 
@@ -590,12 +589,17 @@ async def initialize_exchange_client() -> bool:
             'defaultType': 'future', 
         }
 
+        # 💡 【新規修正箇所: Patch 53】ネットワークタイムアウトを延長 (例: 30秒 = 30000ms)
+        timeout_ms = 30000 
+        
         EXCHANGE_CLIENT = exchange_class({
             'apiKey': API_KEY,
             'secret': SECRET_KEY,
             'enableRateLimit': True,
-            'options': options
+            'options': options,
+            'timeout': timeout_ms # ★ タイムアウト設定を追加
         })
+        logging.info(f"✅ CCXTクライアントの初期化設定完了。リクエストタイムアウト: {timeout_ms/1000}秒。") 
         
         await EXCHANGE_CLIENT.load_markets() 
         
@@ -626,7 +630,8 @@ async def initialize_exchange_client() -> bool:
     except ccxt.ExchangeNotAvailable as e: 
         logging.critical(f"❌ CCXT初期化失敗 - 取引所接続エラー: サーバーが利用できません。{e}", exc_info=True)
     except ccxt.NetworkError as e:
-        logging.critical(f"❌ CCXT初期化失敗 - ネットワークエラー: 接続を確認してください。{e}", exc_info=True)
+        # RequestTimeoutもccxt.NetworkErrorを継承しているため、ここで捕捉
+        logging.critical(f"❌ CCXT初期化失敗 - ネットワークエラー/タイムアウト: 接続を確認してください。{e}", exc_info=True)
     except Exception as e:
         logging.critical(f"❌ CCXTクライアント初期化失敗 - 予期せぬエラー: {e}", exc_info=True)
         
@@ -645,10 +650,9 @@ async def fetch_account_status() -> Dict:
         balance = None
         
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 💡 【新規修正箇所: Patch 52】
+            # 💡 【継続修正箇所: Patch 52】
             # fetch_balance() が NotSupported、fetch_margin_balance() が AttributeError のため、
             # MEXC専用の生の先物アカウント情報APIを直接呼び出す。
-            # 通常、これは V3 API の 'privateGetAccountAssets' に対応。
             
             # 生のAPI応答を取得し、それを 'balance' 辞書の 'info' に格納
             if hasattr(EXCHANGE_CLIENT, 'privateGetAccountAssets'):
@@ -1390,7 +1394,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.9 (Patch 52)"
+            "v20.0.10 (Patch 53)"
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1486,7 +1490,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.9", "timestamp": datetime.now(JST).isoformat()}
+        content={"status": message, "version": "v20.0.10", "timestamp": datetime.now(JST).isoformat()}
     )
 
 
@@ -1509,7 +1513,13 @@ async def startup_event():
 @app.exception_handler(Exception)
 async def default_exception_handler(request, exc):
     """捕捉されなかった例外を処理し、ログに記録する (変更なし)"""
-    logging.error(f"❌ 予期せぬエラーが発生しました: {exc}", exc_info=True)
+    # 💡 aiohttpのUnclosedリソース警告はUvicorn/Renderの環境固有の問題であるため、
+    #    致命的ではない限りログレベルを落とす、または無視することが多いが、
+    #    ここではCCXTのエラーが原因なので、CRITICALログは維持
+    
+    # CCXT RequestTimeoutの後に aiohttp の警告が出るのは一般的
+    if "Unclosed" not in str(exc):
+        logging.error(f"❌ 予期せぬエラーが発生しました: {exc}", exc_info=True)
     
     return JSONResponse(
         status_code=500,
