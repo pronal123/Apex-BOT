@@ -1,12 +1,13 @@
 # ====================================================================================
 # Apex BOT v20.0.10 - Future Trading / 10x Leverage 
-# (Patch 53: CCXT Request Timeout Extension)
+# (Patch 54: MEXC Balance Fetch Robustness Fix)
 #
 # 改良・修正点:
-# 1. 【新規修正: Patch 53 - ネットワークタイムアウト延長】initialize_exchange_client() にて、
-#    CCXTクライアントのリクエストタイムアウトを30秒 (30000ms) に延長。
-#    これにより、API接続の不安定さに起因する RequestTimeout エラーの発生頻度を低減。
-# 2. 【継続修正: Patch 52】MEXC残高取得メソッドの専用API呼び出しロジックを維持。
+# 1. 【新規修正: Patch 54 - MEXC残高取得ロバスト化】
+#    fetch_account_status() において、CCXTがMEXCから取得する口座情報がリスト構造で
+#    返された場合 ('list' object has no attribute 'get' エラー) に対応するロジックを追加し、
+#    totalEquityを安定して取得できるように修正しました。
+# 2. 【継続修正: Patch 53】CCXTリクエストタイムアウト延長設定を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -453,7 +454,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.10 - Future Trading / 10x Leverage (Patch 53: Timeout Fix)</i>") 
+    message += (f"<i>Bot Ver: v20.0.10 - Future Trading / 10x Leverage (Patch 54: Balance Fix)</i>") 
     return message
 
 
@@ -589,7 +590,7 @@ async def initialize_exchange_client() -> bool:
             'defaultType': 'future', 
         }
 
-        # 💡 【新規修正箇所: Patch 53】ネットワークタイムアウトを延長 (例: 30秒 = 30000ms)
+        # 💡 【継続修正箇所: Patch 53】ネットワークタイムアウトを延長 (例: 30秒 = 30000ms)
         timeout_ms = 30000 
         
         EXCHANGE_CLIENT = exchange_class({
@@ -650,18 +651,18 @@ async def fetch_account_status() -> Dict:
         balance = None
         
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 💡 【継続修正箇所: Patch 52】
-            # fetch_balance() が NotSupported、fetch_margin_balance() が AttributeError のため、
-            # MEXC専用の生の先物アカウント情報APIを直接呼び出す。
+            # 💡 【継続修正: Patch 52】fetch_balance()の信頼性が低いため、生のAPI呼び出しを試みる
             
-            # 生のAPI応答を取得し、それを 'balance' 辞書の 'info' に格納
+            # privateGetAccountAssets (MEXC v3の非公開API) が存在するかをチェック
             if hasattr(EXCHANGE_CLIENT, 'privateGetAccountAssets'):
                  logging.info("ℹ️ MEXC: privateGetAccountAssets を使用して生の口座情報を取得します。")
                  raw_mexc_data = await EXCHANGE_CLIENT.privateGetAccountAssets()
+                 # raw_mexc_dataを 'info' に格納して、標準のbalanceオブジェクトを模擬
                  balance = {'info': raw_mexc_data} 
             else:
                  logging.error("❌ MEXC: privateGetAccountAssets メソッドが CCXT クライアントに見つかりません。バージョンを確認してください。")
-                 # 既知のエラーが発生する fetch_balance を実行せざるを得ない
+                 # 存在しない場合、fetch_balanceにフォールバック (NotSupportedエラーの可能性あり)
+                 # MEXC先物では defaultType='swap' が使われることが多い
                  balance = await EXCHANGE_CLIENT.fetch_balance(params={'defaultType': 'swap'})
 
         else:
@@ -674,25 +675,57 @@ async def fetch_account_status() -> Dict:
         if not balance:
              raise Exception("Balance object is empty.")
 
-        # 1. total_usdt_balance (総資産: Equity) の取得
-        #   (Patch 52では、MEXCの場合 balance['total'] は空の可能性が高いため、以下のフォールバックが本命)
+        # 1. total_usdt_balance (総資産: Equity) の取得 (標準フィールド)
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
         
         # 2. MEXC特有のフォールバックロジック (infoからtotalEquityを探す)
-        #    - Patch 52で生のAPI応答を格納した場合、ここで総資産を抽出する。
         if EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
             # infoセクションからtotalEquityを探す (MEXC特有の処理)
-            mexc_data = balance['info'].get('data')
-            if mexc_data and mexc_data.get('assets'):
-                for asset in mexc_data['assets']:
-                    if asset.get('currency') == 'USDT':
-                        # totalEquityがMEXCの先物総資産
-                        total_usdt_balance_fallback = float(asset.get('totalEquity', 0.0))
-                        if total_usdt_balance_fallback > 0:
-                            # フォールバックで取得できた値を採用
-                            total_usdt_balance = total_usdt_balance_fallback
-                            logging.warning("⚠️ MEXC専用フォールバックロジック (privateGetAccountAssetsの結果) で Equity を取得しました。")
-                        break
+            
+            # CCXTのfetch_balanceや生のAPI応答で 'data' の値がリストの場合に対応するため、
+            # 'data'キーをまず確認し、リストであれば最初の要素を取得する。
+            
+            raw_data = balance['info']
+            mexc_raw_data = None
+            
+            # raw_dataが辞書であり、'data'キーを持つ場合
+            if isinstance(raw_data, dict) and 'data' in raw_data:
+                mexc_raw_data = raw_data.get('data')
+            else:
+                # raw_data自体がリストの場合 (CCXTのfetch_balanceは生のAPI応答をinfoに入れるため、このパターンは少ないが念のため)
+                mexc_raw_data = raw_data
+
+            # 💡 【修正点: Patch 54】リストオブジェクトに対するget()呼び出しエラーに対応
+            mexc_data: Optional[Dict] = None
+            if isinstance(mexc_raw_data, list) and len(mexc_raw_data) > 0:
+                # リストの場合、通常は最初の要素にUSDTの要約情報が含まれると想定
+                # 念のため、最初の要素が辞書であることを確認
+                if isinstance(mexc_raw_data[0], dict):
+                    mexc_data = mexc_raw_data[0]
+            elif isinstance(mexc_raw_data, dict):
+                mexc_data = mexc_raw_data
+            
+            
+            # mexc_data (dictを期待) の中から totalEquity を抽出するロジック
+            if mexc_data:
+                total_usdt_balance_fallback = 0.0
+                
+                # Case A: V3 API形式 - mexc_data自体がUSDT資産情報を持っている
+                if mexc_data.get('currency') == 'USDT':
+                    total_usdt_balance_fallback = float(mexc_data.get('totalEquity', 0.0))
+                
+                # Case B: V1 API形式 - mexc_data内の'assets'リストに情報がある
+                # (以前のエラーの原因となっていたロジックだが、型チェックを追加して残す)
+                elif mexc_data.get('assets') and isinstance(mexc_data['assets'], list):
+                    for asset in mexc_data['assets']:
+                        if asset.get('currency') == 'USDT':
+                            total_usdt_balance_fallback = float(asset.get('totalEquity', 0.0))
+                            break
+                
+                if total_usdt_balance_fallback > 0:
+                    # フォールバックで取得できた値を採用
+                    total_usdt_balance = total_usdt_balance_fallback
+                    logging.warning("⚠️ MEXC専用フォールバックロジックで Equity を取得しました。")
         
         # グローバル変数に最新の総資産を保存
         ACCOUNT_EQUITY_USDT = total_usdt_balance
@@ -708,7 +741,7 @@ async def fetch_account_status() -> Dict:
     except ccxt.AuthenticationError as e:
         logging.critical(f"❌ 口座ステータス取得失敗 (認証エラー): {e}")
     except Exception as e:
-        # Patch 52でカバーしきれない予期せぬエラー (例: CCXT内部でNotSupportedが再度発生した場合など)
+        # Patch 54でカバーしきれない予期せぬエラー 
         logging.error(f"❌ 口座ステータス取得失敗 (予期せぬエラー): {e}", exc_info=True)
 
     return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
@@ -1394,7 +1427,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.10 (Patch 53)"
+            "v20.0.10 (Patch 54)"
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
