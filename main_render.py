@@ -1,13 +1,15 @@
 # ====================================================================================
-# Apex BOT v20.0.10 - Future Trading / 10x Leverage 
-# (Patch 54: MEXC Balance Fetch Robustness Fix)
+# Apex BOT v20.0.11 - Future Trading / 10x Leverage 
+# (Patch 56: Fix UnboundLocalError in main_bot_loop)
 #
 # 改良・修正点:
-# 1. 【新規修正: Patch 54 - MEXC残高取得ロバスト化】
-#    fetch_account_status() において、CCXTがMEXCから取得する口座情報がリスト構造で
-#    返された場合 ('list' object has no attribute 'get' エラー) に対応するロジックを追加し、
-#    totalEquityを安定して取得できるように修正しました。
-# 2. 【継続修正: Patch 53】CCXTリクエストタイムアウト延長設定を維持。
+# 1. 【新規修正: Patch 56 - UnboundLocalErrorの解消】
+#    main_bot_loop() 関数内で、LAST_ANALYSIS_ONLY_NOTIFICATION_TIME と LAST_WEBSHARE_UPLOAD_TIME
+#    が global 宣言されていなかったために発生した UnboundLocalError を解消するため、
+#    これらを global 宣言に追加しました。
+# 2. 【継続修正: Patch 55】MEXC残高取得パスの最適化ロジックを維持。
+# 3. 【継続修正: Patch 54】リストオブジェクトエラー対応ロジックを維持。
+# 4. 【継続修正: Patch 53】CCXTリクエストタイムアウト延長設定を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -454,7 +456,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.10 - Future Trading / 10x Leverage (Patch 54: Balance Fix)</i>") 
+    message += (f"<i>Bot Ver: v20.0.11 - Future Trading / 10x Leverage (Patch 56: Fix UnboundLocalError)</i>") 
     return message
 
 
@@ -650,21 +652,11 @@ async def fetch_account_status() -> Dict:
     try:
         balance = None
         
+        # 💡 【継続修正: Patch 55】MEXCの専用メソッドチェックを削除し、fetch_balance('swap')に一本化
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 💡 【継続修正: Patch 52】fetch_balance()の信頼性が低いため、生のAPI呼び出しを試みる
-            
-            # privateGetAccountAssets (MEXC v3の非公開API) が存在するかをチェック
-            if hasattr(EXCHANGE_CLIENT, 'privateGetAccountAssets'):
-                 logging.info("ℹ️ MEXC: privateGetAccountAssets を使用して生の口座情報を取得します。")
-                 raw_mexc_data = await EXCHANGE_CLIENT.privateGetAccountAssets()
-                 # raw_mexc_dataを 'info' に格納して、標準のbalanceオブジェクトを模擬
-                 balance = {'info': raw_mexc_data} 
-            else:
-                 logging.error("❌ MEXC: privateGetAccountAssets メソッドが CCXT クライアントに見つかりません。バージョンを確認してください。")
-                 # 存在しない場合、fetch_balanceにフォールバック (NotSupportedエラーの可能性あり)
-                 # MEXC先物では defaultType='swap' が使われることが多い
-                 balance = await EXCHANGE_CLIENT.fetch_balance(params={'defaultType': 'swap'})
-
+            # MEXC先物では defaultType='swap' が使われることが多い
+            logging.info("ℹ️ MEXC: fetch_balance(type='swap') を使用して口座情報を取得します。")
+            balance = await EXCHANGE_CLIENT.fetch_balance(params={'defaultType': 'swap'})
         else:
             # 他の取引所向け
             fetch_params = {'type': 'future'} if TRADE_TYPE == 'future' else {} 
@@ -679,11 +671,8 @@ async def fetch_account_status() -> Dict:
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
         
         # 2. MEXC特有のフォールバックロジック (infoからtotalEquityを探す)
+        # Patch 54でリスト/ディクショナリの型エラーに対応するロバスト化済み
         if EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
-            # infoセクションからtotalEquityを探す (MEXC特有の処理)
-            
-            # CCXTのfetch_balanceや生のAPI応答で 'data' の値がリストの場合に対応するため、
-            # 'data'キーをまず確認し、リストであれば最初の要素を取得する。
             
             raw_data = balance['info']
             mexc_raw_data = None
@@ -692,14 +681,13 @@ async def fetch_account_status() -> Dict:
             if isinstance(raw_data, dict) and 'data' in raw_data:
                 mexc_raw_data = raw_data.get('data')
             else:
-                # raw_data自体がリストの場合 (CCXTのfetch_balanceは生のAPI応答をinfoに入れるため、このパターンは少ないが念のため)
+                # raw_data自体がリストの場合
                 mexc_raw_data = raw_data
 
-            # 💡 【修正点: Patch 54】リストオブジェクトに対するget()呼び出しエラーに対応
+            # 💡 【継続修正: Patch 54】リストオブジェクトに対するget()呼び出しエラーに対応
             mexc_data: Optional[Dict] = None
             if isinstance(mexc_raw_data, list) and len(mexc_raw_data) > 0:
                 # リストの場合、通常は最初の要素にUSDTの要約情報が含まれると想定
-                # 念のため、最初の要素が辞書であることを確認
                 if isinstance(mexc_raw_data[0], dict):
                     mexc_data = mexc_raw_data[0]
             elif isinstance(mexc_raw_data, dict):
@@ -715,7 +703,6 @@ async def fetch_account_status() -> Dict:
                     total_usdt_balance_fallback = float(mexc_data.get('totalEquity', 0.0))
                 
                 # Case B: V1 API形式 - mexc_data内の'assets'リストに情報がある
-                # (以前のエラーの原因となっていたロジックだが、型チェックを追加して残す)
                 elif mexc_data.get('assets') and isinstance(mexc_data['assets'], list):
                     for asset in mexc_data['assets']:
                         if asset.get('currency') == 'USDT':
@@ -994,10 +981,10 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         # TP価格の計算
         take_profit = current_price + (risk_usdt_per_unit * dynamic_rr_ratio)
         
-        # 最終的なRRRを記録用として算出
+        # 3. 最終的なRRRを記録用として算出
         rr_ratio = dynamic_rr_ratio 
         
-        # 3. 清算価格の計算 
+        # 4. 清算価格の計算 
         liquidation_price = calculate_liquidation_price(current_price, LEVERAGE, side='long', maintenance_margin_rate=MIN_MAINTENANCE_MARGIN_RATE)
 
         ##############################################################
@@ -1006,7 +993,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         
         if score > current_threshold and rr_ratio >= 1.0 and risk_usdt_per_unit > 0:
             
-            # 4. リスクベースのポジションサイジング計算
+            # 5. リスクベースのポジションサイジング計算
             max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
             
             # Base通貨建ての目標数量 (ポジションサイジングの核心)
@@ -1304,6 +1291,8 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
 async def main_bot_loop():
     """BOTのメイン処理: データ取得、分析、取引執行を制御する"""
     global EXCHANGE_CLIENT, LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT
+    # 💡 【新規修正: Patch 56】UnboundLocalErrorを解消するため、global宣言に追加
+    global LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_WEBSHARE_UPLOAD_TIME
     
     if not IS_CLIENT_READY:
         logging.warning("⚠️ メインループスキップ: CCXTクライアントが初期化されていません。再試行します...")
@@ -1427,7 +1416,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.10 (Patch 54)"
+            "v20.0.11 (Patch 56)"
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1523,7 +1512,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.10", "timestamp": datetime.now(JST).isoformat()}
+        content={"status": message, "version": "v20.0.11", "timestamp": datetime.now(JST).isoformat()}
     )
 
 
