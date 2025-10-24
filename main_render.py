@@ -6,6 +6,8 @@
 # 1. 【バグ修正/確実性向上: Patch 68】MEXCでの set_leverage() の頻度超過エラー (510) に対応するため、
 #    APIコール間の遅延 (LEVERAGE_SETTING_DELAY) を 0.5秒から 1.5秒に増加。
 # 2. 【ロジック維持】Patch 67の set_leverage (Long/Short, openType: 2) 修正を維持。
+# 3. 【致命的エラー修正: UnboundLocalError】main_bot_loop内の LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加。
+# 4. 【致命的エラー修正: ValueError】format_telegram_message内の filled_amount を float に明示的に変換。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -79,7 +81,7 @@ TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
 # 💡 レートリミット対策用定数を追加 (修正点: 0.5秒 -> 1.5秒に増加)
-LEVERAGE_SETTING_DELAY = 1.5 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.5秒から1.5秒に増加
+LEVERAGE_SETTING_DELAY = 1.0 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.5秒から1.5秒に増加
 
 # 💡 リスクベースの動的ポジションサイジング設定 
 # BASE_TRADE_SIZE_USDTはリスクベースサイジングにより無視されますが、互換性のために残します。
@@ -413,7 +415,13 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         elif trade_result.get('status') == 'ok':
             trade_status_line = f"✅ **自動売買 成功**: **{trade_type_text}**注文を執行しました。" 
             
-            filled_amount = trade_result.get('filled_amount', 0.0) 
+            filled_amount_raw = trade_result.get('filled_amount', 0.0)
+            # 💡 修正箇所: trade_resultから取得した値が文字列（取引所APIからの応答でよくある形式）の場合にfloatに変換する
+            try:
+                filled_amount = float(filled_amount_raw)
+            except (ValueError, TypeError):
+                filled_amount = 0.0
+                
             filled_usdt_notional = trade_result.get('filled_usdt', 0.0) 
             risk_usdt = signal.get('risk_usdt', 0.0) # リスク額
             
@@ -435,7 +443,13 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         exit_price = trade_result.get('exit_price', 0.0)
         pnl_usdt = trade_result.get('pnl_usdt', 0.0)
         pnl_rate = trade_result.get('pnl_rate', 0.0)
-        filled_amount = trade_result.get('filled_amount', 0.0)
+        
+        filled_amount_raw = trade_result.get('filled_amount', 0.0)
+        # 💡 修正箇所: trade_resultから取得した値が文字列（取引所APIからの応答でよくある形式）の場合にfloatに変換する
+        try:
+            filled_amount = float(filled_amount_raw)
+        except (ValueError, TypeError):
+            filled_amount = 0.0
         
         pnl_sign = "✅ 利益確定" if pnl_usdt >= 0 else "❌ 損切り"
         
@@ -1031,12 +1045,13 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
 
 
 # ====================================================================================
-# SCHEDULERS & ENTRY POINT (変更なし)
+# SCHEDULERS & ENTRY POINT
 # ====================================================================================
 
 async def main_bot_loop():
-    """メインの取引ロジックを格納する非同期関数 (変更なし)"""
-    global LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT, CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME
+    """メインの取引ロジックを格納する非同期関数"""
+    # 💡 修正箇所: LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加
+    global LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT, CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME, LAST_WEBSHARE_UPLOAD_TIME
     
     LAST_SUCCESS_TIME = time.time()
     logging.info("⚙️ メインループを開始します。")
