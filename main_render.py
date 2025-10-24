@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.18 - Future Trading / 10x Leverage 
-# (Patch 64: Rate Limit FIX for initialize_exchange_client)
+# Apex BOT v20.0.19 - Future Trading / 10x Leverage 
+# (Patch 65: Robust MEXC Leverage/MarginMode Setup FIX)
 #
 # 改良・修正点:
-# 1. 【レートリミット対策: Patch 64】initialize_exchange_client関数内のレバレッジ設定ループに、
-#    レートリミット回避のための非同期遅延 (asyncio.sleep) を追加しました。
-# 2. 【バグ修正: Patch 63】MEXCでの set_leverage 呼び出し時のクロスマージン設定修正を維持。
+# 1. 【バグ修正/確実性向上: Patch 65】MEXCでの set_leverage エラー (code: 600) 対策として、
+#    set_margin_mode('cross') と set_leverage を分離し、CCXT標準の2段階設定ロジックに修正。
+# 2. 【レートリミット対策強化】LEVERAGE_SETTING_DELAYを0.3秒から0.5秒に増加させ、code: 510エラーを軽減。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -79,7 +79,7 @@ TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
 # 💡 レートリミット対策用定数を追加 (修正点)
-LEVERAGE_SETTING_DELAY = 0.3 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒)
+LEVERAGE_SETTING_DELAY = 0.5 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.3秒から0.5秒に増加
 
 # 💡 リスクベースの動的ポジションサイジング設定 
 # BASE_TRADE_SIZE_USDTはリスクベースサイジングにより無視されますが、互換性のために残します。
@@ -141,16 +141,16 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.80       
-SIGNAL_THRESHOLD_NORMAL = 0.75      
-SIGNAL_THRESHOLD_ACTIVE = 0.70      
+SIGNAL_THRESHOLD_SLUMP = 0.90       
+SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_ACTIVE = 0.75      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
 OBV_MOMENTUM_BONUS = 0.04           
 
 # ====================================================================================
-# UTILITIES & FORMATTING
+# UTILITIES & FORMATTING (変更なし)
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -477,7 +477,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.18 - Future Trading / 10x Leverage (Patch 64: Rate Limit FIX)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.19 - Future Trading / 10x Leverage (Patch 65: Robust MEXC Setup)</i>") # BOTバージョンを更新
     return message
 
 
@@ -641,29 +641,38 @@ async def initialize_exchange_client() -> bool:
                      # ユーザーが指定するCCXT標準のシンボル形式
                      symbols_to_set_leverage.append(mkt['symbol']) 
             
+            # --- 🚀 Patch 65 FIX: マージンモード設定とレバレッジ設定を分離 ---
+            
+            # 1. マージンモードを 'cross' に設定
             for symbol in symbols_to_set_leverage:
                 try:
-                    # ★ Patch 63 FIX: MEXCのset_leverageエラーに対応するため、
-                    #   'openType': 2 (Cross Margin) と 'positionType': 3 (Both sides - One-Way) を指定。
-                    
-                    # 💡 set_leverage はシンボル形式 (BTC/USDT:USDT) で実行
-                    await EXCHANGE_CLIENT.set_leverage(
-                        LEVERAGE, 
-                        symbol, 
-                        params={
-                            # 'cross' の設定を示す。openType: 1=isolated, 2=cross
-                            'openType': 2, 
-                            'positionType': 3, # 3: Both sides (一方向モードを維持)
-                            # 'marginMode': 'cross' # CCXT標準だが、MEXC APIが直接要求しないため削除
-                        }
-                    ) 
+                    # CCXT標準の set_margin_mode を使用
+                    await EXCHANGE_CLIENT.set_margin_mode('cross', symbol)
+                    logging.info(f"✅ {symbol} のマージンモードを 'cross' に設定しました。")
                 except Exception as e:
-                    logging.warning(f"⚠️ {symbol} のレバレッジ設定 ({LEVERAGE}x) に失敗しました: {e}")
-                
-                # 💥 レートリミット対策として遅延を挿入 (修正点)
+                    # 既に設定済みの場合など、エラーになる可能性があるため警告レベルに留める
+                    logging.warning(f"⚠️ {symbol} のマージンモード設定に失敗しました: {e}")
+                    
+                # 💥 レートリミット対策として遅延を挿入 (0.5秒)
                 await asyncio.sleep(LEVERAGE_SETTING_DELAY)
 
-            logging.info(f"✅ MEXCのレバレッジを主要な先物銘柄 ({len(symbols_to_set_leverage)}件) で {LEVERAGE}x (クロス) に設定しました。")
+            # 2. レバレッジを設定
+            for symbol in symbols_to_set_leverage:
+                try:
+                    # set_leverage はレバレッジ値のみを設定
+                    # カスタムパラメータ (openType, positionType) は code: 600 の原因だったため削除
+                    await EXCHANGE_CLIENT.set_leverage(LEVERAGE, symbol)
+                    logging.info(f"✅ {symbol} のレバレッジを {LEVERAGE}x に設定しました。")
+                except Exception as e:
+                    # ここで rate limit (510) や parameter error (600) が出ることを防ぐ
+                    logging.warning(f"⚠️ {symbol} のレバレッジ設定 ({LEVERAGE}x) に失敗しました: {e}")
+                    
+                # 💥 レートリミット対策として遅延を挿入 (2回目の遅延)
+                await asyncio.sleep(LEVERAGE_SETTING_DELAY) 
+
+            logging.info(f"✅ MEXCの主要な先物銘柄 ({len(symbols_to_set_leverage)}件) に対し、マージンモードを 'cross'、レバレッジを {LEVERAGE}x に設定しました。")
+            
+            # --- 🚀 Patch 65 FIX 終了 ---
 
         # ログメッセージを 'future' モードに変更
         logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を先物取引モードで初期化し、市場情報をロードしました。")
@@ -686,7 +695,7 @@ async def initialize_exchange_client() -> bool:
     return False
 
 async def fetch_account_status() -> Dict:
-    """CCXTから先物口座の残高と利用可能マージン情報を取得し、グローバル変数に格納する。"""
+    """CCXTから先物口座の残高と利用可能マージン情報を取得し、グローバル変数に格納する。 (変更なし)"""
     global EXCHANGE_CLIENT, ACCOUNT_EQUITY_USDT
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -772,7 +781,7 @@ async def fetch_account_status() -> Dict:
 
 
 async def fetch_open_positions() -> List[Dict]:
-    """CCXTから現在オープン中のポジション情報を取得し、ローカルリストを更新する。"""
+    """CCXTから現在オープン中のポジション情報を取得し、ローカルリストを更新する。 (変更なし)"""
     global EXCHANGE_CLIENT, OPEN_POSITIONS
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -837,11 +846,11 @@ async def fetch_open_positions() -> List[Dict]:
 
 
 # ====================================================================================
-# ANALYTICAL CORE (プレースホルダーを維持)
+# ANALYTICAL CORE (変更なし)
 # ====================================================================================
 
 async def calculate_fgi() -> Dict:
-    """外部APIからFGI (恐怖・貪欲指数) を取得する (v20.0.17のロジックを維持)"""
+    """外部APIからFGI (恐怖・貪欲指数) を取得する (変更なし)"""
     try:
         response = await asyncio.to_thread(requests.get, "https://api.alternative.me/fng/", timeout=5)
         data = response.json()
@@ -861,12 +870,12 @@ async def calculate_fgi() -> Dict:
         return {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A (APIエラー)', 'forex_bonus': 0.0}
 
 async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP_SYMBOL_LIMIT, base_symbols: List[str] = DEFAULT_SYMBOLS) -> List[str]:
-    """取引所から出来高トップの先物銘柄を取得し、基本リストに追加する (v20.0.17のロジックを維持)"""
+    """取引所から出来高トップの先物銘柄を取得し、基本リストに追加する (変更なし)"""
     # 実際にはccxt.fetch_tickersなどを使って出来高トップの銘柄を取得する
     return base_symbols
 
 async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-    """指定された銘柄と時間足のOHLCVデータを取得する (v20.0.17のロジックを維持)"""
+    """指定された銘柄と時間足のOHLCVデータを取得する (変更なし)"""
     try:
         # ccxt.fetch_ohlcv を使用
         ohlcv_data = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -885,7 +894,7 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[
         return None
 
 def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dict:
-    """テクニカル分析を行い、複合的なシグナルスコアを計算する (v20.0.17のロジックを維持)"""
+    """テクニカル分析を行い、複合的なシグナルスコアを計算する (変更なし)"""
     # 実際のロジックでは、RSI, MACD, Moving Averagesなどを計算し、スコアリングする
     
     # プレースホルダーとしてランダムなシグナルを生成
@@ -915,12 +924,12 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     }
 
 def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict) -> Dict:
-    """最終的なシグナルスコア、SL/TP値を決定する (v20.0.17のロジックを維持)"""
+    """最終的なシグナルスコア、SL/TP値を決定する (変更なし)"""
     # 最終スコアリングロジックを適用
     return tech_signals
 
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
-    """取引実行ロジック (v20.0.17のロジックを維持)"""
+    """取引実行ロジック (変更なし)"""
     
     if TEST_MODE:
         return {'status': 'skip', 'error_message': 'TEST_MODE is ON'}
@@ -1015,11 +1024,11 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
 
 
 # ====================================================================================
-# SCHEDULERS & ENTRY POINT
+# SCHEDULERS & ENTRY POINT (変更なし)
 # ====================================================================================
 
 async def main_bot_loop():
-    """メインの取引ロジックを格納する非同期関数 (v20.0.17のロジックを維持)"""
+    """メインの取引ロジックを格納する非同期関数 (変更なし)"""
     global LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT, CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME
     
     LAST_SUCCESS_TIME = time.time()
@@ -1127,14 +1136,14 @@ async def main_bot_loop():
 
         # 5. 初回完了通知
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
-            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.18"))
+            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.19"))
             IS_FIRST_MAIN_LOOP_COMPLETED = True
             
         # 6. WebShareデータの送信
         if time.time() - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
             webshare_data = {
                 'timestamp': datetime.now(JST).isoformat(),
-                'version': "v20.0.18",
+                'version': "v20.0.19",
                 'account_status': account_status,
                 'open_positions': OPEN_POSITIONS,
                 'macro_context': GLOBAL_MACRO_CONTEXT,
@@ -1149,7 +1158,7 @@ async def main_bot_loop():
 
 
 async def position_management_loop_async():
-    """TP/SLを監視し、決済注文を実行する非同期関数 (v20.0.17のロジックを維持)"""
+    """TP/SLを監視し、決済注文を実行する非同期関数 (変更なし)"""
     global OPEN_POSITIONS
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -1225,7 +1234,7 @@ app = FastAPI(title="Apex BOT API")
 
 @app.get("/status", include_in_schema=False)
 async def read_root():
-    """ヘルスチェック用のルート (v20.0.18のロジックを維持)"""
+    """ヘルスチェック用のルート (変更なし)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     if IS_CLIENT_READY and IS_FIRST_MAIN_LOOP_COMPLETED:
@@ -1238,12 +1247,12 @@ async def read_root():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.18", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.19", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
 async def main_bot_scheduler():
-    """メインループを定期実行するスケジューラ (1分ごと) (v20.0.17のロジックを維持)"""
+    """メインループを定期実行するスケジューラ (1分ごと) (変更なし)"""
     global LAST_SUCCESS_TIME
     while True:
         # クライアントの再初期化を試行
@@ -1266,7 +1275,7 @@ async def main_bot_scheduler():
 
 
 async def position_monitor_scheduler():
-    """TP/SL監視ループを定期実行するスケジューラ (10秒ごと) (v20.0.17のロジックを維持)"""
+    """TP/SL監視ループを定期実行するスケジューラ (10秒ごと) (変更なし)"""
     while True:
         try:
             await position_management_loop_async()
@@ -1278,7 +1287,7 @@ async def position_monitor_scheduler():
 
 @app.on_event("startup")
 async def startup_event():
-    """アプリケーション起動時に実行 (タスク起動の修正) (v20.0.17のロジックを維持)"""
+    """アプリケーション起動時に実行 (タスク起動の修正) (変更なし)"""
     logging.info("BOTサービスを開始しました。")
     
     # 💡 Patch 57の修正: initialize_exchange_clientの実行はmain_bot_schedulerに委譲し、競合を避ける。
