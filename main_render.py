@@ -874,25 +874,50 @@ async def fetch_open_positions() -> List[Dict]:
 # ====================================================================================
 
 async def calculate_fgi() -> Dict:
-    """外部APIからFGI (恐怖・貪欲指数) を取得する (変更なし)"""
+    """
+    外部APIからFGI (恐怖・貪欲指数) を取得する。
+    🚨 Patch 73: APIエラー発生時のフォールバック処理とTelegram通知を追加。
+    """
     try:
-        response = await asyncio.to_thread(requests.get, "https://api.alternative.me/fng/", timeout=5)
+        # API呼び出し
+        response = await asyncio.to_thread(requests.get, "https://api.alternative.me/fng/", timeout=7)
+        response.raise_for_status() # HTTPエラー (4xx, 5xx) を発生させる
         data = response.json()
         
-        fgi_raw_value = int(data[0]['value']) if data and data[0]['value'] else 50
-        fgi_classification = data[0]['value_classification'] if data and data[0]['value_classification'] else "Neutral"
+        # データ構造の確認
+        if not data or not isinstance(data, list) or not data[0].get('value'):
+            raise ValueError("FGI API returned invalid data structure.")
         
-        # FGIをスコアに変換: 0-100 -> -1.0 to 1.0 (例: 100=Greed=1.0, 0=Fear=-1.0)
+        fgi_raw_value = int(data[0]['value']) 
+        fgi_classification = data[0]['value_classification'] 
+        
+        # 0-100 -> -1.0 to 1.0 に変換
         fgi_proxy = (fgi_raw_value / 50.0) - 1.0 
         
+        logging.info(f"✅ FGI取得成功: {fgi_raw_value} ({fgi_classification})")
         return {
             'fgi_proxy': fgi_proxy,
             'fgi_raw_value': f"{fgi_raw_value} ({fgi_classification})",
-            'forex_bonus': 0.0 # 機能削除済
+            'forex_bonus': 0.0 
         }
-    except Exception:
-        return {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A (APIエラー)', 'forex_bonus': 0.0}
+        
+    except requests.exceptions.RequestException as e:
+        error_msg = f"❌ FGI API (api.alternative.me) 接続エラー/タイムアウト: {e}"
+        logging.error(error_msg)
+        await send_telegram_notification(f"🚨 **FGI取得エラー**\nマクロセンチメントAPIへの接続に失敗しました。\n<code>{error_msg}</code>")
+        
+    except (json.JSONDecodeError, ValueError) as e:
+        error_msg = f"❌ FGI APIから不正なデータを受信: {e}"
+        logging.error(error_msg)
+        await send_telegram_notification(f"🚨 **FGI取得エラー**\nマクロセンチメントAPIが予期せぬデータを返しました。\n<code>{error_msg}</code>")
+        
+    except Exception as e:
+        error_msg = f"❌ FGI取得中に予期せぬエラー: {e}"
+        logging.error(error_msg, exc_info=True)
+        await send_telegram_notification(f"🚨 **FGI取得エラー**\n予期せぬエラーが発生しました。\n<code>{error_msg}</code>")
 
+    # エラー時のフォールバック (中立)
+    return {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A (APIエラー)', 'forex_bonus': 0.0}
 async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP_SYMBOL_LIMIT, base_symbols: List[str] = DEFAULT_SYMBOLS) -> List[str]:
     """取引所から出来高トップの先物銘柄を取得し、基本リストに追加する (変更なし)"""
     # 実際にはccxt.fetch_tickersなどを使って出来高トップの銘柄を取得する
