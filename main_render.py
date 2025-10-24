@@ -1,13 +1,14 @@
 # ====================================================================================
-# Apex BOT v20.0.22 - Future Trading / 10x Leverage 
-# (Patch 68: MEXC Rate Limit FIX for setLeverage)
+# Apex BOT v20.0.23 - Future Trading / 10x Leverage 
+# (Patch 69: Min Lot Size Correction & Enhanced MEXC Error Handling)
 #
 # 改良・修正点:
-# 1. 【バグ修正/確実性向上: Patch 68】MEXCでの set_leverage() の頻度超過エラー (510) に対応するため、
-#    APIコール間の遅延 (LEVERAGE_SETTING_DELAY) を 0.5秒から 1.5秒に増加。
-# 2. 【ロジック維持】Patch 67の set_leverage (Long/Short, openType: 2) 修正を維持。
-# 3. 【致命的エラー修正: UnboundLocalError】main_bot_loop内の LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加。
-# 4. 【致命的エラー修正: ValueError】format_telegram_message内の filled_amount を float に明示的に変換。
+# 1. 【致命的エラー修正: UnboundLocalError】main_bot_loop内の LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加。
+# 2. 【致命的エラー修正: ValueError】format_telegram_message内の filled_amount を float に明示的に変換。
+# 3. 【新機能/エラー回避: Patch 69】execute_trade_logic にて、計算ロットサイズが最小単位未満の場合、
+#    最小取引単位 (min_amount) に切り上げて注文を執行するロジックを追加し、Amount can not be less than zero (400) エラーを回避。
+# 4. 【エラー処理強化: Patch 69】MEXCの Oversold (30005) エラーを明示的に捕捉し、ログに記録。
+# 5. 【ロジック維持】Patch 68の MEXC set_leverage レートリミット対策 (遅延 1.5秒) を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -152,7 +153,7 @@ VOLATILITY_BB_PENALTY_THRESHOLD = 0.01
 OBV_MOMENTUM_BONUS = 0.04           
 
 # ====================================================================================
-# UTILITIES & FORMATTING (変更なし)
+# UTILITIES & FORMATTING 
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -301,7 +302,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str = "v20.0.22" # バージョンを更新
+    bot_version: str = "v20.0.23" # バージョンを更新
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -491,7 +492,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.22 - Future Trading / 10x Leverage (Patch 68: MEXC Rate Limit FIX)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.23 - Future Trading / 10x Leverage (Patch 69: Min Lot Size Correction)</i>") # BOTバージョンを更新
     return message
 
 
@@ -562,7 +563,7 @@ def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -
 
 
 # ====================================================================================
-# WEBSHARE FUNCTION (HTTP POST) (変更なし)
+# WEBSHARE FUNCTION (HTTP POST) 
 # ====================================================================================
 
 async def send_webshare_update(data: Dict[str, Any]):
@@ -867,7 +868,7 @@ async def fetch_open_positions() -> List[Dict]:
 
 
 # ====================================================================================
-# ANALYTICAL CORE (変更なし)
+# ANALYTICAL CORE 
 # ====================================================================================
 
 async def calculate_fgi() -> Dict:
@@ -950,7 +951,10 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
     return tech_signals
 
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
-    """取引実行ロジック (変更なし)"""
+    """
+    取引実行ロジック。
+    計算されたロットサイズが最小取引単位を下回る場合、最小取引単位に補正して注文を実行する。
+    """
     
     if TEST_MODE:
         return {'status': 'skip', 'error_message': 'TEST_MODE is ON'}
@@ -973,33 +977,43 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     if price_diff_to_sl <= 0:
         return {'status': 'error', 'error_message': 'Stop Loss is too close or invalid.'}
         
-    # SL値幅に対する1契約あたりのリスク額 (USDT/契約)
-    # Price difference * contract size = Risk in base currency * current price = Risk in USDT
-    # ここでは名目価値 (Notional Value) を計算する
-    
-    # 必要な名目価値 (Notional Value) = 許容リスク額 / SL率 (SL price diff / entry price) * Leverage
     # SL率
     sl_ratio = abs(entry_price - stop_loss) / entry_price
     
-    # 名目価値 (Notional Value)
-    notional_value_usdt = max_risk_usdt / sl_ratio
+    # 計算された名目価値 (Notional Value)
+    notional_value_usdt_calculated = max_risk_usdt / sl_ratio
     
-    # 契約数量 (Lot Size) - USDT名目価値 / 現在価格
-    lot_size_units = notional_value_usdt / entry_price # Base Currency単位 (例: BTC)
+    # 計算された契約数量 (Lot Size) - Base Currency単位 (例: BTC)
+    lot_size_units_calculated = notional_value_usdt_calculated / entry_price 
 
-    # 最小取引サイズ（CCXTの市場情報から取得する必要があるが、ここではプレースホルダー）
-    min_amount = EXCHANGE_CLIENT.markets[symbol].get('limits', {}).get('amount', {}).get('min', 0.0001)
+    # 最小取引サイズ（CCXTの市場情報から取得）
+    market_info = EXCHANGE_CLIENT.markets[symbol]
+    min_amount = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
     
-    if lot_size_units < min_amount:
-        logging.warning(f"⚠️ {symbol}: 計算されたロット ({lot_size_units:.4f}) が最小取引単位 ({min_amount:.4f}) 未満です。スキップします。")
-        return {'status': 'skip', 'error_message': 'Lot size too small.'}
+    # 💡 修正ロジック：計算されたロットが最小単位を下回る場合、最小単位を使用する
+    if lot_size_units_calculated < min_amount:
+        # 最小単位を使用
+        lot_size_units = min_amount
+        # 最小単位で取引する場合の名目価値も更新 (Telegram通知用)
+        notional_value_usdt = lot_size_units * entry_price
+        logging.warning(f"⚠️ {symbol}: 計算されたロット ({lot_size_units_calculated:.8f}) が最小単位 ({min_amount:.8f}) 未満です。最小単位 {lot_size_units:.8f} で注文します。")
+    else:
+        # 計算されたロットを使用
+        lot_size_units = lot_size_units_calculated
+        notional_value_usdt = notional_value_usdt_calculated
     
     try:
         # 2. 注文の実行
         side_ccxt = 'buy' if side == 'long' else 'sell'
         
         # 契約数量を取引所の精度に合わせて調整
-        amount_adjusted = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units)
+        amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units)
+        amount_adjusted = float(amount_adjusted_str)
+        
+        # 精度調整後の金額が非正 (0以下) に丸められた場合のエラーを防止 (Amount can not be less than zero の究極の対策)
+        if amount_adjusted <= 0.0:
+             logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
+             return {'status': 'error', 'error_message': 'Amount rounded down to zero by precision adjustment.'}
         
         order = await EXCHANGE_CLIENT.create_order(
             symbol,
@@ -1012,7 +1026,6 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         )
 
         # 3. ポジション情報を更新
-        # 実際には、約定情報をパースして正確なエントリー価格などを取得する必要があるが、ここではシグナルの情報を流用
         new_position = {
             'symbol': symbol,
             'side': side,
@@ -1037,8 +1050,26 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         }
         
     except ccxt.ExchangeError as e:
-        logging.error(f"❌ {symbol} 注文実行エラー: {e}")
-        return {'status': 'error', 'error_message': f"Exchange Error: {e.args[0]}"}
+        # 💡 MEXC特有のエラーをキャッチして処理
+        error_message = e.args[0]
+        
+        if 'code":30005' in error_message or 'Oversold' in error_message:
+            # Oversoldエラー: 流動性不足または市場価格の急変による拒否
+            detail_msg = "MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。"
+            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
+            return {'status': 'error', 'error_message': detail_msg}
+
+        elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
+            # Amount can not be less than zeroエラー: ロットサイズが小さすぎる、または計算ミス
+            detail_msg = "MEXC: ロットサイズがゼロまたは小さすぎます (400)。"
+            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
+            return {'status': 'error', 'error_message': detail_msg}
+            
+        else:
+            # その他の取引所エラー
+            logging.error(f"❌ {symbol} 注文実行エラー: {e}")
+            return {'status': 'error', 'error_message': f"Exchange Error: {error_message}"}
+            
     except Exception as e:
         logging.error(f"❌ {symbol} 注文実行中に予期せぬエラー: {e}", exc_info=True)
         return {'status': 'error', 'error_message': f"Unexpected Error: {e}"}
@@ -1159,14 +1190,14 @@ async def main_bot_loop():
 
         # 5. 初回完了通知
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
-            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.22")) # バージョン更新
+            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.23")) # バージョン更新
             IS_FIRST_MAIN_LOOP_COMPLETED = True
             
         # 6. WebShareデータの送信
         if time.time() - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
             webshare_data = {
                 'timestamp': datetime.now(JST).isoformat(),
-                'version': "v20.0.22", # バージョン更新
+                'version': "v20.0.23", # バージョン更新
                 'account_status': account_status,
                 'open_positions': OPEN_POSITIONS,
                 'macro_context': GLOBAL_MACRO_CONTEXT,
@@ -1270,7 +1301,7 @@ async def read_root():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.22", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.23", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
