@@ -751,10 +751,10 @@ async def calculate_fgi():
         
         data = response.json()
         
-        # 【修正】不正なデータ構造に対応するための厳密なパースロジック
-        if 'data' not in data or not isinstance(data['data'], list) or not data['data']:
-            raise ValueError("FGI API returned invalid data structure (missing 'data' list or empty).")
-
+                # 【修正】不正なデータ構造に対応するための厳密なパースロジック
+if 'data' not in data or not isinstance(data['data'], list) or not data['data']:
+    raise ValueError("FGI API returned invalid data structure (missing 'data' list or empty).")
+    
         fgi_entry = data['data'][0]
         raw_value = fgi_entry.get('value')
         
