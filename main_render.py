@@ -1,12 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.15 - Future Trading / 10x Leverage 
-# (Patch 61: Cooldown period increased to 12 hours)
+# Apex BOT v20.0.16 - Future Trading / 10x Leverage 
+# (Patch 62: MEXC Symbol ID FIX for Future Trading)
 #
 # 改良・修正点:
-# 1. 【機能修正: Patch 61】
-#    - TRADE_SIGNAL_COOLDOWN を 2時間から **12時間** に変更しました。
-# 2. 【ロジック維持】Trade only the Single Highest Score Signal (Top 1) を維持。
-# 3. 【バグ修正維持: Patch 60】API Symbol ID Fixを維持。
+# 1. 【バグ修正: Patch 62】execute_trade関数で、取引所シンボルIDを先物/スワップ市場から確実に取得するように修正。
+# 2. 【ロジック維持: Patch 61】TRADE_SIGNAL_COOLDOWN を 12時間で維持。
+# 3. 【ロジック維持: Patch 59】Trade only the Single Highest Score Signal (Top 1) を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -113,7 +112,7 @@ if TEST_MODE:
 IS_CLIENT_READY: bool = False
 
 # 取引ルール設定
-# 12時間に修正 (7200 -> 43200)
+# 12時間に修正 (7200 -> 43200) - Patch 61
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
 SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 1                # ★ 常に1銘柄のみ取引試行 (Patch 59で導入)
@@ -475,7 +474,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.15 - Future Trading / 10x Leverage (Patch 61: Cooldown 12h)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.16 - Future Trading / 10x Leverage (Patch 62: MEXC Symbol ID FIX)</i>") # BOTバージョンを更新
     return message
 
 
@@ -631,10 +630,11 @@ async def initialize_exchange_client() -> bool:
         # レバレッジの設定 (MEXC向け)
         if EXCHANGE_CLIENT.id == 'mexc':
             symbols_to_set_leverage = []
-            for s in CURRENT_MONITOR_SYMBOLS:
-                market = EXCHANGE_CLIENT.safe_market(s) 
-                if market and market['type'] in ['future', 'swap'] and market['active']:
-                    symbols_to_set_leverage.append(market['symbol']) 
+            # 💡 NOTE: load_marketsで全ての市場をロードしたため、ここでFuture/Swap市場を探してレバレッジを設定する
+            for mkt in EXCHANGE_CLIENT.markets.values():
+                 # USDT建てのSwap/Future市場を探す
+                 if mkt['quote'] == 'USDT' and mkt['type'] in ['swap', 'future'] and mkt['active']:
+                     symbols_to_set_leverage.append(mkt['symbol'])
             
             for symbol in symbols_to_set_leverage:
                 try:
@@ -642,7 +642,7 @@ async def initialize_exchange_client() -> bool:
                 except Exception as e:
                     logging.warning(f"⚠️ {symbol} のレバレッジ設定 ({LEVERAGE}x) に失敗しました: {e}")
             
-            logging.info(f"✅ MEXCのレバレッジを主要な先物銘柄で {LEVERAGE}x (クロス) に設定しました。")
+            logging.info(f"✅ MEXCのレバレッジを主要な先物銘柄 ({len(symbols_to_set_leverage)}件) で {LEVERAGE}x (クロス) に設定しました。")
         
         # ログメッセージを 'future' モードに変更
         logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を先物取引モードで初期化し、市場情報をロードしました。")
@@ -758,18 +758,26 @@ async def adjust_order_amount_by_base_units(symbol: str, target_base_amount: flo
     """
     global EXCHANGE_CLIENT
     
-    if not EXCHANGE_CLIENT or symbol not in EXCHANGE_CLIENT.markets:
-        try:
-             market = await EXCHANGE_CLIENT.load_market(symbol, params={'defaultType': TRADE_TYPE})
-             if not market:
-                  logging.error(f"❌ 注文数量調整エラー: {symbol} の先物市場情報が未ロードです。")
-                  return None
-        except Exception:
-             logging.error(f"❌ 注文数量調整エラー: {symbol} の先物市場情報が未ロードです。")
-             return None
+    # 💡 adjust_order_amount_by_base_units内での市場情報取得を修正 (Future/Swapを優先)
+    market = None
+    try:
+        if EXCHANGE_CLIENT.id == 'mexc':
+            for mkt in EXCHANGE_CLIENT.markets.values():
+                if mkt['symbol'] == symbol and mkt['type'] in ['swap', 'future']:
+                    market = mkt
+                    break
         
-    market = EXCHANGE_CLIENT.markets[symbol]
-    
+        if not market:
+             market = EXCHANGE_CLIENT.market(symbol) # Fallback to default
+             
+    except Exception:
+         logging.error(f"❌ 注文数量調整エラー: {symbol} の市場情報が未ロードです。")
+         return None
+        
+    if not market:
+         logging.error(f"❌ 注文数量調整エラー: {symbol} の市場情報が見つかりません。")
+         return None
+         
     if target_base_amount <= 0:
         logging.error(f"❌ 注文数量調整エラー: 目標Base数量 ({target_base_amount:.8f}) が無効です。")
         return None
@@ -821,6 +829,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
         return None
         
     try:
+        # 💡 fetch_ohlcvは 'defaultType': 'future' の設定で呼び出されるため、通常は問題ない
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit, params={'defaultType': TRADE_TYPE}) 
         
         if not ohlcv:
@@ -1142,15 +1151,35 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
         position_side = 'SHORT'
         log_message = f"{symbol} Close Short Market"
     
-    # 💡 【v20.0.14 FIX】取引所のシンボルID (例: BTCUSDT) を取得し、統一シンボル (BTC/USDT) の代わりにこれを使用して注文する
+    # 💡 【v20.0.16 FIX】取引所のシンボルIDを確実に先物/スワップ市場から取得
     exchange_symbol_id = symbol
+    market = None
     try:
-        market = EXCHANGE_CLIENT.market(symbol)
-        exchange_symbol_id = market['id'] # 例: BTCUSDT
-        logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得: {exchange_symbol_id} (決済)")
+        if EXCHANGE_CLIENT.id == 'mexc':
+            # MEXC specific: search for 'swap' or 'future' type
+            for mkt in EXCHANGE_CLIENT.markets.values():
+                if mkt['symbol'] == symbol and mkt['type'] in ['swap', 'future']:
+                    market = mkt
+                    break
+            
+            if market:
+                exchange_symbol_id = market['id']
+                logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得 (FIXED, 決済): {exchange_symbol_id} (市場タイプ: {market.get('type')})")
+            else:
+                 # Fallback to the default CCXT lookup, but log a warning
+                 market = EXCHANGE_CLIENT.market(symbol)
+                 exchange_symbol_id = market['id']
+                 logging.warning(f"⚠️ {symbol} の先物/スワップ市場IDが見つかりませんでした。デフォルト ({market.get('type')}) のIDを使用 (決済): {exchange_symbol_id}")
+
+        else:
+            # For other exchanges, rely on the default CCXT lookup with 'defaultType: future'
+            market = EXCHANGE_CLIENT.market(symbol)
+            exchange_symbol_id = market['id']
+            logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得 (Default, 決済): {exchange_symbol_id} (市場タイプ: {market.get('type')})")
+        
     except Exception as e:
         logging.error(f"❌ 取引所シンボルID取得失敗: {symbol}. {e}")
-        # 失敗した場合、フォールバックとして元のシンボルを使用
+        exchange_symbol_id = symbol # 失敗した場合、フォールバックとして元のシンボルを使用
         
     # 1. 注文実行（先物ポジションの決済: 反対売買の成行注文）
     try:
@@ -1172,7 +1201,7 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
             }
         else:
             order = await EXCHANGE_CLIENT.create_order(
-                symbol=exchange_symbol_id, # ★ シンボルIDを使用するように修正
+                symbol=exchange_symbol_id, # ★ シンボルIDを使用
                 type='market',
                 side=order_side, # 'buy' (Short決済) or 'sell' (Long決済)
                 amount=amount, 
@@ -1378,12 +1407,32 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
         
     current_price = signal['entry_price']
     
-    # 💡 【v20.0.14 FIX】取引所のシンボルID (例: BTCUSDT) を取得し、統一シンボル (BTC/USDT) の代わりにこれを使用して注文する
+    # 💡 【v20.0.16 FIX】取引所のシンボルIDを確実に先物/スワップ市場から取得
     exchange_symbol_id = symbol
+    market = None
     try:
-        market = EXCHANGE_CLIENT.market(symbol)
-        exchange_symbol_id = market['id'] # 例: BTCUSDT
-        logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得: {exchange_symbol_id} (市場タイプ: {market.get('type')})")
+        if EXCHANGE_CLIENT.id == 'mexc':
+            # MEXC specific: search for 'swap' or 'future' type
+            for mkt in EXCHANGE_CLIENT.markets.values():
+                if mkt['symbol'] == symbol and mkt['type'] in ['swap', 'future']:
+                    market = mkt
+                    break
+            
+            if market:
+                exchange_symbol_id = market['id']
+                logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得 (FIXED): {exchange_symbol_id} (市場タイプ: {market.get('type')})")
+            else:
+                 # Fallback to the default CCXT lookup, but log a warning
+                 market = EXCHANGE_CLIENT.market(symbol)
+                 exchange_symbol_id = market['id']
+                 logging.warning(f"⚠️ {symbol} の先物/スワップ市場IDが見つかりませんでした。デフォルト ({market.get('type')}) のIDを使用: {exchange_symbol_id}")
+
+        else:
+            # For other exchanges, rely on the default CCXT lookup with 'defaultType: future'
+            market = EXCHANGE_CLIENT.market(symbol)
+            exchange_symbol_id = market['id']
+            logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得 (Default): {exchange_symbol_id} (市場タイプ: {market.get('type')})")
+        
     except Exception as e:
         logging.error(f"❌ 取引所シンボルID取得失敗: {symbol}. {e}")
         exchange_symbol_id = symbol # 失敗した場合、フォールバックとして元のシンボルを使用
@@ -1398,7 +1447,7 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
         params = {'positionSide': position_side} 
         
         order = await EXCHANGE_CLIENT.create_order(
-            symbol=exchange_symbol_id, # ★ シンボルIDを使用するように修正
+            symbol=exchange_symbol_id, # ★ シンボルIDを使用
             type='market',
             side=order_side, # 'buy' or 'sell'
             amount=final_amount, 
@@ -1589,7 +1638,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.15 (Patch 61)" # BOTバージョンを更新
+            "v20.0.16 (Patch 62)" # BOTバージョンを更新
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1685,7 +1734,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.15", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.16", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
