@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.21 - Future Trading / 10x Leverage 
-# (Patch 67: MEXC setLeverage PositionType FIX)
+# Apex BOT v20.0.22 - Future Trading / 10x Leverage 
+# (Patch 68: MEXC Rate Limit FIX for setLeverage)
 #
 # 改良・修正点:
-# 1. 【バグ修正/確実性向上: Patch 67】MEXCでの CCXT set_leverage() が positionType パラメータを要求する問題に対応するため、
-#    set_leverage() を Long用 (positionType: 1) と Short用 (positionType: 2) に分けて実行するように修正。
-# 2. 【ロジック維持】マージンモード設定パラメータ ('openType': 2) を set_leverage に統合する修正を維持。
+# 1. 【バグ修正/確実性向上: Patch 68】MEXCでの set_leverage() の頻度超過エラー (510) に対応するため、
+#    APIコール間の遅延 (LEVERAGE_SETTING_DELAY) を 0.5秒から 1.5秒に増加。
+# 2. 【ロジック維持】Patch 67の set_leverage (Long/Short, openType: 2) 修正を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -78,8 +78,8 @@ LEVERAGE = 10 # 取引倍率
 TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
-# 💡 レートリミット対策用定数を追加 (修正点)
-LEVERAGE_SETTING_DELAY = 0.5 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.3秒から0.5秒に増加
+# 💡 レートリミット対策用定数を追加 (修正点: 0.5秒 -> 1.5秒に増加)
+LEVERAGE_SETTING_DELAY = 1.5 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.5秒から1.5秒に増加
 
 # 💡 リスクベースの動的ポジションサイジング設定 
 # BASE_TRADE_SIZE_USDTはリスクベースサイジングにより無視されますが、互換性のために残します。
@@ -299,7 +299,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str
+    bot_version: str = "v20.0.22" # バージョンを更新
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -477,7 +477,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.21 - Future Trading / 10x Leverage (Patch 67: Combined MEXC Setup FIX)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.22 - Future Trading / 10x Leverage (Patch 68: MEXC Rate Limit FIX)</i>") # BOTバージョンを更新
     return message
 
 
@@ -580,7 +580,7 @@ async def send_webshare_update(data: Dict[str, Any]):
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-    """CCXTクライアントを初期化し、市場情報をロードする (Patch 67で修正)"""
+    """CCXTクライアントを初期化し、市場情報をロードする (Patch 68で LEVERAGE_SETTING_DELAY を使用)"""
     global EXCHANGE_CLIENT, IS_CLIENT_READY
     
     IS_CLIENT_READY = False
@@ -641,7 +641,7 @@ async def initialize_exchange_client() -> bool:
                      # ユーザーが指定するCCXT標準のシンボル形式
                      symbols_to_set_leverage.append(mkt['symbol']) 
             
-            # --- 🚀 Patch 67 FIX: set_leverage に positionType パラメータを追加し、Long/Shortを両方設定 ---
+            # --- 🚀 Patch 68 FIX: set_leverage に LEVERAGE_SETTING_DELAY を適用 ---
 
             # set_leverage() が openType と positionType の両方を要求するため、両方の設定を行います。
             for symbol in symbols_to_set_leverage:
@@ -659,7 +659,7 @@ async def initialize_exchange_client() -> bool:
                 except Exception as e:
                     logging.warning(f"⚠️ {symbol} のレバレッジ/マージンモード設定 (Long) に失敗しました: {e}")
                     
-                # 💥 レートリミット対策として遅延を挿入
+                # 💥 レートリミット対策として遅延を挿入 (重要: 0.5s -> 1.5s)
                 await asyncio.sleep(LEVERAGE_SETTING_DELAY) 
 
                 # positionType: 2 は Short (売り) ポジション用
@@ -674,12 +674,12 @@ async def initialize_exchange_client() -> bool:
                 except Exception as e:
                     logging.warning(f"⚠️ {symbol} のレバレッジ/マージンモード設定 (Short) に失敗しました: {e}")
                     
-                # 💥 レートリミット対策として遅延を挿入
+                # 💥 レートリミット対策として遅延を挿入 (重要: 0.5s -> 1.5s)
                 await asyncio.sleep(LEVERAGE_SETTING_DELAY)
 
             logging.info(f"✅ MEXCの主要な先物銘柄 ({len(symbols_to_set_leverage)}件) に対し、レバレッジを {LEVERAGE}x、マージンモードを 'cross' に設定しました。")
 
-            # --- 🚀 Patch 67 FIX 終了 ---
+            # --- 🚀 Patch 68 FIX 終了 ---
 
         # ログメッセージを 'future' モードに変更
         logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を先物取引モードで初期化し、市場情報をロードしました。")
@@ -1143,14 +1143,14 @@ async def main_bot_loop():
 
         # 5. 初回完了通知
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
-            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.21"))
+            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.22")) # バージョン更新
             IS_FIRST_MAIN_LOOP_COMPLETED = True
             
         # 6. WebShareデータの送信
         if time.time() - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
             webshare_data = {
                 'timestamp': datetime.now(JST).isoformat(),
-                'version': "v20.0.21",
+                'version': "v20.0.22", # バージョン更新
                 'account_status': account_status,
                 'open_positions': OPEN_POSITIONS,
                 'macro_context': GLOBAL_MACRO_CONTEXT,
@@ -1254,7 +1254,7 @@ async def read_root():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.21", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.22", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
