@@ -1,14 +1,13 @@
 # ====================================================================================
-# Apex BOT v20.0.12 - Future Trading / 10x Leverage 
-# (Patch 58: Add Short Trading Support)
+# Apex BOT v20.0.14 - Future Trading / 10x Leverage 
+# (Patch 60: Fix symbol not support api error by using exchange market ID)
 #
 # 改良・修正点:
-# 1. 【新規修正: Patch 58 - ショート取引のサポート】
-#    - analyze_signals(): SMA200を下回る場合にショートシグナルを生成し、SL/TP計算を反転。
-#    - execute_trade(): Long/Shortのポジションサイドに応じた注文 (buy/sell) を実行。
-#    - liquidate_position(): ポジションサイドに応じた決済注文 (sell/buy) を実行し、PnLを計算。
-#    - position_management_loop_async(): ポジションサイドに基づき、SL/TPの判定を反転。
-# 2. 【継続修正: Patch 57】RuntimeError: Session is closed の解消ロジックを維持。
+# 1. 【バグ修正: Patch 60】
+#    - execute_trade(): CCXT統一シンボル (例: BTC/USDT) の代わりに、
+#      取引所固有のシンボルID (例: BTCUSDT) を取得し、注文時に使用するように修正。
+#      (mexc {"code":10007,"msg":"symbol not support api"} エラー対策)
+# 2. 【ロジック維持】Trade only the Single Highest Score Signal (Top 1) を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -117,7 +116,7 @@ IS_CLIENT_READY: bool = False
 # 取引ルール設定
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
 SIGNAL_THRESHOLD = 0.65             
-TOP_SIGNAL_COUNT = 3                
+TOP_SIGNAL_COUNT = 1                # ★ 常に1銘柄のみ取引試行 (Patch 59で導入)
 REQUIRED_OHLCV_LIMITS = {'1m': 1000, '5m': 1000, '15m': 1000, '1h': 1000, '4h': 1000} 
 
 # テクニカル分析定数 (v19.0.28ベース)
@@ -140,9 +139,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.80       
-SIGNAL_THRESHOLD_NORMAL = 0.75      
-SIGNAL_THRESHOLD_ACTIVE = 0.70      
+SIGNAL_THRESHOLD_SLUMP = 0.90       
+SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_ACTIVE = 0.75      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -476,7 +475,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.12 - Future Trading / 10x Leverage (Patch 58: Long/Short Support)</i>") 
+    message += (f"<i>Bot Ver: v20.0.14 - Future Trading / 10x Leverage (Patch 60: API Symbol ID Fix)</i>") # BOTバージョンを更新
     return message
 
 
@@ -1127,7 +1126,7 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
     symbol = position['symbol']
     amount = position['amount']
     entry_price = position['entry_price']
-    side = position.get('side', 'long') # ポジションのサイド
+    side = position.get('side', 'long') # ポジションのサイドを取得
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
         logging.error("❌ 決済失敗: CCXTクライアントが準備できていません。")
@@ -1143,6 +1142,16 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
         position_side = 'SHORT'
         log_message = f"{symbol} Close Short Market"
     
+    # 💡 【v20.0.14 FIX】取引所のシンボルID (例: BTCUSDT) を取得し、統一シンボル (BTC/USDT) の代わりにこれを使用して注文する
+    exchange_symbol_id = symbol
+    try:
+        market = EXCHANGE_CLIENT.market(symbol)
+        exchange_symbol_id = market['id'] # 例: BTCUSDT
+        logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得: {exchange_symbol_id} (決済)")
+    except Exception as e:
+        logging.error(f"❌ 取引所シンボルID取得失敗: {symbol}. {e}")
+        # 失敗した場合、フォールバックとして元のシンボルを使用
+        
     # 1. 注文実行（先物ポジションの決済: 反対売買の成行注文）
     try:
         # closePosition: True はポジションを全て決済するためのCCXT共通パラメータ
@@ -1163,7 +1172,7 @@ async def liquidate_position(position: Dict, exit_type: str, current_price: floa
             }
         else:
             order = await EXCHANGE_CLIENT.create_order(
-                symbol=symbol,
+                symbol=exchange_symbol_id, # ★ シンボルIDを使用するように修正
                 type='market',
                 side=order_side, # 'buy' (Short決済) or 'sell' (Long決済)
                 amount=amount, 
@@ -1369,6 +1378,16 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
         
     current_price = signal['entry_price']
     
+    # 💡 【v20.0.14 FIX】取引所のシンボルID (例: BTCUSDT) を取得し、統一シンボル (BTC/USDT) の代わりにこれを使用して注文する
+    exchange_symbol_id = symbol
+    try:
+        market = EXCHANGE_CLIENT.market(symbol)
+        exchange_symbol_id = market['id'] # 例: BTCUSDT
+        logging.info(f"ℹ️ {symbol} の取引所シンボルIDを取得: {exchange_symbol_id} (市場タイプ: {market.get('type')})")
+    except Exception as e:
+        logging.error(f"❌ 取引所シンボルID取得失敗: {symbol}. {e}")
+        exchange_symbol_id = symbol # 失敗した場合、フォールバックとして元のシンボルを使用
+    
     # 2. 注文実行（成行注文）
     try:
         # 注文のサイドとポジションサイドを決定
@@ -1379,7 +1398,7 @@ async def execute_trade(signal: Dict) -> Optional[Dict]:
         params = {'positionSide': position_side} 
         
         order = await EXCHANGE_CLIENT.create_order(
-            symbol=symbol,
+            symbol=exchange_symbol_id, # ★ シンボルIDを使用するように修正
             type='market',
             side=order_side, # 'buy' or 'sell'
             amount=final_amount, 
@@ -1496,54 +1515,67 @@ async def main_bot_loop():
 
     # 5. シグナル処理と取引執行
     
-    # スコアの高い順にソートし、冷却期間を考慮
-    filtered_signals = []
-    
+    # 冷却期間チェック (2時間以内は同一銘柄で取引しない)
+    cooldown_filtered_signals = []
+    for signal in all_signals:
+         symbol = signal['symbol']
+         if time.time() - LAST_SIGNAL_TIME.get(symbol, 0) < TRADE_SIGNAL_COOLDOWN:
+             continue
+         cooldown_filtered_signals.append(signal)
+
+    # スコアの高い順にソート
+    sorted_signals = sorted(cooldown_filtered_signals, key=lambda x: x['score'], reverse=True)
+        
     # 現在オープン中のポジションのシンボルリスト
     open_symbols = {p['symbol'] for p in OPEN_POSITIONS}
 
-    for signal in sorted(all_signals, key=lambda x: x['score'], reverse=True):
+    # フィルタリングされたシグナルからTop N個（ここではTop 1）を選択
+    trade_signals = []
+    for signal in sorted_signals:
         symbol = signal['symbol']
         
-        # 冷却期間チェック (2時間以内は同一銘柄で取引しない)
-        if time.time() - LAST_SIGNAL_TIME.get(symbol, 0) < TRADE_SIGNAL_COOLDOWN:
-            continue
-            
         # ポジション重複チェック (既にオープンしている銘柄はスキップ)
         if symbol in open_symbols:
             continue
             
-        filtered_signals.append(signal)
+        # スコアが閾値を超えているか最終チェック
+        if signal['score'] < current_threshold:
+             continue # 閾値未満のシグナルは無視
+             
+        trade_signals.append(signal)
+        # Patch 59の修正: 常にTop 1のみを採用
+        if len(trade_signals) >= TOP_SIGNAL_COUNT:
+             break
         
     # 分析結果を保存
-    LAST_ANALYSIS_SIGNALS = filtered_signals
-
-    # Top N個のシグナルのみで取引を試行
-    trade_signals = filtered_signals[:TOP_SIGNAL_COUNT]
+    LAST_ANALYSIS_SIGNALS = sorted_signals 
     
+    # 取引実行
     if trade_signals:
-        logging.info(f"💡 検出されたシグナル: {len(trade_signals)} 件 (Top {TOP_SIGNAL_COUNT}件まで処理)")
         
-        for signal in trade_signals:
-            symbol = signal['symbol']
-            
-            # 取引執行
-            trade_result = await execute_trade(signal)
-            
-            # シグナルログと通知
-            log_signal(signal, 'TRADE_SIGNAL', trade_result=trade_result)
-            await send_telegram_notification(format_telegram_message(
-                signal=signal, 
-                context="取引シグナル", 
-                current_threshold=current_threshold, 
-                trade_result=trade_result
-            ))
-            
-            # 成功した場合のみ、冷却期間をリセット
-            if trade_result and trade_result.get('status') == 'ok':
-                LAST_SIGNAL_TIME[symbol] = time.time()
-                # 取引成功後は、ポジション監視リストに加わっているため、次のシグナルは処理しない (ロット制限のため)
-                break 
+        # Top 1シグナル
+        signal_to_execute = trade_signals[0]
+        symbol = signal_to_execute['symbol']
+        
+        logging.info(f"💡 最もスコアの高いシグナルを検出: {symbol} (Score: {signal_to_execute['score']:.2f}) - Top 1取引実行") # ログを修正
+        
+        # 取引執行
+        trade_result = await execute_trade(signal_to_execute)
+        
+        # シグナルログと通知
+        log_signal(signal_to_execute, 'TRADE_SIGNAL', trade_result=trade_result)
+        await send_telegram_notification(format_telegram_message(
+            signal=signal_to_execute, 
+            context="取引シグナル", 
+            current_threshold=current_threshold, 
+            trade_result=trade_result
+        ))
+        
+        # 成功した場合のみ、冷却期間をリセット
+        if trade_result and trade_result.get('status') == 'ok':
+            LAST_SIGNAL_TIME[symbol] = time.time()
+            # 既にポジションを取得したため、これ以上は取引しない
+
     else:
         logging.info("📝 適切な取引シグナルは検出されませんでした。")
 
@@ -1556,7 +1588,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.12 (Patch 58)"
+            "v20.0.14 (Patch 60)" # BOTバージョンを更新
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1652,7 +1684,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.12", "timestamp": datetime.now(JST).isoformat()}
+        content={"status": message, "version": "v20.0.14", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
