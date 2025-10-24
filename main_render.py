@@ -131,7 +131,10 @@ RSI_MOMENTUM_LOW = 40
 MACD_CROSS_PENALTY = 0.15          
 LIQUIDITY_BONUS_MAX = 0.06          
 FGI_PROXY_BONUS_MAX = 0.05         
-FOREX_BONUS_MAX = 0.0               
+FOREX_BONUS_MAX = 0.0
+
+# 💡 FGI API設定を追加
+FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # Alternative.me API
 
 # ボラティリティ指標 (ATR) の設定 
 ATR_LENGTH = 14
@@ -141,9 +144,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
-SIGNAL_THRESHOLD_ACTIVE = 0.80      
+SIGNAL_THRESHOLD_SLUMP = 0.85       
+SIGNAL_THRESHOLD_NORMAL = 0.80      
+SIGNAL_THRESHOLD_ACTIVE = 0.75      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -725,6 +728,71 @@ async def fetch_account_status() -> Dict:
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
         logging.error("❌ 口座ステータス取得失敗: CCXTクライアントが準備できていません。")
         return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
+
+# ====================================================================================
+# MACRO & SENTIMENT ANALYSIS
+# ====================================================================================
+
+# --- 修正開始: calculate_fgi関数の追加 (または既存の関数の置き換え) ---
+async def calculate_fgi():
+    """
+    Fear & Greed Index (FGI)を取得し、マクロコンテキストを更新する。
+    ログに記録されていた「FGI APIから不正なデータを受信」エラーに対応するため、
+    パース処理に厳密なチェックとエラーハンドリングを追加。
+    """
+    global GLOBAL_MACRO_CONTEXT
+    
+    try:
+        logging.info("ℹ️ FGI API (Alternative.me) からデータを取得しています...")
+        
+        # requests.getを非同期で実行
+        response = await asyncio.to_thread(requests.get, FGI_API_URL, timeout=10)
+        response.raise_for_status() # HTTPエラー (4xx, 5xx) を発生させる (e.g. 404, 500)
+        
+        data = response.json()
+        
+        # 【修正】不正なデータ構造に対応するための厳密なパースロジック
+        if 'data' not in data or not isinstance(data['data'], list) or not data['data']:
+            raise ValueError("FGI API returned invalid data structure (missing 'data' list or empty).")
+
+        fgi_entry = data['data'][0]
+        raw_value = fgi_entry.get('value')
+        
+        if raw_value is None:
+             raise ValueError("FGI API returned data without a 'value' field.")
+
+        fgi_value = float(raw_value)
+        fgi_raw_classification = fgi_entry.get('value_classification', 'N/A')
+        
+        # FGI値 (0-100) を -1.0 から +1.0 の範囲に正規化する (50が0.0)
+        fgi_proxy = (fgi_value - 50) / 50 
+        
+        # proxyにFGI_PROXY_BONUS_MAXを乗算し、マクロ影響スコアとして使用
+        fgi_macro_effect = fgi_proxy * FGI_PROXY_BONUS_MAX
+
+        # グローバルコンテキストを更新
+        GLOBAL_MACRO_CONTEXT.update({
+            'fgi_proxy': fgi_macro_effect, 
+            'fgi_raw_value': f"{fgi_value} ({fgi_raw_classification})",
+        })
+        
+        logging.info(f"✅ FGI更新: {fgi_raw_classification} (Value: {fgi_value}) -> マクロ影響: {fgi_macro_effect*100:.2f}点")
+        
+    except requests.exceptions.HTTPError as e:
+        # HTTPステータスエラー (4xx, 5xx) の場合
+        status_code = e.response.status_code if e.response is not None else 'N/A'
+        logging.error(f"❌ FGI APIからデータ取得失敗 (HTTPエラー {status_code}): {e}")
+        # 失敗した場合、proxyはデフォルトの 0.0 (中立) のまま、raw_valueをエラーに更新
+        GLOBAL_MACRO_CONTEXT.update({'fgi_raw_value': 'API ERROR (HTTP)'})
+    except requests.exceptions.RequestException as e:
+        # ネットワークレベルのエラー (タイムアウトなど)
+        logging.error(f"❌ FGI APIからデータ取得失敗 (ネットワークエラー): {e}")
+        GLOBAL_MACRO_CONTEXT.update({'fgi_raw_value': 'API ERROR (NET)'})
+    except (ValueError, TypeError) as e:
+        # JSONパースエラーまたはデータ抽出エラー (ログのエラーの原因)
+        logging.error(f"❌ FGI APIから不正なデータを受信: FGI API returned invalid data structure. {e}")
+        GLOBAL_MACRO_CONTEXT.update({'fgi_raw_value': 'API ERROR (INVALID DATA)'})
+# --- 修正終了 ---
         
     try:
         balance = None
