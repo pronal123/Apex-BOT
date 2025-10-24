@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v20.0.14 - Future Trading / 10x Leverage 
-# (Patch 60: Fix symbol not support api error by using exchange market ID)
+# Apex BOT v20.0.15 - Future Trading / 10x Leverage 
+# (Patch 61: Cooldown period increased to 12 hours)
 #
 # 改良・修正点:
-# 1. 【バグ修正: Patch 60】
-#    - execute_trade(): CCXT統一シンボル (例: BTC/USDT) の代わりに、
-#      取引所固有のシンボルID (例: BTCUSDT) を取得し、注文時に使用するように修正。
-#      (mexc {"code":10007,"msg":"symbol not support api"} エラー対策)
+# 1. 【機能修正: Patch 61】
+#    - TRADE_SIGNAL_COOLDOWN を 2時間から **12時間** に変更しました。
 # 2. 【ロジック維持】Trade only the Single Highest Score Signal (Top 1) を維持。
+# 3. 【バグ修正維持: Patch 60】API Symbol ID Fixを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -114,7 +113,8 @@ if TEST_MODE:
 IS_CLIENT_READY: bool = False
 
 # 取引ルール設定
-TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 
+# 12時間に修正 (7200 -> 43200)
+TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
 SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 1                # ★ 常に1銘柄のみ取引試行 (Patch 59で導入)
 REQUIRED_OHLCV_LIMITS = {'1m': 1000, '5m': 1000, '15m': 1000, '1h': 1000, '4h': 1000} 
@@ -475,7 +475,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.14 - Future Trading / 10x Leverage (Patch 60: API Symbol ID Fix)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.15 - Future Trading / 10x Leverage (Patch 61: Cooldown 12h)</i>") # BOTバージョンを更新
     return message
 
 
@@ -1515,11 +1515,12 @@ async def main_bot_loop():
 
     # 5. シグナル処理と取引執行
     
-    # 冷却期間チェック (2時間以内は同一銘柄で取引しない)
+    # 冷却期間チェック (12時間以内は同一銘柄で取引しない)
     cooldown_filtered_signals = []
     for signal in all_signals:
          symbol = signal['symbol']
          if time.time() - LAST_SIGNAL_TIME.get(symbol, 0) < TRADE_SIGNAL_COOLDOWN:
+             logging.info(f"🕒 {symbol} は冷却期間 ({TRADE_SIGNAL_COOLDOWN/3600:.0f}時間) のためスキップします。") # ログを追加
              continue
          cooldown_filtered_signals.append(signal)
 
@@ -1588,7 +1589,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.14 (Patch 60)" # BOTバージョンを更新
+            "v20.0.15 (Patch 61)" # BOTバージョンを更新
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1684,7 +1685,7 @@ async def health_check():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.14", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.15", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
