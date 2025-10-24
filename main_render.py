@@ -1,14 +1,13 @@
 # ====================================================================================
 # Apex BOT v20.0.9 - Future Trading / 10x Leverage 
-# (Patch 51: mexc fetchBalance() NotSupported Fix)
+# (Patch 52: mexc balance AttributeError Fix)
 #
 # 改良・修正点:
-# 1. 【新規修正: Patch 51 - MEXC残高取得修正】fetch_account_status() において、
-#    mexc.fetch_balance() が NotSupported エラーを返す問題を修正。
-#    MEXCクライアントの場合、先物口座の総資産 (Equity) 取得には 
-#    ccxt.fetch_margin_balance('USDT', params={'defaultType': 'swap'}) を使用するように変更。
+# 1. 【新規修正: Patch 52 - MEXC残高取得再修正】fetch_account_status() において、
+#    前回の修正 (fetch_margin_balance) が AttributeError を引き起こしたため、
+#    MEXC専用のプライベートAPI呼び出し (privateGetAccountAssets) に切り替え、
+#    生のAPI応答から総資産 (Equity) を取得するように変更。
 # 2. 【継続修正: Patch 50】fetch_balance() の引数TypeError回避ロジックを維持。
-# 3. 【継続修正: Patch 49】ヘルスチェックエンドポイントを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -455,7 +454,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.9 - Future Trading / 10x Leverage (Patch 51: Balance Fix)</i>") 
+    message += (f"<i>Bot Ver: v20.0.9 - Future Trading / 10x Leverage (Patch 52: Balance Re-Fix)</i>") 
     return message
 
 
@@ -646,14 +645,21 @@ async def fetch_account_status() -> Dict:
         balance = None
         
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 💡 【新規修正箇所: Patch 51】
-            # mexc.fetch_balance() が NotSupported のため、先物口座の Equity 取得には
-            # 統一 APIの fetch_margin_balance を使用する
+            # 💡 【新規修正箇所: Patch 52】
+            # fetch_balance() が NotSupported、fetch_margin_balance() が AttributeError のため、
+            # MEXC専用の生の先物アカウント情報APIを直接呼び出す。
+            # 通常、これは V3 API の 'privateGetAccountAssets' に対応。
             
-            # USDT建ての先物口座情報を取得 (currency=USDT, type=swapを指定)
-            # CCXTのUnified APIに沿って、fetch_margin_balanceを呼び出す
-            balance = await EXCHANGE_CLIENT.fetch_margin_balance('USDT', params={'defaultType': 'swap'})
-            
+            # 生のAPI応答を取得し、それを 'balance' 辞書の 'info' に格納
+            if hasattr(EXCHANGE_CLIENT, 'privateGetAccountAssets'):
+                 logging.info("ℹ️ MEXC: privateGetAccountAssets を使用して生の口座情報を取得します。")
+                 raw_mexc_data = await EXCHANGE_CLIENT.privateGetAccountAssets()
+                 balance = {'info': raw_mexc_data} 
+            else:
+                 logging.error("❌ MEXC: privateGetAccountAssets メソッドが CCXT クライアントに見つかりません。バージョンを確認してください。")
+                 # 既知のエラーが発生する fetch_balance を実行せざるを得ない
+                 balance = await EXCHANGE_CLIENT.fetch_balance(params={'defaultType': 'swap'})
+
         else:
             # 他の取引所向け
             fetch_params = {'type': 'future'} if TRADE_TYPE == 'future' else {} 
@@ -665,9 +671,11 @@ async def fetch_account_status() -> Dict:
              raise Exception("Balance object is empty.")
 
         # 1. total_usdt_balance (総資産: Equity) の取得
+        #   (Patch 52では、MEXCの場合 balance['total'] は空の可能性が高いため、以下のフォールバックが本命)
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0) 
         
         # 2. MEXC特有のフォールバックロジック (infoからtotalEquityを探す)
+        #    - Patch 52で生のAPI応答を格納した場合、ここで総資産を抽出する。
         if EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
             # infoセクションからtotalEquityを探す (MEXC特有の処理)
             mexc_data = balance['info'].get('data')
@@ -677,8 +685,9 @@ async def fetch_account_status() -> Dict:
                         # totalEquityがMEXCの先物総資産
                         total_usdt_balance_fallback = float(asset.get('totalEquity', 0.0))
                         if total_usdt_balance_fallback > 0:
+                            # フォールバックで取得できた値を採用
                             total_usdt_balance = total_usdt_balance_fallback
-                            logging.warning("⚠️ fetch_margin_balance の total が 0 のため、MEXC専用のフォールバックロジックで Equity を再取得しました。")
+                            logging.warning("⚠️ MEXC専用フォールバックロジック (privateGetAccountAssetsの結果) で Equity を取得しました。")
                         break
         
         # グローバル変数に最新の総資産を保存
@@ -695,7 +704,7 @@ async def fetch_account_status() -> Dict:
     except ccxt.AuthenticationError as e:
         logging.critical(f"❌ 口座ステータス取得失敗 (認証エラー): {e}")
     except Exception as e:
-        # Patch 51では NotSupported が発生しにくくなるが、念のため捕捉
+        # Patch 52でカバーしきれない予期せぬエラー (例: CCXT内部でNotSupportedが再度発生した場合など)
         logging.error(f"❌ 口座ステータス取得失敗 (予期せぬエラー): {e}", exc_info=True)
 
     return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
@@ -1381,7 +1390,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitor_symbols),
             current_threshold,
-            "v20.0.9 (Patch 51)"
+            "v20.0.9 (Patch 52)"
         ))
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
