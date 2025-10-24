@@ -1109,7 +1109,8 @@ async def main_bot_loop():
             for signal in eligible_signals[:TOP_SIGNAL_COUNT]:
                 
                 # 4.1. SL/TP/清算価格の計算
-                current_price = EXCHANGE_CLIENT.fetch_ticker(signal['symbol'])['last']
+                ticker = await EXCHANGE_CLIENT.fetch_ticker(signal['symbol'])
+                current_price = ticker['last']
                 side = signal['side']
                 
                 signal['entry_price'] = current_price
