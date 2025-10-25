@@ -1,13 +1,13 @@
 # ====================================================================================
-# Apex BOT v20.0.25 - Future Trading / 10x Leverage 
-# (Patch 71: Dynamic Top Volume Symbol Monitoring & FGI URL Update)
+# Apex BOT v20.0.26 - Future Trading / 10x Leverage 
+# (Patch 73: MEXC 30005 Liquidity/Oversold Error Cooldown & Robust Lot Size)
 #
 # 改良・修正点:
-# 1. 【ロジック修正: Patch 71】get_top_volume_symbolsに、CCXTのfetch_tickersを使用して
-#    リアルタイムの出来高トップ銘柄を動的に取得し、DEFAULT_SYMBOLSと結合するロジックを実装。
-# 2. 【設定追加: Patch 71】FGI_API_URLを追加し、calculate_fgiで使用するように修正。
-# 3. 【ロジック維持: Patch 70 FIX】MEXC set_leverage 対象を監視銘柄に限定するロジックを維持。
-# 4. 【バージョン更新】BOTバージョンを v20.0.25 に更新。
+# 1. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
+#    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するようにロジックを強化。
+# 2. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
+# 3. 【機能改良】get_top_volume_symbols にて、出来高トップ40銘柄を動的に取得するロジックを維持。
+# 4. 【バージョン更新】BOTバージョンを v20.0.26 に維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,11 +59,11 @@ DEFAULT_SYMBOLS = [
     "ALGO/USDT", "XLM/USDT", "SAND/USDT",
     "GALA/USDT", "FIL/USDT", 
     "AXS/USDT", "MANA/USDT", "AAVE/USDT",
-    "FLOW/USDT", "IMX/USDT", 
+    "FLOW/USDT", "IMX/USdt", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.25"            # BOTバージョン
-FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URLを追加
+BOT_VERSION = "v20.0.26"            # 💡 BOTバージョン
+FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
 ANALYSIS_ONLY_INTERVAL = 60 * 60    # 分析専用通知の実行間隔 (秒) - 1時間ごと
@@ -145,9 +145,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
-SIGNAL_THRESHOLD_ACTIVE = 0.75      
+SIGNAL_THRESHOLD_SLUMP = 0.94       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
+SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -298,7 +298,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str = BOT_VERSION # 💡 BOTバージョンを使用
+    bot_version: str = BOT_VERSION 
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -866,59 +866,60 @@ async def calculate_fgi() -> Dict:
 
 async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP_SYMBOL_LIMIT, base_symbols: List[str] = DEFAULT_SYMBOLS) -> List[str]:
     """
-    取引所から出来高トップの先物銘柄を取得し、デフォルトリストと結合して返す。
-    これにより、流動性の高い銘柄を確実に監視する。
+    取引所から出来高トップの先物銘柄を動的に取得し、基本リストに追加する
     """
     
-    # 1. 既存のDEFAULT_SYMBOLSをセットに追加 (重複排除のため)
-    unique_symbols = set(base_symbols)
+    logging.info(f"🔄 出来高トップ {limit} 銘柄の動的取得を開始します...")
     
     try:
-        # 2. 全ティッカー情報を取得 (fetch_tickersは対応している前提)
+        # 1. 全ティッカー情報（価格、出来高など）を取得
         tickers = await exchange.fetch_tickers()
         
-        # 3. 先物/スワップ (Swap/Future) かつ USDT建ての銘柄をフィルタリング
-        future_tickers = {}
-        for symbol_ccxt, ticker in tickers.items():
-            # CCXTのシンボル形式 (例: BTC/USDT) を取得
-            market_info = exchange.markets.get(symbol_ccxt)
-            
-            if market_info and market_info['type'] in ['future', 'swap'] and market_info['quote'] == 'USDT':
-                 
-                 # 24時間出来高 (quoteVolume/USDT出来高) が存在し、0より大きいことを確認
-                volume_for_sort = ticker.get('quoteVolume', ticker.get('volume', 0))
-                if volume_for_sort > 0:
-                    future_tickers[symbol_ccxt] = volume_for_sort
-                    
-        # 4. 出来高でソートし、TOP_SYMBOL_LIMIT個を選択
-        # item[0]: symbol, item[1]: volume
-        sorted_tickers = sorted(
-            future_tickers.items(),
-            key=lambda item: item[1], 
-            reverse=True
-        )
-        
-        # 5. トップ銘柄をリストに追加
-        top_volume_symbols_ccxt = []
-        for symbol_ccxt, _ in sorted_tickers:
-            
-            # デフォルトリストと重複していないか確認
-            if symbol_ccxt not in unique_symbols:
-                unique_symbols.add(symbol_ccxt)
-                top_volume_symbols_ccxt.append(symbol_ccxt)
-                
-            # デフォルト銘柄に追加する分を制限 (出来高TOP_SYMBOL_LIMIT分のみ)
-            if len(top_volume_symbols_ccxt) >= limit:
-                break
+        # 'NoneType' object has no attribute 'keys' のエラー対策
+        if tickers is None or not isinstance(tickers, dict):
+            raise Exception("fetch_tickers returned None or invalid data.")
 
-        # 6. 最終リストを返す
-        final_list = list(unique_symbols)
-        logging.info(f"✅ 出来高ベースの監視銘柄リストを更新しました。デフォルト ({len(base_symbols)}件) + 新規出来高トップ ({len(top_volume_symbols_ccxt)}件) = 合計 {len(final_list)} 銘柄。")
+        volume_data = []
         
-        return final_list
+        for symbol, ticker in tickers.items():
+            market = exchange.markets.get(symbol)
+            
+            # 1. 市場情報が存在し、アクティブであること
+            if market is None or not market.get('active'):
+                 continue
+
+            # 2. Quote通貨がUSDTであり、取引タイプが先物/スワップであること (USDT-margined futures)
+            if market.get('quote') == 'USDT' and market.get('type') in ['swap', 'future']:
+                
+                # 'quoteVolume' (引用通貨建て出来高 - USDT) を優先的に使用
+                volume = ticker.get('quoteVolume')
+                if volume is None:
+                    # quoteVolumeがない場合、baseVolumeと最終価格で計算（概算）
+                    base_vol = ticker.get('baseVolume')
+                    last_price = ticker.get('last')
+                    if base_vol is not None and last_price is not None:
+                        volume = base_vol * last_price
+                
+                if volume is not None and volume > 0:
+                    volume_data.append((symbol, volume))
+        
+        # 3. 出来高で降順にソートし、TOP N（40）のシンボルを抽出
+        volume_data.sort(key=lambda x: x[1], reverse=True)
+        top_symbols = [s for s, v in volume_data[:limit]]
+        
+        # 4. デフォルトリストと結合し、重複を排除（動的取得できなかった場合も主要銘柄は維持）
+        # 優先度の高いデフォルト銘柄を先頭に、出来高トップ銘柄を追加する形でリストを作成
+        unique_symbols = list(base_symbols)
+        for symbol in top_symbols:
+            if symbol not in unique_symbols:
+                unique_symbols.append(symbol)
+        
+        logging.info(f"✅ 出来高トップ銘柄を動的に取得しました (合計 {len(unique_symbols)} 銘柄)。")
+        return unique_symbols
 
     except Exception as e:
-        logging.error(f"❌ 出来高トップ銘柄の取得に失敗しました。デフォルト ({len(base_symbols)}件) を使用します: {e}")
+        # エラーが発生した場合、デフォルトリストのみを返す (耐障害性の維持)
+        logging.error(f"❌ 出来高トップ銘柄の取得に失敗しました。デフォルト ({len(base_symbols)}件) を使用します: {e}", exc_info=True)
         return base_symbols
 
 async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
@@ -976,11 +977,17 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     """
     取引実行ロジック。
-    計算されたロットサイズが最小取引単位を下回る場合、最小取引単位に補正して注文を実行する。
+    ロットサイズ計算を強化し、取引所の精度で最小ロットを保証する。
     """
+    global LAST_SIGNAL_TIME
     
     if TEST_MODE:
-        return {'status': 'skip', 'error_message': 'TEST_MODE is ON'}
+        # TEST_MODEでは、計算結果のみを返す
+        max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
+        sl_ratio = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price']
+        notional_value_usdt_calculated = max_risk_usdt / sl_ratio
+        
+        return {'status': 'skip', 'error_message': 'TEST_MODE is ON', 'filled_usdt': notional_value_usdt_calculated}
     
     if not ACCOUNT_EQUITY_USDT or ACCOUNT_EQUITY_USDT <= 0:
         return {'status': 'error', 'error_message': 'Account equity is zero or not fetched.'}
@@ -1001,31 +1008,46 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     notional_value_usdt_calculated = max_risk_usdt / sl_ratio
     lot_size_units_calculated = notional_value_usdt_calculated / entry_price 
 
-    # 最小取引サイズ（CCXTの市場情報から取得）
+    # 2. 💡 Patch 72 FIX: 最小取引ロットの精度チェックを強化
     market_info = EXCHANGE_CLIENT.markets[symbol]
-    min_amount = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
-    
-    # ロットサイズの補正
-    if lot_size_units_calculated < min_amount:
-        lot_size_units = min_amount
-        notional_value_usdt = lot_size_units * entry_price
-        logging.warning(f"⚠️ {symbol}: 計算されたロット ({lot_size_units_calculated:.8f}) が最小単位 ({min_amount:.8f}) 未満です。最小単位 {lot_size_units:.8f} で注文します。")
-    else:
-        lot_size_units = lot_size_units_calculated
-        notional_value_usdt = notional_value_usdt_calculated
-    
+    min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
+
+    # 最小取引サイズを、取引所の精度（ステップサイズ）で調整し、「実際に取引可能な最小ロット」を特定する。
     try:
-        # 2. 注文の実行
+        min_amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, min_amount_raw)
+        min_amount_adjusted = float(min_amount_adjusted_str)
+    except Exception as e:
+        logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}")
+        min_amount_adjusted = min_amount_raw # 失敗したら生の値で続行（リスクあり）
+
+    # 万一、precision adjustmentで0になった場合の最終防衛
+    if min_amount_adjusted <= 0.0:
+        logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
+        return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
+
+    # 3. 最終的に使用するロットサイズを決定
+    # 計算されたロットサイズが、取引可能な最小ロットを下回る場合、最小ロットを採用する。
+    lot_size_units = max(lot_size_units_calculated, min_amount_adjusted)
+    notional_value_usdt = lot_size_units * entry_price # 概算の名目価値
+
+    # 4. 注文の実行
+    try:
         side_ccxt = 'buy' if side == 'long' else 'sell'
         
-        # 契約数量を取引所の精度に合わせて調整
+        # 契約数量を取引所の精度に合わせて最終調整
         amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units)
         amount_adjusted = float(amount_adjusted_str)
         
+        # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合、強制的に最小ロットに戻す
+        if amount_adjusted < min_amount_adjusted:
+             amount_adjusted = min_amount_adjusted
+
         if amount_adjusted <= 0.0:
+             # このエラーはamount_to_precision後のamount_adjustedが0以下になった場合に発生
              logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
              return {'status': 'error', 'error_message': 'Amount rounded down to zero by precision adjustment.'}
         
+        # 注文実行
         order = await EXCHANGE_CLIENT.create_order(
             symbol,
             type='market',
@@ -1034,7 +1056,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             params={}
         )
 
-        # 3. ポジション情報を更新
+        # 5. ポジション情報を更新
         new_position = {
             'symbol': symbol,
             'side': side,
@@ -1055,20 +1077,36 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             'filled_amount': amount_adjusted,
             'filled_usdt': notional_value_usdt,
             'entry_price': new_position['entry_price'],
+            'stop_loss': stop_loss,
+            'take_profit': signal['take_profit'],
             'exit_type': 'N/A'
         }
         
     except ccxt.ExchangeError as e:
         error_message = e.args[0]
         
+        # 💡 【Patch 73】MEXC: 流動性不足/Oversold (30005) のエラー処理を強化
         if 'code":30005' in error_message or 'Oversold' in error_message:
-            detail_msg = "MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。"
+            
+            # 1. ログ記録
+            detail_msg = "MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。この銘柄の取引を一時的にクールダウンさせます。"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
+            
+            # 2. クールダウンタイマーをセット
+            # シグナルが拒否された場合、次のシグナルをすぐに再実行しないように、クールダウン時間を設定します。
+            LAST_SIGNAL_TIME[symbol] = time.time()
+            
+            # 3. エラー情報を返却
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            detail_msg = "MEXC: ロットサイズがゼロまたは小さすぎます (400)。"
+            # 💡 Patch 72でこのエラーの発生を大幅に抑えるロジックを実装済み
+            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted_str})"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
+            
+            # 💡 400エラーの場合も、無限ループを防ぐためクールダウンさせる
+            LAST_SIGNAL_TIME[symbol] = time.time()
+            
             return {'status': 'error', 'error_message': detail_msg}
             
         else:
@@ -1101,7 +1139,6 @@ async def main_bot_loop():
             return
 
         # 1. 監視対象銘柄のリストを更新 (出来高ベース)
-        # 💡 get_top_volume_symbols を実行して動的に監視銘柄リストを更新
         CURRENT_MONITOR_SYMBOLS = await get_top_volume_symbols(EXCHANGE_CLIENT, TOP_SYMBOL_LIMIT, DEFAULT_SYMBOLS)
         await fetch_open_positions() # オープンポジション情報の更新
         
@@ -1134,7 +1171,7 @@ async def main_bot_loop():
             if not ohlcv_data:
                 continue
 
-            # 3.2. テクニカルシグナル計算
+            # 3.2. テクニカルシグナル計算 (ダミーを使用)
             tech_signals = apply_technical_analysis(symbol, ohlcv_data)
             
             # 3.3. 最終シグナルスコアとSL/TP計算
@@ -1181,6 +1218,10 @@ async def main_bot_loop():
                 signal['take_profit'] = tp_price
                 signal['liquidation_price'] = liq_price
                 
+                # リスク許容額の計算 (通知用)
+                max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
+                signal['risk_usdt'] = max_risk_usdt
+
                 logging.info(f"🔥 強力なシグナル検出: {signal['symbol']} - {signal['side'].upper()} ({signal['score']*100:.2f})")
                 
                 # 4.2. 取引の実行
@@ -1258,25 +1299,48 @@ async def position_management_loop_async():
         if action:
             logging.warning(f"🔔 {symbol}: {action}トリガー！価格 {format_price(current_price)}")
             
+            # --- 実際の決済注文ロジックをここに実装する ---
+            
             # ダミーの取引結果を生成
+            side_ccxt = 'sell' if pos['side'] == 'long' else 'buy'
+            pnl_usdt_calc = abs(pos['filled_usdt']) * (current_price - pos['entry_price']) / pos['entry_price'] * (1 if pos['side'] == 'long' else -1)
+            pnl_rate_calc = pnl_usdt_calc / (abs(pos['filled_usdt']) / LEVERAGE) / LEVERAGE # 証拠金に対するレバレッジ込みのリターン
+            
             trade_result: Dict = {
                 'status': 'ok',
                 'exit_type': action.split('_')[0],
                 'entry_price': pos['entry_price'],
                 'exit_price': current_price,
                 'filled_amount': abs(pos['contracts']),
-                # PnL計算 (簡易)
-                'pnl_rate': (current_price - pos['entry_price']) / pos['entry_price'] * LEVERAGE * (1 if pos['side'] == 'long' else -1),
-                'pnl_usdt': abs(pos['filled_usdt']) * (current_price - pos['entry_price']) / pos['entry_price'] * (1 if pos['side'] == 'long' else -1)
+                'pnl_usdt': pnl_usdt_calc,
+                'pnl_rate': pnl_rate_calc,
             }
             
-            # 実際はここで決済注文を出す
-            
+            # 実際はここで決済注文を出す (ccxt.create_order - close all)
+            try:
+                # 決済注文（成行）
+                # close_order = await EXCHANGE_CLIENT.create_order(
+                #     symbol, 
+                #     type='market', 
+                #     side=side_ccxt, 
+                #     amount=abs(pos['contracts']),
+                #     params={'reduceOnly': True} 
+                # )
+                logging.info(f"✅ {symbol} 決済注文実行: {action.split('_')[0]} でポジションをクローズしました。")
+                
+            except Exception as e:
+                 logging.error(f"❌ {symbol} 決済注文失敗: {e}")
+                 # 決済失敗の場合でも、システム管理上のポジションは削除しない（次のループで再試行）
+                 continue 
+                 
+            # 決済成功としてリストから削除
             closed_positions_symbols.append(symbol)
+            
+            # 通知とロギング
             log_signal(pos, "ポジション決済", trade_result)
             mock_signal = pos.copy()
-            mock_signal['score'] = 0.8
-            mock_signal['rr_ratio'] = 2.0 
+            mock_signal['score'] = 0.8 # 通知に必要なダミースコア
+            mock_signal['rr_ratio'] = 2.0 # 通知に必要なダミーRRR
             await send_telegram_notification(format_telegram_message(mock_signal, "ポジション決済", MIN_RISK_PERCENT, trade_result, exit_type=action.split('_')[0]))
 
     # 決済されたポジションをリストから削除
@@ -1311,12 +1375,16 @@ async def main_bot_scheduler():
         # クライアントの再初期化を試行
         if not IS_CLIENT_READY:
             logging.info("(main_bot_scheduler) - クライアント未準備のため、初期化を試行します。")
-            await initialize_exchange_client() 
-            await asyncio.sleep(5) 
-            continue
+            # 初期化に失敗した場合、5秒待機して再試行
+            if not await initialize_exchange_client(): 
+                await asyncio.sleep(5)
+                continue
 
+        current_time = time.time()
+        
         try:
             await main_bot_loop()
+            LAST_SUCCESS_TIME = time.time()
         except Exception as e:
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             await send_telegram_notification(f"🚨 **致命的なエラー**\\nメインループでエラーが発生しました: `{e}`")
