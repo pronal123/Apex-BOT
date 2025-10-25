@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "ALGO/USDT", "XLM/USDT", "SAND/USDT",
     "GALA/USDT", "FIL/USDT", 
     "AXS/USDT", "MANA/USDT", "AAVE/USDT",
-    "FLOW/USDT", "IMX/USdt", 
+    "FLOW/USDT", "IMX/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
 BOT_VERSION = "v20.0.26"            # 💡 BOTバージョン
