@@ -135,7 +135,10 @@ RSI_MOMENTUM_LOW = 40
 MACD_CROSS_PENALTY = 0.15          
 LIQUIDITY_BONUS_MAX = 0.06          
 FGI_PROXY_BONUS_MAX = 0.05         
-FOREX_BONUS_MAX = 0.0               
+FOREX_BONUS_MAX = 0.0
+
+# 💡 FGI API設定を追加
+FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # Alternative.me API
 
 # ボラティリティ指標 (ATR) の設定 
 ATR_LENGTH = 14
