@@ -151,7 +151,7 @@ SIGNAL_THRESHOLD_ACTIVE = 0.80
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
-OBV_MOMENTUM_BONUS = 0.04           
+OBV_MOMENTUM_BONUS = 0.05           
 
 # ====================================================================================
 # UTILITIES & FORMATTING 
