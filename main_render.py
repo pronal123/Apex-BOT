@@ -1,15 +1,16 @@
 # ====================================================================================
-# Apex BOT v20.0.26 - Future Trading / 10x Leverage 
-# (Patch 73: UnboundLocalError/MEXC Balance FIX)
+# Apex BOT v20.0.27 - Future Trading / 10x Leverage 
+# (Patch 74: OHLCV Data Shortage FIX)
 #
 # 改良・修正点:
-# 1. 【致命的エラー修正: Patch 73-1】main_bot_loop 関数内の global 宣言に LAST_SUCCESS_TIME を追加し、
+# 1. 【データ不足警告修正: Patch 74】get_historical_ohlcv 関数にて、OHLCVデータ取得数が
+#    目標の limit (1000) に満たない場合でも、長期SMA (200本) の計算に必要な最小バー数以上であれば
+#    データ不足による分析スキップを行わず、分析を続行するようにロジックを修正しました。
+# 2. 【致命的エラー修正: Patch 73-1】main_bot_loop 関数内の global 宣言に LAST_SUCCESS_TIME を追加し、
 #    UnboundLocalError (ローカル変数未関連付けエラー) を解消しました。
-# 2. 【致命的エラー修正: Patch 73-2】get_account_status 関数で MEXC クライアントの fetch_balance() 呼び出し時の
+# 3. 【致命的エラー修正: Patch 73-2】get_account_status 関数で MEXC クライアントの fetch_balance() 呼び出し時の
 #    引数を削除し、「mexc fetchBalance() not support self method」エラーを解消しました。
-# 3. 【エラー処理維持】Code 10007 (symbol not support api) および Code 30005 (流動性不足) の検出・スキップロジックを維持。
-# 4. 【NaN/NoneTypeエラー修正】get_historical_ohlcv 関数に df.dropna() を追加し、データ分析の安定性を向上させました。
-# 5. 【CCXT接続修正: Patch 72】initialize_exchange_client のリソース解放ロジックを強化し、Unclosed client sessionエラーを解決。
+# 4. 【エラー処理維持】Code 10007 (symbol not support api) および Code 30005 (流動性不足) の検出・スキップロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -160,7 +161,7 @@ OBV_MOMENTUM_BONUS = 0.04
 app = FastAPI(
     title="Apex Crypto Bot API",
     description="CCXTを利用した自動取引ボットのFastAPIインターフェース",
-    version="v20.0.26" # ★ バージョン更新
+    version="v20.0.27" # ★ バージョン更新
 )
 
 # ====================================================================================
@@ -311,7 +312,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str = "v20.0.26" # ★ バージョン更新
+    bot_version: str = "v20.0.27" # ★ バージョン更新
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -501,7 +502,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.26 - Future Trading / 10x Leverage (Patch 73: UnboundLocalError/MEXC Balance FIX)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.27 - Future Trading / 10x Leverage (Patch 74: OHLCV Data Shortage FIX)</i>") # BOTバージョンを更新
     return message
 
 
@@ -605,7 +606,7 @@ async def send_webshare_update(data: Dict[str, Any]):
 
 async def initialize_exchange_client() -> bool:
     """
-    【★エラー修正済】CCXTクライアントを初期化し、市場情報をロードする。
+    CCXTクライアントを初期化し、市場情報をロードする。
     Unclosed client sessionエラーと初期化失敗(Fatal)後のリソースリークを防止。
     """
     global EXCHANGE_CLIENT, IS_CLIENT_READY
@@ -626,7 +627,7 @@ async def initialize_exchange_client() -> bool:
         except Exception as e:
             # 競合状態や既にクローズされている場合にエラーになることがある
             logging.warning(f"⚠️ 既存クライアントのクローズ中にエラーが発生しましたが続行します: {e}")
-        # 【修正点1】Unclosed client session対策: クローズ試行後、Noneに設定
+        # クローズ試行後、Noneに設定
         EXCHANGE_CLIENT = None
 
     try:
@@ -711,10 +712,10 @@ async def initialize_exchange_client() -> bool:
         # RequestTimeoutもccxt.NetworkErrorを継承しているため、ここで捕捉
         logging.critical(f"❌ CCXT初期化失敗 - ネットワークエラー/タイムアウト... {e}", exc_info=True)
     except Exception as e:
-        # 【修正点2】予期せぬエラーを捕捉 (Client not readyの原因になりうる)
+        # 予期せぬエラーを捕捉
         logging.critical(f"❌ CCXT初期化失敗 - 予期せぬ致命的なエラー: {e}", exc_info=True)
     
-    # 【修正点3】エラー発生時のフォールバック: 作成されたクライアントをクローズし、Noneにする。
+    # エラー発生時のフォールバック: 作成されたクライアントをクローズし、Noneにする。
     if EXCHANGE_CLIENT:
         logging.warning("⚠️ 初期化失敗に伴い、作成されたクライアントセッションをクローズします。")
         try:
@@ -744,9 +745,6 @@ async def get_top_volume_symbols() -> List[str]:
         }
 
         # 24時間の取引量 ('quoteVolume' または 'baseVolume' など、取引所依存) でソート
-        # MEXCの場合、'quoteVolume' (USDT建て) を使用することが多い
-        
-        # 出来高のキーを決定（取引所によって異なる）
         volume_key = 'quoteVolume' # USDTベースの出来高
         
         sorted_tickers = sorted(
@@ -800,8 +798,9 @@ async def get_macro_context() -> Dict:
 
 async def get_historical_ohlcv(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
     """
+    【★エラー修正済: Patch 74】
     指定されたシンボルのOHLCVデータを取得し、DataFrameとして返す。
-    【★エラー修正済】dropna()を追加。
+    データ不足の場合、長期SMAの計算に必要な最小バー数 (200) 以上であれば分析を続行する。
     """
     if not IS_CLIENT_READY:
         logging.error(f"❌ CCXTクライアントが未準備です。OHLCV取得をスキップします: {symbol}")
@@ -810,16 +809,25 @@ async def get_historical_ohlcv(symbol: str, timeframe: str, limit: int) -> Optio
     try:
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         
-        if not ohlcv or len(ohlcv) < limit:
-            logging.warning(f"⚠️ {symbol} ({timeframe}) のOHLCVデータが不足しています ({len(ohlcv)}/{limit})。")
+        # 💡 【修正点】OHLCVデータ不足エラー対策 (Patch 74)
+        # 長期SMA (200) の計算に必要な最小限のデータがあるかを確認。
+        MIN_REQUIRED_FOR_ANALYSIS = LONG_TERM_SMA_LENGTH # 200
+        
+        if not ohlcv or len(ohlcv) < MIN_REQUIRED_FOR_ANALYSIS:
+            logging.warning(f"⚠️ {symbol} ({timeframe}) のOHLCVデータが不足しています (取得数: {len(ohlcv)} / 最小必要数: {MIN_REQUIRED_FOR_ANALYSIS})。分析をスキップします。")
             return None
+
+        if len(ohlcv) < limit:
+            # データは不足しているが、分析に必要な最小限のバー数は揃っている場合
+            logging.warning(f"⚠️ {symbol} ({timeframe}) のOHLCVデータが目標の {limit} 本に不足しています (取得数: {len(ohlcv)})。分析は続行します。")
+
 
         # DataFrameに変換し、カラム名を指定
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         
-        # 【修正点】NaN/NoneTypeエラー対策: 欠損値を含む行を削除
+        # 欠損値を含む行を削除
         df.dropna(inplace=True)
 
         return df
@@ -883,15 +891,15 @@ def calculate_technical_score(df: pd.DataFrame, timeframe: str, symbol: str, mac
                 if current_close > last[sma_col]:
                     score += LONG_TERM_REVERSAL_PENALTY # ペナルティを回避 = ボーナス
                 else:
-                    score -= LONG_TERM_REVERSAL_PENALTY_CONST
-                    tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY_CONST
+                    score -= LONG_TERM_REVERSAL_PENALTY
+                    tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
             elif side == 'short':
                 # ショート: 価格がSMAの下にあるか
                 if current_close < last[sma_col]:
                     score += LONG_TERM_REVERSAL_PENALTY # ペナルティを回避 = ボーナス
                 else:
-                    score -= LONG_TERM_REVERSAL_PENALTY_CONST
-                    tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY_CONST
+                    score -= LONG_TERM_REVERSAL_PENALTY
+                    tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
         
         # 構造/ピボット支持 (ここでは簡易的に直近の高値/安値からの乖離で判定)
         pivot_bonus = 0.0
@@ -1053,7 +1061,7 @@ def determine_risk_management(signal: Dict, account_equity: float, trade_step_si
     else:
         lot_size_units = lot_size_units_raw
 
-    # 4. 最小取引量/名目価値のチェック (Patch 71 FIX)
+    # 4. 最小取引量/名目価値のチェック
     notional_value = lot_size_units * current_price # 名目価値 (USDT)
     
     if lot_size_units <= 0:
@@ -1160,17 +1168,15 @@ async def execute_trade_logic(signal: Dict) -> Dict:
 
 async def get_account_status() -> Dict:
     """
-    【★エラー修正済】アカウントの残高と総資産を取得する。
-    mexc fetchBalance() not support self method エラーに対応。
+    アカウントの残高と総資産を取得する。
+    mexc fetchBalance() not support self method エラーに対応済。
     """
     global ACCOUNT_EQUITY_USDT
     if not IS_CLIENT_READY:
         return {'error': True, 'message': 'CCXTクライアントが未準備'}
 
     try:
-        # 💡 【修正点】mexc fetchBalance() not support self method 対策
-        # CCXTのfetch_balanceを引数なしで呼び出すことで、mexcの引数エラーを回避し、
-        # クライアントが'future'モードで初期化されているため、先物残高が返されることを期待する。
+        # CCXTのfetch_balanceを引数なしで呼び出す
         balance = await EXCHANGE_CLIENT.fetch_balance()
         
         # 総資産 (Equity) を計算: total.USDT または infoから取得
@@ -1178,7 +1184,6 @@ async def get_account_status() -> Dict:
         
         if total_usdt_balance == 0.0 and balance.get('info'):
             # USDT以外の情報から計算を試みる（取引所依存）
-            # ここでは単純化し、USDT残高が取得できない場合は警告
             logging.warning("⚠️ USDTのTotal残高が取得できませんでした。他の通貨の残高は無視されます。")
             
         ACCOUNT_EQUITY_USDT = total_usdt_balance
@@ -1320,7 +1325,7 @@ async def main_bot_loop():
     global CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     global LAST_WEBSHARE_UPLOAD_TIME, GLOBAL_MACRO_CONTEXT
-    global LAST_SUCCESS_TIME # ★ 【修正点】UnboundLocalError対策として追加
+    global LAST_SUCCESS_TIME 
 
     retry_delay = 10 # 初回試行時の遅延（秒）
     
@@ -1332,7 +1337,7 @@ async def main_bot_loop():
                 initialized = await initialize_exchange_client()
                 
                 if not initialized:
-                    # 初期化失敗 (ログで確認された「Fatal: Client not ready」の原因)
+                    # 初期化失敗
                     logging.critical(f"❌ Client initialization failed. Retrying in 60s.")
                     await asyncio.sleep(60) # ログの動作と一致させる
                     continue
@@ -1366,14 +1371,13 @@ async def main_bot_loop():
                 if symbol in LAST_SIGNAL_TIME and (now - LAST_SIGNAL_TIME[symbol] < TRADE_SIGNAL_COOLDOWN):
                     continue # クールダウン中
                 
-                # 最小名目価値とロットステップサイズを取得 (MEXC先物専用の処理を仮定)
+                # 最小名目価値とロットステップサイズを取得
                 try:
                     market = EXCHANGE_CLIENT.markets.get(symbol)
                     if market and market['type'] in ['future', 'swap']:
-                        # lot_step_sizeは 'limits.amount.min' または 'precision.amount' に依存
+                        # lot_step_sizeは 'precision.amount' に依存
                         trade_step_size = market.get('precision', {}).get('amount', 0.0)
-                        # min_notional_value はMEXCの'info'にあることが多い (Patch 71の原因)
-                        # ここでは ccxtの統一された limit.cost.min を使用
+                        # min_notional_value は ccxtの統一された limit.cost.min を使用
                         lot_min_notional = market.get('limits', {}).get('cost', {}).get('min', 0.0) 
                 except Exception:
                     # 取得失敗時は次の銘柄へ
@@ -1461,7 +1465,7 @@ async def api_status():
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
     return {
-        "bot_version": "v20.0.26 (Patch 73: UnboundLocalError/MEXC Balance FIX)", # ★ バージョン更新
+        "bot_version": "v20.0.27 (Patch 74: OHLCV Data Shortage FIX)", # ★ バージョン更新
         "timestamp_jst": now_jst,
         "is_client_ready": IS_CLIENT_READY,
         "test_mode": TEST_MODE,
