@@ -80,7 +80,7 @@ TEST_MODE = os.getenv("TEST_MODE", "False").lower() in ('true', '1', 't')
 SKIP_MARKET_UPDATE = os.getenv("SKIP_MARKET_UPDATE", "False").lower() in ('true', '1', 't')
 
 # 💡 先物取引設定 
-LEVERAGE = 10 # 取引倍率
+LEVERAGE = 30 # 取引倍率
 TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
