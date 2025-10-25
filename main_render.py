@@ -1,12 +1,15 @@
 # ====================================================================================
-# Apex BOT v20.0.25 - Future Trading / 10x Leverage 
-# (Patch 71: Critical MEXC Rate Limit Fix (Code 510))
+# Apex BOT v20.0.23 - Future Trading / 10x Leverage 
+# (Patch 70: Min Lot Size Correction & Enhanced MEXC Error Handling & Leverage Target Fix)
 #
 # 改良・修正点:
-# 1. 【致命的エラー修正: Patch 71.2】MEXC初期化時のレートリミットエラー (Code 510) 対策として、
-#    レバレッジ設定の対象銘柄を、全700件以上のシンボルから、監視対象の約30銘柄に限定。
-# 2. 【レートリミット対策強化: Patch 71.1】レバレッジ設定時の遅延を 2.0秒 -> 3.0秒 に増加。
-# 3. 【ロジック維持】Patch 70の修正点 (30005/400/10007エラー対策) を維持。
+# 1. 【致命的エラー修正: UnboundLocalError】main_bot_loop内の LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加。
+# 2. 【致命的エラー修正: ValueError】format_telegram_message内の filled_amount を float に明示的に変換。
+# 3. 【新機能/エラー回避: Patch 69】execute_trade_logic にて、計算ロットサイズが最小単位未満の場合、
+#    最小取引単位 (min_amount) に切り上げて注文を執行するロジックを追加し、Amount can not be less than zero (400) エラーを回避。
+# 4. 【エラー処理強化: Patch 69】MEXCの Oversold (30005) エラーを明示的に捕捉し、ログに記録。
+# 5. 【ロジック修正: Patch 70 FIX】MEXCの set_leverage 対象を監視銘柄 (DEFAULT_SYMBOLS) に限定し、0件設定エラーを回避。
+# 6. 【ロジック維持】Patch 68の MEXC set_leverage レートリミット対策 (遅延 1.5秒) を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -79,8 +82,8 @@ LEVERAGE = 10 # 取引倍率
 TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
-# 💡 レートリミット対策用定数を追加 (修正点: 2.0秒 -> 3.0秒に増加)
-LEVERAGE_SETTING_DELAY = 3.0 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 3.0秒に増加 (Patch 71.1)
+# 💡 レートリミット対策用定数を追加 (修正点: 0.5秒 -> 1.5秒に増加)
+LEVERAGE_SETTING_DELAY = 1.0 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒) - 0.5秒から1.5秒に増加
 
 # 💡 リスクベースの動的ポジションサイジング設定 
 # BASE_TRADE_SIZE_USDTはリスクベースサイジングにより無視されますが、互換性のために残します。
@@ -108,7 +111,6 @@ GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_b
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False 
 OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (SL/TP監視用)
 ACCOUNT_EQUITY_USDT: float = 0.0 # 現時点での総資産 (リスク計算に使用)
-SUPPORTED_FUTURE_SYMBOLS: List[str] = [] # 💡 取引所がサポートする先物シンボルリスト
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -301,7 +303,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str = "v20.0.25" # バージョンを更新
+    bot_version: str = "v20.0.23" # バージョンを更新
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -410,8 +412,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         
         if TEST_MODE:
             trade_status_line = f"⚠️ **テストモード**: 取引は実行されません。(ロット: {format_usdt(notional_value)} USDT, {LEVERAGE}x)" 
-        elif trade_result is None or trade_result.get('status') == 'error' or trade_result.get('status') == 'skip':
-            # status: skip はテストモード以外でもロットサイズが0の場合などに使用しうる
+        elif trade_result is None or trade_result.get('status') == 'error':
             trade_status_line = f"❌ **自動売買 失敗**: {trade_result.get('error_message', 'APIエラー')}"
         elif trade_result.get('status') == 'ok':
             trade_status_line = f"✅ **自動売買 成功**: **{trade_type_text}**注文を執行しました。" 
@@ -492,7 +493,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.25 - Future Trading / 10x Leverage (Patch 71: Rate Limit Fix)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.23 - Future Trading / 10x Leverage (Patch 70: Leverage Target Fix)</i>") # BOTバージョンを更新
     return message
 
 
@@ -595,8 +596,8 @@ async def send_webshare_update(data: Dict[str, Any]):
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-    """CCXTクライアントを初期化し、市場情報をロードする (Patch 71でレートリミット対策を強化)"""
-    global EXCHANGE_CLIENT, IS_CLIENT_READY, SUPPORTED_FUTURE_SYMBOLS, LEVERAGE_SETTING_DELAY # LEVERAGE_SETTING_DELAYもグローバル変数として扱う
+    """CCXTクライアントを初期化し、市場情報をロードする (Patch 68で LEVERAGE_SETTING_DELAY を使用)"""
+    global EXCHANGE_CLIENT, IS_CLIENT_READY
     
     IS_CLIENT_READY = False
     
@@ -644,35 +645,28 @@ async def initialize_exchange_client() -> bool:
         logging.info(f"✅ CCXTクライアントの初期化設定完了。リクエストタイムアウト: {timeout_ms/1000}秒。") 
         
         await EXCHANGE_CLIENT.load_markets() 
-
-        # 💡 Patch 70.3 FIX: サポートされているFuture/Swapシンボルを抽出
-        SUPPORTED_FUTURE_SYMBOLS = []
-        for mkt in EXCHANGE_CLIENT.markets.values():
-             # USDT建てのSwap/Future市場を探す (シンボル形式 BTC/USDT)
-             if mkt['quote'] == 'USDT' and mkt['type'] in ['swap', 'future'] and mkt['active']:
-                 SUPPORTED_FUTURE_SYMBOLS.append(mkt['symbol']) 
-
-        logging.info(f"✅ {EXCHANGE_CLIENT.id.upper()} で {len(SUPPORTED_FUTURE_SYMBOLS)} 件の先物/スワップシンボルを確認しました。")
-
+        
         # レバレッジの設定 (MEXC向け)
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 💡 Patch 71.2 FIX: レバレッジ設定の対象を監視対象銘柄に限定 (全700銘柄への設定試行によるレートリミットを回避)
+            
             symbols_to_set_leverage = []
             
-            # DEFAULT_SYMBOLSに含まれる銘柄の中から、実際にロードされたアクティブな先物市場を抽出
-            # DEFAULT_SYMBOLSは ['BTC/USDT', 'ETH/USDT', ...] 形式
-            for symbol_ccxt_standard in DEFAULT_SYMBOLS:
-                 # CCXTの市場情報辞書のキーは標準形式
-                 if symbol_ccxt_standard in EXCHANGE_CLIENT.markets:
-                     mkt = EXCHANGE_CLIENT.markets[symbol_ccxt_standard]
-                     # USDT建てのSwap/Future市場を探す
-                     if mkt['quote'] == 'USDT' and mkt['type'] in ['swap', 'future'] and mkt['active']:
-                         # set_leverageにはCCXT標準のシンボル形式 (mkt['symbol'] はCCXT標準形式) を使用
-                         symbols_to_set_leverage.append(mkt['symbol']) 
-                         
-            logging.info(f"ℹ️ MEXC: レバレッジ設定対象を監視対象銘柄リスト ({len(symbols_to_set_leverage)}件) に限定しました。")
+            # --- 🚀 Patch 70 FIX: レバレッジ設定対象を監視銘柄リストに限定する ---
             
-            # --- 🚀 Patch 71.1 FIX: set_leverage に LEVERAGE_SETTING_DELAY を適用 (遅延を 3.0秒に増加) ---
+            # DEFAULT_SYMBOLSに含まれるCCXT標準シンボル (例: BTC/USDT) をベース/クォート通貨に分解
+            default_base_quotes = {s.split('/')[0]: s.split('/')[1] for s in DEFAULT_SYMBOLS if '/' in s}
+            
+            for mkt in EXCHANGE_CLIENT.markets.values():
+                 # USDT建てのSwap/Future市場を探す
+                 if mkt['quote'] == 'USDT' and mkt['type'] in ['swap', 'future'] and mkt['active']:
+                     
+                     # 市場の基本通貨がDEFAULT_SYMBOLSのベース通貨に含まれるかチェック
+                     # これにより、監視対象の先物シンボルに限定する。
+                     if mkt['base'] in default_base_quotes:
+                         # set_leverageに渡すべきCCXTシンボル (例: BTC/USDT:USDT) をリストに追加
+                         symbols_to_set_leverage.append(mkt['symbol']) 
+            
+            # --- Patch 70 FIX 終了 ---
 
             # set_leverage() が openType と positionType の両方を要求するため、両方の設定を行います。
             for symbol in symbols_to_set_leverage:
@@ -686,12 +680,11 @@ async def initialize_exchange_client() -> bool:
                         symbol, 
                         params={'openType': 2, 'positionType': 1} 
                     )
-                    logging.debug(f"✅ {symbol} のレバレッジを {LEVERAGE}x (Cross Margin / Long) に設定しました。")
+                    logging.info(f"✅ {symbol} のレバレッジを {LEVERAGE}x (Cross Margin / Long) に設定しました。")
                 except Exception as e:
-                    # エラーログをWarningに下げ、BOT停止要因とはしない
                     logging.warning(f"⚠️ {symbol} のレバレッジ/マージンモード設定 (Long) に失敗しました: {e}")
                     
-                # 💥 レートリミット対策として遅延を挿入 (重要: 2.0s -> 3.0s に増加)
+                # 💥 レートリミット対策として遅延を挿入 (重要: 0.5s -> 1.5s)
                 await asyncio.sleep(LEVERAGE_SETTING_DELAY) 
 
                 # positionType: 2 は Short (売り) ポジション用
@@ -702,17 +695,16 @@ async def initialize_exchange_client() -> bool:
                         symbol, 
                         params={'openType': 2, 'positionType': 2}
                     )
-                    logging.debug(f"✅ {symbol} のレバレッジを {LEVERAGE}x (Cross Margin / Short) に設定しました。")
+                    logging.info(f"✅ {symbol} のレバレッジを {LEVERAGE}x (Cross Margin / Short) に設定しました。")
                 except Exception as e:
-                    # エラーログをWarningに下げ、BOT停止要因とはしない
                     logging.warning(f"⚠️ {symbol} のレバレッジ/マージンモード設定 (Short) に失敗しました: {e}")
                     
-                # 💥 レートリミット対策として遅延を挿入 (重要: 2.0s -> 3.0s に増加)
+                # 💥 レートリミット対策として遅延を挿入 (重要: 0.5s -> 1.5s)
                 await asyncio.sleep(LEVERAGE_SETTING_DELAY)
 
             logging.info(f"✅ MEXCの主要な先物銘柄 ({len(symbols_to_set_leverage)}件) に対し、レバレッジを {LEVERAGE}x、マージンモードを 'cross' に設定しました。")
 
-            # --- 🚀 Patch 71.1 FIX 終了 ---
+            # --- 🚀 Patch 68 FIX 終了 ---
 
         # ログメッセージを 'future' モードに変更
         logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を先物取引モードで初期化し、市場情報をロードしました。")
@@ -843,7 +835,6 @@ async def fetch_open_positions() -> List[Dict]:
         for p in positions_ccxt:
             if p and p.get('symbol') and p.get('contracts', 0) != 0:
                 # ユーザーが監視対象としている銘柄のみを抽出 (シンボル形式が一致することを前提)
-                # 💡 Patch 70.3で導入したサポートシンボルリストとの一致も確認すべきだが、ここではCURRENT_MONITOR_SYMBOLSに依存
                 if p['symbol'] in CURRENT_MONITOR_SYMBOLS:
                     # 'contracts'がマイナスならショート、プラスならロング
                     side = 'short' if p['contracts'] < 0 else 'long'
@@ -911,32 +902,9 @@ async def calculate_fgi() -> Dict:
         return {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A (APIエラー)', 'forex_bonus': 0.0}
 
 async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP_SYMBOL_LIMIT, base_symbols: List[str] = DEFAULT_SYMBOLS) -> List[str]:
-    """
-    取引所から出来高トップの先物銘柄を取得し、基本リストとサポート対象リストを統合する
-    💡 Patch 70.3 FIX: SUPPORTED_FUTURE_SYMBOLSを使って、非対応シンボルをフィルタリングする。
-    """
-    global SUPPORTED_FUTURE_SYMBOLS
-    
-    # 1. 出来高トップ銘柄の取得 (ロジックはスキップされるため、DEFAULT_SYMBOLSを使用)
+    """取引所から出来高トップの先物銘柄を取得し、基本リストに追加する (変更なし)"""
     # 実際にはccxt.fetch_tickersなどを使って出来高トップの銘柄を取得する
-    top_symbols = base_symbols
-    
-    # 2. サポートされていないシンボルをフィルタリング
-    if not SUPPORTED_FUTURE_SYMBOLS:
-        logging.warning("⚠️ サポートされている先物シンボルリストが空です。初期化が不完全かもしれません。")
-        # リストが空の場合でも、とりあえずDEFAULT_SYMBOLSのまま続行し、OHLCV取得でエラーを捕捉させる。
-        # または、致命的エラーとしてここで空リストを返すことも検討すべきだが、柔軟性を優先して続行。
-        return top_symbols
-        
-    filtered_symbols = [s for s in top_symbols if s in SUPPORTED_FUTURE_SYMBOLS]
-    
-    unsupported_count = len(top_symbols) - len(filtered_symbols)
-    if unsupported_count > 0:
-        logging.warning(f"⚠️ {unsupported_count} 件の銘柄がMEXC先物/スワップでサポートされていませんでした (コード10007の対策)。監視リストから除外しました。")
-    
-    # 3. リミット調整
-    return filtered_symbols[:limit]
-
+    return base_symbols
 
 async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
     """指定された銘柄と時間足のOHLCVデータを取得する (変更なし)"""
@@ -996,8 +964,6 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     """
     取引実行ロジック。
     計算されたロットサイズが最小取引単位を下回る場合、最小取引単位に補正して注文を実行する。
-    💡 Patch 70.2: ロットサイズが小さすぎるエラー (400) 対策の再確認。
-    💡 Patch 70.1: Oversold (30005) エラーの明示的な捕捉。
     """
     
     if TEST_MODE:
@@ -1014,7 +980,6 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     # 1. リスクベースのロットサイズ計算
     # 許容リスク額 (USDT)
     max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
-    signal['risk_usdt'] = max_risk_usdt # 通知用にリスク許容額を追加
     
     # SL価格までの値幅 (USDT)
     price_diff_to_sl = abs(entry_price - stop_loss)
@@ -1032,20 +997,10 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     lot_size_units_calculated = notional_value_usdt_calculated / entry_price 
 
     # 最小取引サイズ（CCXTの市場情報から取得）
-    try:
-        market_info = EXCHANGE_CLIENT.markets[symbol]
-        min_amount = market_info.get('limits', {}).get('amount', {}).get('min', 0.0)
-        # min_amountが設定されていない場合や0の場合は、安全のためデフォルト値を使用
-        if min_amount is None or min_amount <= 0.0:
-            min_amount = 0.0001
-            logging.warning(f"⚠️ {symbol}: CCXT市場情報から最小ロットサイズを取得できませんでした。デフォルト値 {min_amount} を使用します。")
-    except Exception:
-        # 市場情報がない場合も安全のためデフォルト値を使用
-        min_amount = 0.0001
-        logging.error(f"❌ {symbol}: CCXT市場情報へのアクセス中にエラーが発生しました。デフォルトの最小ロット {min_amount} を使用します。")
-        
+    market_info = EXCHANGE_CLIENT.markets[symbol]
+    min_amount = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
     
-    # 💡 Patch 70.2 (Patch 69のロジック維持と再確認): 計算されたロットが最小単位を下回る場合、最小単位を使用する
+    # 💡 修正ロジック：計算されたロットが最小単位を下回る場合、最小単位を使用する
     if lot_size_units_calculated < min_amount:
         # 最小単位を使用
         lot_size_units = min_amount
@@ -1056,14 +1011,6 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         # 計算されたロットを使用
         lot_size_units = lot_size_units_calculated
         notional_value_usdt = notional_value_usdt_calculated
-        
-    # 💡 最小ロットでもリスクが大きすぎる場合は警告 (リスク管理はユーザー設定に委ねる)
-    if lot_size_units * entry_price / ACCOUNT_EQUITY_USDT > MAX_RISK_PER_TRADE_PERCENT * 5: # 5倍以上のリスク
-         logging.warning(f"⚠️ {symbol}: 最小ロット ({min_amount}) での取引は、設定リスク ({MAX_RISK_PER_TRADE_PERCENT*100:.2f}%) の5倍を超えます。実行します。")
-
-    # 最小ロットが0の場合や、ロットサイズが極端に小さい場合を回避
-    if lot_size_units <= 0:
-        return {'status': 'error', 'error_message': 'Calculated lot size is zero or negative after all adjustments.'}
     
     try:
         # 2. 注文の実行
@@ -1078,10 +1025,6 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
              logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
              return {'status': 'error', 'error_message': 'Amount rounded down to zero by precision adjustment.'}
         
-        # 通知メッセージ用に計算されたロットサイズをシグナルに記録 (約定前)
-        signal['lot_size_units'] = amount_adjusted
-        signal['notional_value'] = amount_adjusted * entry_price
-        
         order = await EXCHANGE_CLIENT.create_order(
             symbol,
             type='market',
@@ -1093,15 +1036,12 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         )
 
         # 3. ポジション情報を更新
-        # 約定価格が取得できない場合、エントリー価格を使用
-        actual_entry_price = order['price'] if order and order['price'] else entry_price
-        
         new_position = {
             'symbol': symbol,
             'side': side,
-            'entry_price': actual_entry_price, # 実際は約定価格
+            'entry_price': order['price'] if order['price'] else entry_price, # 実際は約定価格
             'contracts': amount_adjusted if side == 'long' else -amount_adjusted,
-            'filled_usdt': amount_adjusted * actual_entry_price, # 名目価値 (約定価格で再計算)
+            'filled_usdt': notional_value_usdt, # 名目価値 (概算)
             'timestamp': time.time() * 1000,
             'stop_loss': stop_loss,
             'take_profit': signal['take_profit'],
@@ -1114,31 +1054,25 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         return {
             'status': 'ok',
             'filled_amount': amount_adjusted,
-            'filled_usdt': new_position['filled_usdt'],
-            'entry_price': actual_entry_price,
+            'filled_usdt': notional_value_usdt,
+            'entry_price': new_position['entry_price'],
             'exit_type': 'N/A'
         }
         
     except ccxt.ExchangeError as e:
         # 💡 MEXC特有のエラーをキャッチして処理
-        error_message = str(e)
+        error_message = e.args[0]
         
         if 'code":30005' in error_message or 'Oversold' in error_message:
-            # Oversoldエラー: 流動性不足または市場価格の急変による拒否 (Patch 70.1)
+            # Oversoldエラー: 流動性不足または市場価格の急変による拒否
             detail_msg = "MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            # Amount can not be less than zeroエラー: ロットサイズが小さすぎる、または計算ミス (Patch 70.2)
-            detail_msg = "MEXC: ロットサイズがゼロまたは小さすぎます (400)。最小ロット修正を試行しましたが失敗。"
-            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
-            return {'status': 'error', 'error_message': detail_msg}
-            
-        elif 'code":10007' in error_message or 'symbol not support api' in error_message:
-            # Symbol not support apiエラー: 非対応のシンボル (Patch 70.3)
-            detail_msg = "MEXC: 銘柄がAPIでサポートされていません (10007)。市場情報ロードを確認してください。"
-            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
+            # Amount can not be less than zeroエラー: ロットサイズが小さすぎる、または計算ミス
+            detail_msg = "MEXC: ロットサイズがゼロまたは小さすぎます (400)。"
+            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
             return {'status': 'error', 'error_message': detail_msg}
             
         else:
@@ -1157,7 +1091,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
 
 async def main_bot_loop():
     """メインの取引ロジックを格納する非同期関数"""
-    # 💡 修正箇所: LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加 (既存)
+    # 💡 修正箇所: LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加
     global LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT, CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME, LAST_WEBSHARE_UPLOAD_TIME
     
     LAST_SUCCESS_TIME = time.time()
@@ -1173,7 +1107,7 @@ async def main_bot_loop():
             return
 
         # 1. 監視対象銘柄のリストを更新 (出来高ベース)
-        # 💡 Patch 70.3: サポートされていないシンボルはここで除外される
+        # 実際には、ここで市場の出来高トップの銘柄を取得し、CURRENT_MONITOR_SYMBOLSを更新する
         CURRENT_MONITOR_SYMBOLS = await get_top_volume_symbols(EXCHANGE_CLIENT, TOP_SYMBOL_LIMIT, DEFAULT_SYMBOLS)
         await fetch_open_positions() # オープンポジション情報の更新
         
@@ -1266,14 +1200,14 @@ async def main_bot_loop():
 
         # 5. 初回完了通知
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
-            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.25")) # バージョン更新
+            await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v20.0.23")) # バージョン更新
             IS_FIRST_MAIN_LOOP_COMPLETED = True
             
         # 6. WebShareデータの送信
         if time.time() - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
             webshare_data = {
                 'timestamp': datetime.now(JST).isoformat(),
-                'version': "v20.0.25", # バージョン更新
+                'version': "v20.0.23", # バージョン更新
                 'account_status': account_status,
                 'open_positions': OPEN_POSITIONS,
                 'macro_context': GLOBAL_MACRO_CONTEXT,
@@ -1377,7 +1311,7 @@ async def read_root():
         
     return JSONResponse(
         status_code=status_code,
-        content={"status": message, "version": "v20.0.25", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
+        content={"status": message, "version": "v20.0.23", "timestamp": datetime.now(JST).isoformat()} # バージョン更新
     )
 
 
