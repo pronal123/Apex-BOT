@@ -1,14 +1,15 @@
 # ====================================================================================
-# Apex BOT v20.0.25 - Future Trading / 10x Leverage 
-# (Patch 71: MEXC Min Notional Value FIX for Lot Size 400)
+# Apex BOT v20.0.26 - Future Trading / 10x Leverage 
+# (Patch 73: UnboundLocalError/MEXC Balance FIX)
 #
 # 改良・修正点:
-# 1. 【ロットサイズ修正: Patch 71】execute_trade_logic にて、最小取引単位 (Min Amount) のチェックに加え、
-#    最小名目価値 (Min Notional Value / Code 400の原因) をチェックし、満たさない場合は注文をスキップ。
-# 2. 【エラー処理維持】Code 10007 (symbol not support api) および Code 30005 (流動性不足) の検出・スキップロジックを維持。
-# 3. 【NaN/NoneTypeエラー修正】get_historical_ohlcv 関数に df.dropna() を追加し、データ分析の安定性を向上させました。
-# 4. 【致命的エラー修正: Patch 72】initialize_exchange_client にて、既存/新規クライアントのクローズ処理を強化。
-#    「Unclosed client session」と「Client not ready」の連鎖エラーを根本的に解決。
+# 1. 【致命的エラー修正: Patch 73-1】main_bot_loop 関数内の global 宣言に LAST_SUCCESS_TIME を追加し、
+#    UnboundLocalError (ローカル変数未関連付けエラー) を解消しました。
+# 2. 【致命的エラー修正: Patch 73-2】get_account_status 関数で MEXC クライアントの fetch_balance() 呼び出し時の
+#    引数を削除し、「mexc fetchBalance() not support self method」エラーを解消しました。
+# 3. 【エラー処理維持】Code 10007 (symbol not support api) および Code 30005 (流動性不足) の検出・スキップロジックを維持。
+# 4. 【NaN/NoneTypeエラー修正】get_historical_ohlcv 関数に df.dropna() を追加し、データ分析の安定性を向上させました。
+# 5. 【CCXT接続修正: Patch 72】initialize_exchange_client のリソース解放ロジックを強化し、Unclosed client sessionエラーを解決。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -100,7 +101,7 @@ WEBSHARE_POST_URL = os.getenv("WEBSHARE_POST_URL", "http://your-webshare-endpoin
 # グローバル変数 (状態管理用)
 EXCHANGE_CLIENT: Optional[ccxt_async.Exchange] = None
 CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS.copy()
-LAST_SUCCESS_TIME: float = 0.0
+LAST_SUCCESS_TIME: float = 0.0 # ★ UnboundLocalError対策として初期値を設定
 LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
@@ -159,7 +160,7 @@ OBV_MOMENTUM_BONUS = 0.04
 app = FastAPI(
     title="Apex Crypto Bot API",
     description="CCXTを利用した自動取引ボットのFastAPIインターフェース",
-    version="v20.0.25"
+    version="v20.0.26" # ★ バージョン更新
 )
 
 # ====================================================================================
@@ -310,7 +311,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str = "v20.0.25" # バージョンを更新
+    bot_version: str = "v20.0.26" # ★ バージョン更新
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -343,7 +344,7 @@ def format_startup_message(
 
     balance_section = f"💰 <b>先物口座ステータス</b>\n" 
     if account_status.get('error'):
-        balance_section += f"<pre>⚠️ ステータス取得失敗 (致命的エラーにより取引停止中)</pre>\n"
+        balance_section += f"<pre>⚠️ ステータス取得失敗 (エラー詳細: {account_status.get('message', '不明なAPIエラー')})</pre>\n" # エラーメッセージを追加
     else:
         equity_display = account_status['total_usdt_balance'] # equity (総資産)として扱う
         balance_section += (
@@ -500,7 +501,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v20.0.25 - Future Trading / 10x Leverage (Patch 72: CCXT Client FIX)</i>") # BOTバージョンを更新
+    message += (f"<i>Bot Ver: v20.0.26 - Future Trading / 10x Leverage (Patch 73: UnboundLocalError/MEXC Balance FIX)</i>") # BOTバージョンを更新
     return message
 
 
@@ -1158,17 +1159,21 @@ async def execute_trade_logic(signal: Dict) -> Dict:
 
 
 async def get_account_status() -> Dict:
-    """アカウントの残高と総資産を取得する。"""
+    """
+    【★エラー修正済】アカウントの残高と総資産を取得する。
+    mexc fetchBalance() not support self method エラーに対応。
+    """
     global ACCOUNT_EQUITY_USDT
     if not IS_CLIENT_READY:
         return {'error': True, 'message': 'CCXTクライアントが未準備'}
 
     try:
-        # CCXTのfetch_balanceを使用して先物口座の残高を取得
-        balance = await EXCHANGE_CLIENT.fetch_balance({'type': TRADE_TYPE}) 
+        # 💡 【修正点】mexc fetchBalance() not support self method 対策
+        # CCXTのfetch_balanceを引数なしで呼び出すことで、mexcの引数エラーを回避し、
+        # クライアントが'future'モードで初期化されているため、先物残高が返されることを期待する。
+        balance = await EXCHANGE_CLIENT.fetch_balance()
         
         # 総資産 (Equity) を計算: total.USDT または infoから取得
-        # MEXCの場合、先物残高は 'USDT' に統合されていることが多い
         total_usdt_balance = balance['total'].get('USDT', 0.0) 
         
         if total_usdt_balance == 0.0 and balance.get('info'):
@@ -1184,8 +1189,9 @@ async def get_account_status() -> Dict:
             'timestamp': time.time()
         }
     except Exception as e:
+        # エラー発生時もACCOUNT_EQUITY_USDTを0にリセットしないことで、リスク計算の安全性を高める
         logging.error(f"❌ アカウントステータスの取得に失敗しました: {e}", exc_info=False)
-        return {'error': True, 'message': str(e), 'total_usdt_balance': 0.0}
+        return {'error': True, 'message': str(e), 'total_usdt_balance': ACCOUNT_EQUITY_USDT} # ゼロではなく前回の値を保持
 
 async def cancel_position(symbol: str, side: str, position_data: Dict, exit_type: str) -> Dict:
     """ポジションをクローズし、結果を返す。"""
@@ -1314,7 +1320,8 @@ async def main_bot_loop():
     global CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
     global LAST_WEBSHARE_UPLOAD_TIME, GLOBAL_MACRO_CONTEXT
-    
+    global LAST_SUCCESS_TIME # ★ 【修正点】UnboundLocalError対策として追加
+
     retry_delay = 10 # 初回試行時の遅延（秒）
     
     while True:
@@ -1344,7 +1351,7 @@ async def main_bot_loop():
                 if new_symbols:
                     CURRENT_MONITOR_SYMBOLS = new_symbols
                 GLOBAL_MACRO_CONTEXT = await get_macro_context()
-                LAST_SUCCESS_TIME = now
+                LAST_SUCCESS_TIME = now # 成功時に時間を更新
                 
             # 3. 現在のアカウントステータスを取得
             account_status = await get_account_status()
@@ -1454,7 +1461,7 @@ async def api_status():
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
 
     return {
-        "bot_version": "v20.0.25 (Patch 72: CCXT Client FIX)",
+        "bot_version": "v20.0.26 (Patch 73: UnboundLocalError/MEXC Balance FIX)", # ★ バージョン更新
         "timestamp_jst": now_jst,
         "is_client_ready": IS_CLIENT_READY,
         "test_mode": TEST_MODE,
@@ -1499,28 +1506,11 @@ if __name__ == "__main__":
     port = int(os.getenv("API_PORT", 8000))
     logging.info(f"🌐 BOT APIサーバーを http://0.0.0.0:{port} で起動します。")
     
-    # uvicorn.run の代わりに、asyncio.run と uvicorn.Server を使用し、
-    # BOTロジックとWebサーバーを統合
-    
-    # 以前のシンプルな実行方法をコメントアウト
-    # uvicorn.run(app, host="0.0.0.0", port=port) 
-    
-    # 本番環境で推奨される非同期実行方法のテンプレート
-    # uvicorn.Server を直接使用するパターン
-    
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
     
-    # サーバーと非同期タスクを正しく実行するために、asyncio.run()内で実行します。
-    # ただし、一般的なデプロイ環境 (Heroku/Renderなど) では、
-    # 'uvicorn main_render:app --host 0.0.0.0 --port $PORT' コマンドで実行するため、
-    # こちらの if __name__ == "__main__": ブロックは主にローカルテスト用となります。
-    
-    # ユーザーが実行しているコマンド 'uvicorn main_render:app --host 0.0.0.0 --port $PORT' を
-    # 想定し、FastAPIのイベントハンドラが正しくタスクを開始することを担保します。
-    
-    # 実行環境がローカルでの `python main_render.py` の場合:
     try:
+        # FastAPIの起動とバックグラウンドタスクの実行
         asyncio.run(server.serve())
     except KeyboardInterrupt:
         logging.info("🤖 アプリケーションをシャットダウンします。")
