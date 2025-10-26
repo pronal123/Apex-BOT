@@ -1,6 +1,6 @@
 # ====================================================================================
 # Apex BOT v20.0.38 - Future Trading / 30x Leverage 
-# (Feature: 最低取引ロット 20 USDT 保証)
+# (Feature: 固定取引ロット 20 USDT)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -84,16 +84,10 @@ MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清
 # 💡 レートリミット対策用定数
 LEVERAGE_SETTING_DELAY = 1.0 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒)
 
-# 💡 リスクベースの動的ポジションサイジング設定 
-try:
-    BASE_TRADE_SIZE_USDT = float(os.getenv("BASE_TRADE_SIZE_USDT", "100")) 
-except ValueError:
-    BASE_TRADE_SIZE_USDT = 100.0
-    
-MAX_RISK_PER_TRADE_PERCENT = float(os.getenv("MAX_RISK_PER_TRADE_PERCENT", "0.01")) # 最大リスク: 総資産の1%
-
-# 💡 新規導入: 最小名目取引額 (USDT) - 計算ロットがこれを下回っても、最低この金額で取引を試行する
-MIN_NOTIONAL_USDT = 20.0 
+# 💡 【固定ロット】設定 
+# 🚨 リスクベースの動的サイジング設定は全て削除し、この固定値を使用します。
+FIXED_NOTIONAL_USDT = 20.0 
+# MAX_RISK_PER_TRADE_PERCENT はリスクベースではないため削除
 
 # 💡 WEBSHARE設定 
 WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") 
@@ -145,9 +139,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.84       
-SIGNAL_THRESHOLD_NORMAL = 0.80      
-SIGNAL_THRESHOLD_ACTIVE = 0.75      
+SIGNAL_THRESHOLD_SLUMP = 0.90       
+SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -210,7 +204,6 @@ def get_estimated_win_rate(score: float) -> str:
     if score >= 0.60: return "60-65%"
     return "<60% (低)"
 
-# 💡 CRITICAL FIX (Patch 81): get_current_threshold は閾値を返すのみ
 def get_current_threshold(macro_context: Dict) -> float:
     """現在の市場環境に合わせた動的な取引閾値を決定し、返す。"""
     global FGI_SLUMP_THRESHOLD, FGI_ACTIVE_THRESHOLD
@@ -225,7 +218,6 @@ def get_current_threshold(macro_context: Dict) -> float:
     else:
         return SIGNAL_THRESHOLD_NORMAL
 
-# 💡 NEW/RESTORED FUNCTION (Patch 81): format_startup_message
 def format_startup_message(account_status: Dict, macro_context: Dict, monitoring_count: int, current_threshold: float) -> str:
     """BOT起動完了時の通知メッセージを整形する。"""
     
@@ -236,7 +228,7 @@ def format_startup_message(account_status: Dict, macro_context: Dict, monitoring
     fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
     forex_bonus = macro_context.get('forex_bonus', 0.0)
     
-    # 💡 current_threshold に応じてテキストを決定するロジック (Patch 81で分離)
+    # current_threshold に応じてテキストを決定するロジック
     if current_threshold == SIGNAL_THRESHOLD_SLUMP:
         market_condition_text = "低迷/リスクオフ"
     elif current_threshold == SIGNAL_THRESHOLD_ACTIVE:
@@ -252,8 +244,8 @@ def format_startup_message(account_status: Dict, macro_context: Dict, monitoring
         f"  - **確認日時**: {now_jst} (JST)\n"
         f"  - **取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code> (先物モード / **{LEVERAGE}x**)\n" 
         f"  - **自動売買**: <b>{trade_status}</b>\n"
-        f"  - **取引ロット**: **リスクベース + 最低** <code>{MIN_NOTIONAL_USDT}</code> **USDT保証**\n" 
-        f"  - **最大リスク/取引**: <code>{MAX_RISK_PER_TRADE_PERCENT*100:.2f}</code> %\n" 
+        f"  - **取引ロット**: **固定** <code>{FIXED_NOTIONAL_USDT}</code> **USDT**\n" 
+        f"  - **最大リスク/取引**: **固定ロット**のため動的設定なし\n" 
         f"  - **監視銘柄数**: <code>{monitoring_count}</code>\n"
         f"  - **BOTバージョン**: <code>{bot_version}</code>\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
@@ -328,7 +320,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
 
     if context == "取引シグナル":
         # lot_size_units = signal.get('lot_size_units', 0.0) # 数量 (単位)
-        notional_value = trade_result.get('filled_usdt', 0.0) # 実際に約定した名目価値
+        notional_value = trade_result.get('filled_usdt', FIXED_NOTIONAL_USDT) # 実際に約定した名目価値
         
         trade_type_text = "先物ロング" if side == 'long' else "先物ショート"
         order_type_text = "成行買い" if side == 'long' else "成行売り"
@@ -346,16 +338,16 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             except (ValueError, TypeError):
                 filled_amount = 0.0
                 
-            filled_usdt_notional = trade_result.get('filled_usdt', 0.0) 
-            risk_usdt = signal.get('risk_usdt', 0.0) # リスク額
+            filled_usdt_notional = trade_result.get('filled_usdt', FIXED_NOTIONAL_USDT) 
+            risk_usdt = abs(filled_usdt_notional) * sl_ratio / (1/LEVERAGE) # 簡易的なSLによる名目リスク
             
             trade_section = (
                 f"💰 **取引実行結果**\n"
                 f"  - **注文タイプ**: <code>先物 (Future) / {order_type_text} ({side.capitalize()})</code>\n" 
                 f"  - **レバレッジ**: <code>{LEVERAGE}</code> 倍\n" 
-                f"  - **リスク許容額**: <code>{format_usdt(risk_usdt)}</code> USDT ({MAX_RISK_PER_TRADE_PERCENT*100:.2f}%)\n" 
+                f"  - **名目ロット**: <code>{format_usdt(filled_usdt_notional)}</code> USDT (固定)\n" 
+                f"  - **推定リスク額**: <code>{format_usdt(risk_usdt)}</code> USDT (計算 SL: {sl_ratio*100:.2f}%)\n"
                 f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
-                f"  - **名目約定額**: <code>{format_usdt(filled_usdt_notional)}</code> USDT\n" 
             )
             
     elif context == "ポジション決済":
@@ -371,8 +363,6 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         filled_amount_raw = trade_result.get('filled_amount', 0.0)
         try:
             filled_amount = float(filled_amount_raw)
-            # PNL計算のための符号調整 (ショートの場合、filled_amountはマイナスだが、ここでは絶対値を使用)
-            # filled_amount = abs(filled_amount) 
         except (ValueError, TypeError):
             filled_amount = 0.0
         
@@ -614,8 +604,6 @@ async def initialize_exchange_client() -> bool:
             
             symbols_to_set_leverage = []
             
-            # --- 🚀 Patch 70 FIX: レバレッジ設定対象を監視銘柄リストに限定する ---
-            
             # DEFAULT_SYMBOLSに含まれるCCXT標準シンボル (例: BTC/USDT) をベース/クォート通貨に分解
             default_base_quotes = {s.split('/')[0]: s.split('/')[1] for s in DEFAULT_SYMBOLS if '/' in s}
             
@@ -843,8 +831,6 @@ def _calculate_ta_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['OBV_SMA20'] = ta.sma(df['OBV'], length=20)
     
     # PPO (Percentage Price Oscillator)のMACD (ボラティリティ測定用)
-    # PPO_HIST は MACDh_12_26_9と似た挙動をするため、今回は簡略化し、MACDhをそのまま使用。
-    # 代わりに、ボリンジャーバンドの幅の代わりとなるボラティリティ指標として、MACDhの絶対値を採用。
     df['PPO_HIST'] = df['MACDh'] # 簡易的なボラティリティ指標として使用
     
     return df
@@ -1150,22 +1136,20 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     """
     取引実行ロジック。
-    ロットサイズ計算を強化し、最低取引額 (MIN_NOTIONAL_USDT) を保証する。
+    ロットサイズ計算を固定の 20 USDT に変更する。
     """
     global LAST_SIGNAL_TIME
-    global MIN_NOTIONAL_USDT # 新しい定数を参照できるように
+    global FIXED_NOTIONAL_USDT # 新しい定数を参照できるように
+
+    # 🚨 【変更点】リスクベース計算を削除し、固定値を使用
+    final_notional_value_usdt = FIXED_NOTIONAL_USDT 
+    sl_ratio = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price'] # SL比率は通知のために保持
 
     if TEST_MODE:
-        # TEST_MODEでは、計算結果のみを返す
-        max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
-        sl_ratio = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price']
-        notional_value_usdt_calculated = max_risk_usdt / sl_ratio
-        
-        # 💡 TEST_MODEでもMIN_NOTIONAL_USDTの保証を適用
-        final_notional_value_usdt = max(notional_value_usdt_calculated, MIN_NOTIONAL_USDT)
-        
+        # TEST_MODEでは、固定値のみを返す
         return {'status': 'skip', 'error_message': 'TEST_MODE is ON', 'filled_usdt': final_notional_value_usdt}
     
+    # 資産チェックは、もし20ドル未満なら注文失敗となるため実施
     if not ACCOUNT_EQUITY_USDT or ACCOUNT_EQUITY_USDT <= 0:
         return {'status': 'error', 'error_message': 'Account equity is zero or not fetched.'}
     
@@ -1174,24 +1158,13 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     entry_price = signal['entry_price']
     stop_loss = signal['stop_loss']
     
-    # 1. リスクベースのロットサイズ計算
-    max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
-    price_diff_to_sl = abs(entry_price - stop_loss)
+    # 1. 💡 【固定ロット】名目価値 (Notional Value) の決定
+    # final_notional_value_usdt は既に FIXED_NOTIONAL_USDT (20.0)
     
-    if price_diff_to_sl <= 0:
-        return {'status': 'error', 'error_message': 'Stop Loss is too close or invalid.'}
-        
-    sl_ratio = abs(entry_price - stop_loss) / entry_price
-    notional_value_usdt_calculated = max_risk_usdt / sl_ratio
-    
-    # 2. 💡 【改良ロジック】名目価値 (Notional Value) の決定
-    # 計算ロットと最小固定ロット (20 USDT) を比較し、大きい方を採用する
-    final_notional_value_usdt = max(notional_value_usdt_calculated, MIN_NOTIONAL_USDT)
-    
-    # 3. 単位数量 (Lot Size Units) の計算
+    # 2. 単位数量 (Lot Size Units) の計算
     lot_size_units_calculated = final_notional_value_usdt / entry_price 
 
-    # 4. 最小取引ロットの精度チェックを強化
+    # 3. 最小取引ロットの精度チェックを強化
     market_info = EXCHANGE_CLIENT.markets[symbol]
     min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
 
@@ -1206,20 +1179,17 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
         return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
 
-    # 5. 最終的に使用するロットサイズを決定
+    # 4. 最終的に使用するロットサイズを決定
     
-    # 計算ロットが最小ロットを下回る場合、最小ロット * わずかに大きな値 (1.00001) を使用
-    if lot_size_units_calculated < min_amount_adjusted:
-         # 💡 このブロックは、final_notional_value_usdt が MIN_NOTIONAL_USDT に設定されたとしても、
-         # その結果計算された lot_size_units_calculated が min_amount_adjusted を下回る場合に発火します。
-         lot_size_units = min_amount_adjusted * 1.00001 
-         logging.warning(f"⚠️ {symbol}: ロットサイズが取引所の最小ロット ({min_amount_adjusted:.8f}) を下回るため、最小ロットをわずかに超える値を使用します。 (名目: {format_usdt(final_notional_value_usdt)} USDT)")
+    # 計算ロット (固定20USDTベース) が最小ロットを下回る場合、最小ロットの乗数で切り上げる
+    if lot_size_units_calculated < min_amount_adjusted * 1.0000001:
+         # 最小ロットの乗数で切り上げ (最小ロットを下回る場合は、最小ロットの整数倍のロットを使用)
+         lot_size_units = min_amount_adjusted * math.ceil(lot_size_units_calculated / min_amount_adjusted) 
+         logging.warning(f"⚠️ {symbol}: 固定ロット ({format_usdt(final_notional_value_usdt)} USDT) の計算結果が取引所の最小ロットを下回る可能性があったため、ロットを最小ロット乗数で切り上げました。")
     else:
          lot_size_units = lot_size_units_calculated
          
-    # notional_value_usdt = lot_size_units * entry_price # 概算の名目価値 (今回は final_notional_value_usdt を使用)
-
-    # 6. 注文の実行
+    # 5. 注文の実行
     try:
         side_ccxt = 'buy' if side == 'long' else 'sell'
         
@@ -1230,14 +1200,16 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         # ログ強化: 注文を出す直前の最終ロットサイズと最小ロットを記録
         logging.info(
             f"✅ {symbol}: 最終ロットサイズ {amount_adjusted:.8f} (最小ロット: {min_amount_adjusted:.8f}). "
-            f"名目価値: {format_usdt(final_notional_value_usdt)} USDT. "
-            f"計算リスク: {sl_ratio*100:.2f}%."
+            f"名目価値: {format_usdt(final_notional_value_usdt)} USDT (固定)."
         )
         
         # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合
         if amount_adjusted < min_amount_adjusted and amount_adjusted > 0:
-             amount_adjusted = min_amount_adjusted * 1.00001 # 最小ロットをわずかに超える値で再度上書き
-             logging.warning(f"⚠️ {symbol}: 精度調整後の数量 ({amount_adjusted_str}) が最小ロット ({min_amount_adjusted:.8f}) を下回ったため、最小ロットを再採用しました。")
+             # 強制的に最小ロットの1.1倍を適用 (最後の砦)
+             amount_adjusted = min_amount_adjusted * 1.1
+             amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, amount_adjusted)
+             amount_adjusted = float(amount_adjusted_str)
+             logging.warning(f"⚠️ {symbol}: 精度調整後の数量 ({amount_adjusted_str}) が最小ロットを下回ったため、最小ロットの1.1倍に再調整しました。")
         
         if amount_adjusted <= 0.0:
              logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
@@ -1252,13 +1224,13 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             params={}
         )
 
-        # 7. ポジション情報を更新
+        # 6. ポジション情報を更新
         new_position = {
             'symbol': symbol,
             'side': side,
             'entry_price': order['price'] if order['price'] else entry_price, 
             'contracts': amount_adjusted if side == 'long' else -amount_adjusted,
-            'filled_usdt': final_notional_value_usdt, # 最終的に使用した名目価値
+            'filled_usdt': final_notional_value_usdt, # 固定の名目価値
             'timestamp': time.time() * 1000,
             'stop_loss': stop_loss,
             'take_profit': signal['take_profit'],
@@ -1295,7 +1267,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             
         else:
             logging.error(f"❌ {symbol} 注文実行エラー: {e}")
-            return {'status': 'error', 'error_message': f"Exchange Error: {error_message}"}
+            return {'status': 'error', 'error_message': f"Exchange Error: {e}"}
             
     except Exception as e:
         logging.error(f"❌ {symbol} 注文実行中に予期せぬエラー: {e}", exc_info=True)
@@ -1327,7 +1299,6 @@ async def main_bot_loop():
         await fetch_open_positions() # オープンポジション情報の更新
         
         # 2. 動的閾値の計算
-        # 💡 NameError FIX (Patch 81): get_current_threshold は値を返すので、変数に代入して使用します。
         current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT) 
         logging.info(f"📊 市場環境スコア: FGI {GLOBAL_MACRO_CONTEXT.get('fgi_raw_value', 'N/A')}。動的取引閾値: {current_threshold * 100:.2f} / 100")
         
@@ -1420,9 +1391,8 @@ async def main_bot_loop():
                 signal['take_profit'] = tp_price
                 signal['liquidation_price'] = liq_price
                 
-                # リスク許容額の計算 (通知用)
-                max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
-                signal['risk_usdt'] = max_risk_usdt
+                # リスク許容額の計算 (通知用 - 固定ロットなので、ここでは固定ロットをリスクと見なす)
+                signal['risk_usdt'] = FIXED_NOTIONAL_USDT * (signal['sl_ratio'] / (1/LEVERAGE))
 
                 logging.info(f"🔥 強力なシグナル検出 (実行対象): {signal['symbol']} - {signal['side'].upper()} (Score: {signal['score']*100:.2f})")
                 
@@ -1439,7 +1409,6 @@ async def main_bot_loop():
 
         # 5. 初回完了通知
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
-            # 💡 NameError FIX (Patch 81): format_startup_message 関数を呼び出します。
             await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold))
             IS_FIRST_MAIN_LOOP_COMPLETED = True
             
@@ -1460,6 +1429,17 @@ async def main_bot_loop():
     except Exception as e:
         logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
         await send_telegram_notification(f"🚨 **致命的なエラー**\\nメインループでエラーが発生しました: `{e}`")
+
+
+async def position_monitor_scheduler():
+    """TP/SL監視ループを定期実行するスケジューラ (10秒ごと)"""
+    while True:
+        try:
+            await position_management_loop_async()
+        except Exception as e:
+            logging.critical(f"❌ ポジション監視ループ実行中に致命的なエラー: {e}", exc_info=True)
+
+        await asyncio.sleep(MONITOR_INTERVAL) 
 
 
 async def position_management_loop_async():
@@ -1523,7 +1503,7 @@ async def position_management_loop_async():
                 'pnl_rate': pnl_rate_calc,
             }
             
-            # 💥 実際の決済注文ロジックを有効化 (Patch 78) 💥
+            # 💥 実際の決済注文ロジックを有効化
             try:
                 # 決済注文（成行）
                 close_order = await EXCHANGE_CLIENT.create_order(
@@ -1536,7 +1516,7 @@ async def position_management_loop_async():
                 logging.info(f"✅ {symbol} 決済注文実行: {action.split('_')[0]} でポジションをクローズしました。注文ID: {close_order.get('id', 'N/A')}")
                 
             except Exception as e:
-                 # 決済注文が失敗した場合 (APIエラー、レートリミットなど)
+                 # 決済注文が失敗した場合
                  logging.error(f"❌ {symbol} 決済注文失敗: {e}")
                  # 決済失敗の場合、システム管理上のポジションは削除せず（次のループで再試行させる）
                  continue 
@@ -1601,17 +1581,6 @@ async def main_bot_scheduler():
         wait_time = max(1, LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME))
         logging.info(f"次のメインループまで {wait_time:.1f} 秒待機します。")
         await asyncio.sleep(wait_time)
-
-
-async def position_monitor_scheduler():
-    """TP/SL監視ループを定期実行するスケジューラ (10秒ごと)"""
-    while True:
-        try:
-            await position_management_loop_async()
-        except Exception as e:
-            logging.critical(f"❌ ポジション監視ループ実行中に致命的なエラー: {e}", exc_info=True)
-
-        await asyncio.sleep(MONITOR_INTERVAL) 
 
 
 @app.on_event("startup")
