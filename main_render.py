@@ -1,13 +1,13 @@
 # ====================================================================================
-# Apex BOT v20.0.28 - Future Trading / 30x Leverage 
-# (Patch 74: スコアブレークダウン強化)
+# Apex BOT v20.0.29 - Future Trading / 30x Leverage 
+# (Patch 75: CCXT NoneType エラー対策 - 自動アップグレード機能追加)
 #
 # 改良・修正点:
-# 1. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
-#    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するようにロジックを強化。
-# 2. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
-# 3. 【機能改良】get_top_volume_symbols にて、出来高トップ40銘柄を動的に取得するロジックを維持。
-# 4. 【機能強化: Patch 74】get_score_breakdown の表示ロジックを全面的に強化。プラス要因(✅)とマイナス要因(❌)を明確に分け、全ての評価項目と点数を表示するように変更。
+# 1. 【CCXTエラー対策: Patch 75】BOT起動時、環境変数 UPGRADE_CCXT=True の場合、
+#    `pip install --upgrade ccxt` を自動実行するロジックを initialize_exchange_client に追加。
+# 2. 【機能強化: Patch 74】get_score_breakdown の表示ロジックを全面的に強化し、プラス/マイナス要因を明確に表示。
+# 3. 【エラー処理強化: Patch 73】MEXCの「流動性不足/Oversold (30005)」エラー発生時にクールダウンさせるロジックを維持。
+# 4. 【バージョン更新】BOTバージョンを v20.0.29 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -33,6 +33,7 @@ import json
 import re
 import uuid 
 import math # 数値計算ライブラリ
+import subprocess # 外部コマンド実行ライブラリを追加
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -62,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.28"            # 💡 BOTバージョンをv20.0.28に更新
+BOT_VERSION = "v20.0.29"            # 💡 BOTバージョンをv20.0.29に更新
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -78,6 +79,7 @@ API_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_API_KEY")
 SECRET_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_SECRET")
 TEST_MODE = os.getenv("TEST_MODE", "False").lower() in ('true', '1', 't')
 SKIP_MARKET_UPDATE = os.getenv("SKIP_MARKET_UPDATE", "False").lower() in ('true', '1', 't')
+UPGRADE_CCXT = os.getenv("UPGRADE_CCXT", "False").lower() in ('true', '1', 't') # 💡 CCXT自動アップグレードフラグ
 
 # 💡 先物取引設定 
 LEVERAGE = 30 # 取引倍率
@@ -303,8 +305,11 @@ def get_score_breakdown(signal: Dict) -> str:
         negative_list.append(f"  - ❌ モメンタム/クロス不利: <code>-{macd_penalty_applied*100:.1f}</code> 点")
         
     # C'. FGIマクロ影響 (FGI Sentiment) - Negative
-    if fgi_bonus < -0.001:
-        negative_list.append(f"  - ❌ FGIマクロ逆行 (リスク回避): <code>{fgi_bonus*100:+.1f}</code> 点")
+    # FGIボーナスがマイナス値として記録されている場合
+    fgi_bonus_negative = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
+    if fgi_bonus_negative < -0.001:
+        # マイナス要因として表示する場合は絶対値で加点(ペナルティ)扱いとする
+        negative_list.append(f"  - ❌ FGIマクロ逆行 (リスク回避): <code>{fgi_bonus_negative*100:+.1f}</code> 点")
 
     # D. ボラティリティペナルティ (Volatility)
     volatility_penalty = tech_data.get('volatility_penalty_value', 0.0)
@@ -312,8 +317,9 @@ def get_score_breakdown(signal: Dict) -> str:
         negative_list.append(f"  - ❌ ボラティリティ過熱ペナルティ: <code>{volatility_penalty*100:+.1f}</code> 点")
         
     # E. 為替マクロ影響 - Negative (機能削除済)
-    if forex_bonus < -0.001:
-        negative_list.append(f"  - ⚪ 為替マクロ影響: <code>{forex_bonus*100:+.1f}</code> 点 (※機能削除済)")
+    forex_bonus_negative = tech_data.get('forex_bonus', 0.0)
+    if forex_bonus_negative < -0.001:
+        negative_list.append(f"  - ⚪ 為替マクロ影響: <code>{forex_bonus_negative*100:+.1f}</code> 点 (※機能削除済)")
 
 
     # ----------------------------------------------------
@@ -646,6 +652,31 @@ async def initialize_exchange_client() -> bool:
          logging.critical("❌ CCXT初期化スキップ: APIキー または SECRET_KEY が設定されていません。")
          return False
          
+    # -------------------------------------------------------------------------
+    # 💡 【Patch 75】CCXT自動アップグレードロジック
+    # -------------------------------------------------------------------------
+    if UPGRADE_CCXT:
+        logging.warning("⚠️ UPGRADE_CCXT=True: CCXTの最新版をインストールします...")
+        try:
+            # pipを非同期実行（ただし、メインスレッドをブロックしないよう asyncio.to_threadを使用）
+            result = await asyncio.to_thread(
+                subprocess.run, 
+                [sys.executable, "-m", "pip", "install", "--upgrade", "ccxt"],
+                capture_output=True,
+                text=True,
+                check=True 
+            )
+            logging.info(f"✅ CCXTのアップグレードに成功しました。:\n{result.stdout}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"❌ CCXTのアップグレードに失敗しました (エラーコード {e.returncode})。BOTの動作に影響が出る可能性があります。\n詳細: {e.stderr}")
+            await send_telegram_notification(f"🚨 <b>CCXT自動更新失敗</b>\nBOTの起動プロセスで CCXT の更新に失敗しました。環境を確認してください: <code>{e.stderr.splitlines()[0]}</code>")
+        except FileNotFoundError:
+            logging.error("❌ pip実行ファイルが見つかりません。環境設定を確認してください。")
+        except Exception as e:
+            logging.error(f"❌ CCXTのアップグレード中に予期せぬエラー: {e}")
+    # -------------------------------------------------------------------------
+
+
     # 既存のクライアントがあれば、リソースを解放する
     if EXCHANGE_CLIENT:
         try:
