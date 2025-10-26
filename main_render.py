@@ -1,13 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.30 - Future Trading / 30x Leverage 
-# (Patch 76: Complete Robust TA/Scoring Logic Integration)
+# Apex BOT v20.0.32 - Future Trading / 30x Leverage 
+# (Patch 78: Enable Position Close Order)
 #
 # 改良・修正点:
-# 1. 【ロジック強化】apply_technical_analysis および calculate_signal_score のダミーロジックを完全に排除し、
-#    SMA200、RSI、MACD、ATR、OBVに基づく複数時間足複合スコアリングと、動的リスクリワード比率 (RRR) 計算に置き換えました。
-# 2. 【バグ修正】テクニカル指標の計算結果が存在しない場合のロバスト性チェックを強化し、KeyError: 'ATR_14' などのエラーを完全に解消しました。
-# 3. 【ロバスト性向上】get_top_volume_symbols にて、fetch_tickers() が None を返した場合に即座に安全なデフォルトリストを返すロジックを再確認し、AttributeErrorを回避しました。
-# 4. 【バージョン更新】BOTバージョンを v20.0.30 に更新。
+# 1. 【ポジション決済有効化】position_management_loop_async 関数内の、TP/SLトリガー時の
+#    CCXT create_order による**実際のポジション決済注文を有効化**しました。
+# 2. 【バージョン更新】BOTバージョンを v20.0.32 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -62,7 +60,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.30"            # 💡 BOTバージョンを更新
+BOT_VERSION = "v20.0.32"            # 💡 BOTバージョンを更新 (Patch 78)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -145,8 +143,8 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_SLUMP = 0.945       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
@@ -300,7 +298,6 @@ def format_startup_message(
     current_threshold: float,
     bot_version: str = BOT_VERSION 
 ) -> str:
-# ... (この関数は変更なし) ...
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
@@ -372,7 +369,6 @@ def format_startup_message(
     return header + balance_section + macro_section + footer
 
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
-# ... (この関数は変更なし) ...
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     symbol = signal['symbol']
     timeframe = signal.get('timeframe', '1h')
@@ -489,7 +485,6 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
 
 
 async def send_telegram_notification(message: str) -> bool:
-# ... (この関数は変更なし) ...
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logging.error("❌ Telegram設定 (TOKEN/ID) が不足しています。通知をスキップします。")
         return False
@@ -529,7 +524,6 @@ def _to_json_compatible(obj):
 
 
 def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -> None:
-# ... (この関数は変更なし) ...
     try:
         log_entry = {
             'timestamp_jst': datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
@@ -559,7 +553,6 @@ def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -
 # ====================================================================================
 
 async def send_webshare_update(data: Dict[str, Any]):
-# ... (この関数は変更なし) ...
     
     if WEBSHARE_METHOD == "HTTP":
         if not WEBSHARE_POST_URL or "your-webshare-endpoint.com/upload" in WEBSHARE_POST_URL:
@@ -587,7 +580,6 @@ async def send_webshare_update(data: Dict[str, Any]):
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-# ... (この関数は変更なし) ...
     global EXCHANGE_CLIENT, IS_CLIENT_READY
     
     IS_CLIENT_READY = False
@@ -709,7 +701,6 @@ async def initialize_exchange_client() -> bool:
     return False
 
 async def fetch_account_status() -> Dict:
-# ... (この関数は変更なし) ...
     global EXCHANGE_CLIENT, ACCOUNT_EQUITY_USDT
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -783,7 +774,6 @@ async def fetch_account_status() -> Dict:
 
 
 async def fetch_open_positions() -> List[Dict]:
-# ... (この関数は変更なし) ...
     global EXCHANGE_CLIENT, OPEN_POSITIONS
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -871,7 +861,6 @@ def _calculate_ta_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 async def calculate_fgi() -> Dict:
-# ... (この関数は変更なし) ...
     try:
         # 💡 FGI_API_URL を使用
         response = await asyncio.to_thread(requests.get, FGI_API_URL, timeout=5)
@@ -949,11 +938,11 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
 
     except Exception as e:
         # エラーが発生した場合、デフォルトリストのみを返す (耐障害性の維持)
-        logging.error(f"❌ 出来高トップ銘柄の取得に失敗しました。デフォルト ({len(base_symbols)}件) を使用します: {e}", exc_info=True)
+        # 💥 FIX: CCXT内部で発生したAttributeErrorのトレーサックを抑制 (exc_info=False)
+        logging.error(f"❌ 出来高トップ銘柄の取得に失敗しました。デフォルト ({len(base_symbols)}件) を使用します: {e}", exc_info=False)
         return base_symbols
 
 async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
-# ... (この関数は変更なし) ...
     try:
         # ccxt.fetch_ohlcv を使用
         ohlcv_data = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -1165,7 +1154,6 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
     return result
 
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
-# ... (この関数は変更なし) ...
     """
     取引実行ロジック。
     ロットサイズ計算を強化し、取引所の精度で最小ロットを保証する。
@@ -1314,7 +1302,6 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
 # ====================================================================================
 
 async def main_bot_loop():
-# ... (この関数は変更なし) ...
     """メインの取引ロジックを格納する非同期関数"""
     global LAST_SUCCESS_TIME, GLOBAL_MACRO_CONTEXT, CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_SIGNAL_TIME, LAST_WEBSHARE_UPLOAD_TIME
     
@@ -1448,11 +1435,11 @@ async def main_bot_loop():
 
 
     except Exception as e:
-        logging.error(f"❌ メインループ実行中にエラー: {e}", exc_info=True)
+        logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
+        await send_telegram_notification(f"🚨 **致命的なエラー**\\nメインループでエラーが発生しました: `{e}`")
 
 
 async def position_management_loop_async():
-# ... (この関数は変更なし) ...
     """TP/SLを監視し、決済注文を実行する非同期関数"""
     global OPEN_POSITIONS
     
@@ -1495,8 +1482,6 @@ async def position_management_loop_async():
         if action:
             logging.warning(f"🔔 {symbol}: {action}トリガー！価格 {format_price(current_price)}")
             
-            # --- 実際の決済注文ロジックをここに実装する ---
-            
             # 決済注文のサイドを決定
             side_ccxt = 'sell' if pos['side'] == 'long' else 'buy'
             
@@ -1515,21 +1500,22 @@ async def position_management_loop_async():
                 'pnl_rate': pnl_rate_calc,
             }
             
-            # 実際はここで決済注文を出す (ccxt.create_order - close all)
+            # 💥 実際の決済注文ロジックを有効化 (Patch 78) 💥
             try:
                 # 決済注文（成行）
-                # close_order = await EXCHANGE_CLIENT.create_order(
-                #     symbol, 
-                #     type='market', 
-                #     side=side_ccxt, 
-                #     amount=abs(pos['contracts']),
-                #     params={'reduceOnly': True} 
-                # )
-                logging.info(f"✅ {symbol} 決済注文実行: {action.split('_')[0]} でポジションをクローズしました。")
+                close_order = await EXCHANGE_CLIENT.create_order(
+                    symbol, 
+                    type='market', 
+                    side=side_ccxt, 
+                    amount=abs(pos['contracts']),
+                    params={'reduceOnly': True} 
+                )
+                logging.info(f"✅ {symbol} 決済注文実行: {action.split('_')[0]} でポジションをクローズしました。注文ID: {close_order.get('id', 'N/A')}")
                 
             except Exception as e:
+                 # 決済注文が失敗した場合 (APIエラー、レートリミットなど)
                  logging.error(f"❌ {symbol} 決済注文失敗: {e}")
-                 # 決済失敗の場合でも、システム管理上のポジションは削除しない（次のループで再試行）
+                 # 決済失敗の場合、システム管理上のポジションは削除せず（次のループで再試行させる）
                  continue 
                  
             # 決済成功としてリストから削除
@@ -1551,7 +1537,6 @@ app = FastAPI(title="Apex BOT API")
 
 @app.get("/status", include_in_schema=False)
 async def read_root():
-# ... (この関数は変更なし) ...
     """ヘルスチェック用のルート"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
@@ -1569,7 +1554,6 @@ async def read_root():
 
 
 async def main_bot_scheduler():
-# ... (この関数は変更なし) ...
     """メインループを定期実行するスケジューラ (1分ごと)"""
     global LAST_SUCCESS_TIME
     while True:
@@ -1597,7 +1581,6 @@ async def main_bot_scheduler():
 
 
 async def position_monitor_scheduler():
-# ... (この関数は変更なし) ...
     """TP/SL監視ループを定期実行するスケジューラ (10秒ごと)"""
     while True:
         try:
@@ -1610,7 +1593,6 @@ async def position_monitor_scheduler():
 
 @app.on_event("startup")
 async def startup_event():
-# ... (この関数は変更なし) ...
     """アプリケーション起動時に実行"""
     logging.info("BOTサービスを開始しました。")
     
@@ -1622,7 +1604,6 @@ async def startup_event():
 # エラーハンドラ 
 @app.exception_handler(Exception)
 async def default_exception_handler(request, exc):
-# ... (この関数は変更なし) ...
     """捕捉されなかった例外を処理し、ログに記録する"""
     
     if "Unclosed" not in str(exc):
