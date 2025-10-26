@@ -1,13 +1,16 @@
 # ====================================================================================
-# Apex BOT v20.0.29 - Future Trading / 30x Leverage 
-# (Patch 75: CCXT NoneType エラー対策 - 自動アップグレード機能追加)
+# Apex BOT v20.0.31 - Future Trading / 30x Leverage 
+# (Patch 77: 最小ロット超過設定による 400 エラー回避)
 #
 # 改良・修正点:
-# 1. 【CCXTエラー対策: Patch 75】BOT起動時、環境変数 UPGRADE_CCXT=True の場合、
-#    `pip install --upgrade ccxt` を自動実行するロジックを initialize_exchange_client に追加。
-# 2. 【機能強化: Patch 74】get_score_breakdown の表示ロジックを全面的に強化し、プラス/マイナス要因を明確に表示。
-# 3. 【エラー処理強化: Patch 73】MEXCの「流動性不足/Oversold (30005)」エラー発生時にクールダウンさせるロジックを維持。
-# 4. 【バージョン更新】BOTバージョンを v20.0.29 に更新。
+# 1. 【致命的エラー修正: Patch 77】execute_trade_logic にて、計算ロットが最小ロットを下回る場合、
+#    最小ロットの 1.0001 倍をロットとして強制採用し、取引所の厳格な最小ロット制約や精度調整による
+#    「ロットサイズがゼロまたは小さすぎる (400)」エラーを回避するロジックを追加。
+# 2. 【致命的エラー修正: Patch 76-1】execute_trade_logic にて、ロットサイズの精度調整 (amount_to_precision) が
+#    取引所の最小ロット制約により発生させる CCXT 例外を捕捉し、安全に取引をスキップするロジックを維持。
+# 3. 【致命的エラー修正: Patch 76-2】get_top_volume_symbols にて、fetch_tickers が None を返すことによる 
+#    'NoneType' object has no attribute 'keys' エラーを確実に捕捉し、デフォルト銘柄にフォールバックするロジックを維持。
+# 4. 【バージョン更新】BOTバージョンを v20.0.31 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -63,7 +66,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.29"            # 💡 BOTバージョンをv20.0.29に更新
+BOT_VERSION = "v20.0.31"            # 💡 BOTバージョンをv20.0.31に更新
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -956,9 +959,13 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
         # 1. 全ティッカー情報（価格、出来高など）を取得
         tickers = await exchange.fetch_tickers()
         
-        # 'NoneType' object has no attribute 'keys' のエラー対策
-        if tickers is None or not isinstance(tickers, dict):
+        # 💡 【Patch 76-2】NoneType エラー対策を強化
+        # fetch_tickers() が None や不正な値を返した場合、CCXT内部でエラーが発生するのを防ぐ
+        if tickers is None or not isinstance(tickers, dict) or not tickers.keys():
+            # fetch_tickersがNoneを返すのは通常ありえないが、APIの一時的な不調で起こり得るため、ログを出し、処理をスキップ
+            logging.error("❌ fetch_tickers が None または空の辞書を返しました。")
             raise Exception("fetch_tickers returned None or invalid data.")
+
 
         volume_data = []
         
@@ -1100,39 +1107,58 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
 
     # 最小取引サイズを、取引所の精度（ステップサイズ）で調整し、「実際に取引可能な最小ロット」を特定する。
+    amount_adjusted_str = ''
+    amount_adjusted = 0.0
+    min_amount_adjusted = min_amount_raw # フォールバック値
+
     try:
+        # 💡 【Patch 76-1】ロットサイズの精度調整ロジック (amount_to_precision) を専用のtry-exceptで囲む
         min_amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, min_amount_raw)
         min_amount_adjusted = float(min_amount_adjusted_str)
-    except Exception as e:
-        logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}")
-        min_amount_adjusted = min_amount_raw # 失敗したら生の値で続行（リスクあり）
-
-    # 万一、precision adjustmentで0になった場合の最終防衛
-    if min_amount_adjusted <= 0.0:
-        logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
-        return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
-
-    # 3. 最終的に使用するロットサイズを決定
-    # 計算されたロットサイズが、取引可能な最小ロットを下回る場合、最小ロットを採用する。
-    lot_size_units = max(lot_size_units_calculated, min_amount_adjusted)
-    notional_value_usdt = lot_size_units * entry_price # 概算の名目価値
-
-    # 4. 注文の実行
-    try:
-        side_ccxt = 'buy' if side == 'long' else 'sell'
         
+        # 3. 最終的に使用するロットサイズを決定
+        lot_size_units = lot_size_units_calculated
+
+        # 🚨 【Patch 77 - 最小ロット回避】計算されたロットサイズが最小ロットを下回る場合、
+        # 最小ロットを少し超える値 (1.0001倍) を採用する。
+        if lot_size_units_calculated < min_amount_adjusted:
+             
+             # 最小ロットの 1.0001 倍を採用し、取引所が要求する 'strictly greater' に対応
+             lot_size_units = min_amount_adjusted * 1.0001 
+             logging.warning(f"⚠️ {symbol}: 計算ロットが最小ロット({min_amount_adjusted:.8f})を下回ったため、ロットを最小ロットの1.0001倍に強制的に設定しました。")
+             
+        notional_value_usdt = lot_size_units * entry_price # 概算の名目価値
+
         # 契約数量を取引所の精度に合わせて最終調整
         amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units)
         amount_adjusted = float(amount_adjusted_str)
         
-        # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合、強制的に最小ロットに戻す
+        # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合、強制的に最小ロットに戻す (保険)
         if amount_adjusted < min_amount_adjusted:
              amount_adjusted = min_amount_adjusted
-
+             
         if amount_adjusted <= 0.0:
-             # このエラーはamount_to_precision後のamount_adjustedが0以下になった場合に発生
-             logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
-             return {'status': 'error', 'error_message': 'Amount rounded down to zero by precision adjustment.'}
+             raise ValueError(f"Amount rounded down to zero or less: {amount_adjusted:.8f}")
+
+    except ccxt.ExchangeError as e:
+        # GALA/USDT のログで発生したような、ロットサイズが最小ロットに満たない場合のCCXT例外をここで捕捉
+        detail_msg = f"最小ロット制約によるCCXTエラー: {e.args[0]}"
+        logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
+        # クールダウンタイマーをセット
+        LAST_SIGNAL_TIME[symbol] = time.time()
+        return {'status': 'error', 'error_message': detail_msg}
+    except ValueError as e:
+        # amount_to_precision後の数量が0以下になるなどの論理エラー
+        detail_msg = f"ロットサイズ計算/調整エラー: {e}"
+        logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
+        return {'status': 'error', 'error_message': detail_msg}
+    except Exception as e:
+        logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}")
+        return {'status': 'error', 'error_message': f"Precision adjustment failed: {e}"}
+
+    # 4. 注文の実行
+    try:
+        side_ccxt = 'buy' if side == 'long' else 'sell'
         
         # 注文実行
         order = await EXCHANGE_CLIENT.create_order(
@@ -1180,18 +1206,16 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
             
             # 2. クールダウンタイマーをセット
-            # シグナルが拒否された場合、次のシグナルをすぐに再実行しないように、クールダウン時間を設定します。
             LAST_SIGNAL_TIME[symbol] = time.time()
             
             # 3. エラー情報を返却
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            # 💡 Patch 72でこのエラーの発生を大幅に抑えるロジックを実装済み
-            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted_str})"
-            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
-            
             # 💡 400エラーの場合も、無限ループを防ぐためクールダウンさせる
+            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.4f}) - 最小ロット超過設定を試行しましたが失敗。"
+            logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
+            
             LAST_SIGNAL_TIME[symbol] = time.time()
             
             return {'status': 'error', 'error_message': detail_msg}
