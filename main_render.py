@@ -1,11 +1,14 @@
 # ====================================================================================
-# Apex BOT v20.0.34 - Future Trading / 30x Leverage 
-# (Patch 80: Robust Lot Sizing for 'greater than' Precision Errors)
+# Apex BOT v20.0.35 - Future Trading / 30x Leverage 
+# (Patch 81: CRITICAL FIX - NameError in get_current_threshold & Startup Message)
 #
 # 改良・修正点:
-# 1. 【ロット修正: Patch 80】execute_trade_logic にて、リスクベースの計算ロットが最小ロットを下回る場合、
-#    最小ロット * 1.00001 の値を使用することで、取引所の「greater than」制約を確実に回避するように修正。
-# 2. 【バージョン更新】BOTバージョンを v20.0.34 に更新。
+# 1. 【CRITICAL FIX: Patch 81】get_current_threshold 内で発生していた NameError を修正するため、
+#    動的閾値の計算とメッセージ整形ロジックを分離。get_current_threshold は閾値のみを返す。
+# 2. 【機能復元: Patch 81】format_startup_message 関数を分離・定義し、起動通知を正常化。
+# 3. 【ロット修正: Patch 80】execute_trade_logic にて、最小ロットをわずかに超える値を使用し、
+#    取引所の「greater than」制約を確実に回避するようにロジックを維持。
+# 4. 【バージョン更新】BOTバージョンを v20.0.35 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -60,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.34"            # 💡 BOTバージョンを更新 (Patch 80: Robust Lot Sizing)
+BOT_VERSION = "v20.0.35"            # 💡 BOTバージョンを更新 (Patch 81: NameError Fix)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -143,8 +146,8 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_SLUMP = 0.945       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
@@ -208,12 +211,31 @@ def get_estimated_win_rate(score: float) -> str:
     if score >= 0.60: return "60-65%"
     return "<60% (低)"
 
+# 💡 CRITICAL FIX (Patch 81): get_current_threshold は閾値を返すのみ
 def get_current_threshold(macro_context: Dict) -> float:
     """現在の市場環境に合わせた動的な取引閾値を決定し、返す。"""
     global FGI_SLUMP_THRESHOLD, FGI_ACTIVE_THRESHOLD
     global SIGNAL_THRESHOLD_SLUMP, SIGNAL_THRESHOLD_NORMAL, SIGNAL_THRESHOLD_ACTIVE
     
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
+    
+    if fgi_proxy < FGI_SLUMP_THRESHOLD:
+        return SIGNAL_THRESHOLD_SLUMP
+    elif fgi_proxy > FGI_ACTIVE_THRESHOLD:
+        return SIGNAL_THRESHOLD_ACTIVE
+    else:
+        return SIGNAL_THRESHOLD_NORMAL
+
+# 💡 NEW/RESTORED FUNCTION (Patch 81): format_startup_message
+def format_startup_message(account_status: Dict, macro_context: Dict, monitoring_count: int, current_threshold: float) -> str:
+    """BOT起動完了時の通知メッセージを整形する。"""
+    
+    now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
+    bot_version = BOT_VERSION
+    
+    fgi_proxy = macro_context.get('fgi_proxy', 0.0)
+    fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
+    forex_bonus = macro_context.get('forex_bonus', 0.0)
     
     if current_threshold == SIGNAL_THRESHOLD_SLUMP:
         market_condition_text = "低迷/リスクオフ"
@@ -278,6 +300,7 @@ def get_current_threshold(macro_context: Dict) -> float:
     )
 
     return header + balance_section + macro_section + footer
+
 
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -418,6 +441,53 @@ async def send_telegram_notification(message: str) -> bool:
     except requests.exceptions.RequestException as e:
         logging.error(f"❌ Telegramリクエストエラー: {e}")
     return False
+
+def get_score_breakdown(signal: Dict) -> str:
+    """シグナルのスコア内訳を整形して返す"""
+    tech_data = signal.get('tech_data', {})
+    
+    breakdown_list = []
+    
+    # トレンド一致/逆行
+    trend_val = tech_data.get('long_term_reversal_penalty_value', 0.0)
+    trend_text = "🟢 長期トレンド一致" if trend_val >= LONG_TERM_REVERSAL_PENALTY else "🟡 長期トレンド逆行"
+    breakdown_list.append(f"{trend_text}: {trend_val*100:+.2f} 点")
+
+    # MACDモメンタム
+    macd_val = tech_data.get('macd_penalty_value', 0.0)
+    macd_text = "🟢 MACDモメンタム一致" if macd_val >= MACD_CROSS_PENALTY else "🟡 MACDモメンタム逆行"
+    breakdown_list.append(f"{macd_text}: {macd_val*100:+.2f} 点")
+    
+    # RSIモメンタム
+    rsi_val = tech_data.get('rsi_momentum_bonus_value', 0.0)
+    if rsi_val > 0:
+        breakdown_list.append(f"🟢 RSIモメンタム加速: {rsi_val*100:+.2f} 点")
+    
+    # OBV確証
+    obv_val = tech_data.get('obv_momentum_bonus_value', 0.0)
+    if obv_val > 0:
+        breakdown_list.append(f"🟢 OBV出来高確証: {obv_val*100:+.2f} 点")
+
+    # 流動性ボーナス
+    liq_val = tech_data.get('liquidity_bonus_value', 0.0)
+    if liq_val > 0:
+        breakdown_list.append(f"🟢 流動性 (TOP銘柄): {liq_val*100:+.2f} 点")
+        
+    # FGIマクロ影響
+    fgi_val = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
+    fgi_text = "🟢 FGIマクロ追い風" if fgi_val >= 0 else "🔴 FGIマクロ向かい風"
+    breakdown_list.append(f"{fgi_text}: {fgi_val*100:+.2f} 点")
+    
+    # ボラティリティペナルティ
+    vol_val = tech_data.get('volatility_penalty_value', 0.0)
+    if vol_val < 0:
+        breakdown_list.append(f"🔴 ボラティリティ過熱ペナルティ: {vol_val*100:+.2f} 点")
+        
+    # 構造的ボーナス
+    struct_val = tech_data.get('structural_pivot_bonus', 0.0)
+    breakdown_list.append(f"🟢 構造的優位性 (ベース): {struct_val*100:+.2f} 点")
+    
+    return "\n".join([f"    - {line}" for line in breakdown_list])
 
 def _to_json_compatible(obj):
     """
@@ -881,7 +951,6 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     """
     指定されたOHLCV DataFrameにテクニカル指標を適用し、分析結果を返す。
     """
-    # ... (既存の apply_technical_analysis 関数のロジックは変更なし)
     analyzed_data: Dict[str, Dict] = {}
     
     # 各時間足に指標を適用
@@ -925,7 +994,6 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
     """
     テクニカル分析の結果を統合し、最終的な複合シグナルスコアとSL/TP比率を計算する。
     """
-    # ... (既存の calculate_signal_score 関数のロジックは変更なし)
     
     # メインの取引時間足と長期トレンド確認時間足
     main_tf = '1h'
@@ -982,26 +1050,31 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
                        (side == 'short' and long_sig['is_bear_trend'])
     if not trend_consistent:
         score -= LONG_TERM_REVERSAL_PENALTY
-        tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
+        tech_data['long_term_reversal_penalty_value'] = -LONG_TERM_REVERSAL_PENALTY
     else:
-        score += LONG_TERM_REVERSAL_PENALTY # ペナルティ回避をボーナスとして計上
+        # トレンド一致の場合はボーナスを計上
+        score += LONG_TERM_REVERSAL_PENALTY 
+        tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
             
     # B. MACD/モメンタムの確認 (1h MACDヒストグラム)
     macd_consistent = (side == 'long' and main_sig['macd_h'] > 0) or \
                       (side == 'short' and main_sig['macd_h'] < 0)
     if not macd_consistent:
         score -= MACD_CROSS_PENALTY
-        tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+        tech_data['macd_penalty_value'] = -MACD_CROSS_PENALTY
     else:
-        score += MACD_CROSS_PENALTY # ペナルティ回避をボーナスとして計上
+        # モメンタム一致の場合はボーナスを計上
+        score += MACD_CROSS_PENALTY 
+        tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
         
     # C. RSI モメンタム加速 (1h RSI) - 勢いがある場合
     # RSI_MOMENTUM_LOW (40) を使用し、40-60レンジからの離脱を確認
     rsi_favorable = (side == 'long' and main_sig['rsi'] > 60) or \
                     (side == 'short' and main_sig['rsi'] < 40)
     if rsi_favorable:
-        score += 0.05 
-        tech_data['rsi_momentum_bonus_value'] = 0.05
+        bonus = 0.05
+        score += bonus
+        tech_data['rsi_momentum_bonus_value'] = bonus
         
     # D. 出来高/OBV確証 (1h OBV)
     obv_matches = (side == 'long' and main_sig['obv_up']) or \
@@ -1252,7 +1325,8 @@ async def main_bot_loop():
         await fetch_open_positions() # オープンポジション情報の更新
         
         # 2. 動的閾値の計算
-        current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+        # 💡 NameError FIX (Patch 81): get_current_threshold は値を返すので、変数に代入して使用します。
+        current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT) 
         logging.info(f"📊 市場環境スコア: FGI {GLOBAL_MACRO_CONTEXT.get('fgi_raw_value', 'N/A')}。動的取引閾値: {current_threshold * 100:.2f} / 100")
         
         all_signals: List[Dict] = []
@@ -1354,6 +1428,7 @@ async def main_bot_loop():
 
         # 5. 初回完了通知
         if not IS_FIRST_MAIN_LOOP_COMPLETED:
+            # 💡 NameError FIX (Patch 81): format_startup_message 関数を呼び出します。
             await send_telegram_notification(format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold))
             IS_FIRST_MAIN_LOOP_COMPLETED = True
             
@@ -1556,4 +1631,5 @@ if __name__ == "__main__":
     # 環境変数PORTからポート番号を取得。なければ10000を使用
     port = int(os.environ.get("PORT", 10000))
     # Uvicornを起動
+    # 'main_render:app' はファイル名と変数名に依存するため、適切なファイル名に修正してください。
     uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
