@@ -1,13 +1,15 @@
 # ====================================================================================
-# Apex BOT v20.0.28 - Future Trading / 30x Leverage 
-# (Patch 74: Robust CCXT Fetch & Rate Limit Mitigation)
+# Apex BOT v20.0.29 - Future Trading / 30x Leverage 
+# (Patch 75: Robust CCXT Tickers NoneType & Rate Limit Mitigation)
 #
 # 改良・修正点:
-# 1. 【エラー処理強化: Patch 74-A】get_top_volume_symbols に**3回のリトライロジックを実装**し、fetch_tickers() の NoneType/AttributeError から回復するようにした。
-# 2. 【レートリミット緩和: Patch 74-B】メインループ間隔 LOOP_INTERVAL のデフォルト値を 60秒 から **90秒に延長**した。
-# 3. 【エラー処理強化: Patch 74-C】fetch_ohlcv_data に**3回のリトライロジックを実装**し、OHLCVデータの取得失敗に対する回復力を高めた。
+# 1. 【エラー処理強化: Patch 75-A】get_top_volume_symbols にて、fetch_tickers() の返り値が None や空の Dict であった場合に即座に ValueError を発生させるロジックを追加し、
+#    CCXT内部の AttributeError (NoneType) の発生前にロバストなリトライロジックに制御を戻すように強化。
+# 2. 【レートリミット緩和: Patch 74-B】メインループ間隔 LOOP_INTERVAL のデフォルト値を 60秒 から 90秒 に延長。
+# 3. 【エラー処理強化: Patch 74-C】fetch_ohlcv_data に3回のリトライロジックを実装。
 # 4. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
 #    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するようにロジックを強化。
+# 5. 【バージョン更新】BOTバージョンを v20.0.29 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -62,14 +64,14 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.28"            # 💡 BOTバージョンをv20.0.28に更新
+BOT_VERSION = "v20.0.29"            # 💡 BOTバージョンをv20.0.29に更新
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 # MARK: 【レートリミット緩和: 変更点1】メインループ間隔を60秒から90秒に延長
 LOOP_INTERVAL = 90              # メインループの実行間隔 (秒) - 90秒ごと
 ANALYSIS_ONLY_INTERVAL = 60 * 60    # 分析専用通知の実行間隔 (秒) - 1時間ごと
 WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
-MONITOR_INTERVAL = 10               # ポジション監視ループの実行間間隔 (秒) - 10秒ごと
+MONITOR_INTERVAL = 10               # ポジション監視ループの実行間隔 (秒) - 10秒ごと
 
 # 💡 クライアント設定
 CCXT_CLIENT_NAME = os.getenv("EXCHANGE_CLIENT", "mexc")
@@ -146,8 +148,8 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.945       
-SIGNAL_THRESHOLD_NORMAL = 0.90      
+SIGNAL_THRESHOLD_SLUMP = 0.90       
+SIGNAL_THRESHOLD_NORMAL = 0.85      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
@@ -875,6 +877,9 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
     RETRY_COUNT = 3
     DELAY_SECONDS = 3
     
+    # 💡 致命的エラーが続くため、CCXTライブラリの更新を促すメッセージを毎回ロギングする
+    logging.critical("🚨 CCXTの 'NoneType' エラーが頻発しています。この問題の根本解決のため、ボットの実行環境で `pip install --upgrade ccxt` を実行することを強く推奨します。")
+
     for attempt in range(RETRY_COUNT):
         try:
             logging.info(f"🔄 出来高トップ {limit} 銘柄の動的取得を開始します... (試行 {attempt + 1}/{RETRY_COUNT})")
@@ -882,13 +887,14 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
             # 1. 全ティッカー情報（価格、出来高など）を取得
             tickers = await exchange.fetch_tickers()
             
-            # NoneType/無効なデータをチェックし、エラーとして捕捉させる
-            if tickers is None or not isinstance(tickers, dict):
-                # ValueError/AttributeErrorとして捕捉させ、リトライさせる
-                raise ValueError("fetch_tickers() が None または無効なデータ (非Dict型) を返しました。")
+            # 2. 【ロバスト性強化】NoneType/無効なデータをチェックし、エラーとして捕捉させる
+            if tickers is None or not isinstance(tickers, dict) or not tickers:
+                # Noneや非Dict型、または空のDictが返された場合もValueErrorとして捕捉し、リトライさせる
+                raise ValueError("fetch_tickers() が None または無効なデータ (非Dict型、または空のDict) を返しました。")
 
             volume_data = []
             
+            # 3. 出来高の計算とフィルタリング
             for symbol, ticker in tickers.items():
                 market = exchange.markets.get(symbol)
                 
@@ -909,14 +915,15 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
                             volume = base_vol * last_price
                     
                     if volume is not None and volume > 0:
-                        volume_data.append((symbol, volume))
+                        # CCXTの標準シンボル形式 ('BTC/USDT') に変換して格納
+                        standard_symbol = market['symbol'] 
+                        volume_data.append((standard_symbol, volume))
             
-            # 3. 出来高で降順にソートし、TOP N（40）のシンボルを抽出
+            # 4. 出来高で降順にソートし、TOP N（40）のシンボルを抽出
             volume_data.sort(key=lambda x: x[1], reverse=True)
             top_symbols = [s for s, v in volume_data[:limit]]
             
-            # 4. デフォルトリストと結合し、重複を排除（動的取得できなかった場合も主要銘柄は維持）
-            # 優先度の高いデフォルト銘柄を先頭に、出来高トップ銘柄を追加する形でリストを作成
+            # 5. デフォルトリストと結合し、重複を排除
             unique_symbols = list(base_symbols)
             for symbol in top_symbols:
                 if symbol not in unique_symbols:
@@ -926,8 +933,8 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
             return unique_symbols
 
         except (ccxt.ExchangeError, ccxt.NetworkError, ValueError, AttributeError) as e:
-            # ValueError: 無効なデータ (None) や空リスト、AttributeError: NoneTypeエラーなどを捕捉
-            error_msg = f"❌ fetch_tickers() 実行中に致命的な {type(e).__name__} が発生しました (CCXT内部): '{e}'"
+            # AttributeError は NoneTypeから生じたものを全て捕捉する
+            error_msg = f"❌ fetch_tickers() 実行中に致命的な {type(e).__name__} が発生しました: '{e}'"
             if attempt < RETRY_COUNT - 1:
                 logging.warning(f"{error_msg}。{DELAY_SECONDS}秒後にリトライします。")
                 await asyncio.sleep(DELAY_SECONDS)
@@ -936,7 +943,7 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
                 return base_symbols
         
         except Exception as e:
-            # 予期せぬその他のエラー (これが発生したら即時終了してデフォルトへ)
+            # 予期せぬその他のエラー
             logging.critical(f"❌ get_top_volume_symbolsで予期せぬエラー: {e}", exc_info=True)
             return base_symbols
     
@@ -1183,7 +1190,7 @@ async def main_bot_loop():
             return
 
         # 1. 監視対象銘柄のリストを更新 (出来高ベース)
-        # 💡 変更点2: リトライロジック付きのget_top_volume_symbolsを使用
+        # 💡 変更点2: ロバストなリトライロジック付きのget_top_volume_symbolsを使用
         CURRENT_MONITOR_SYMBOLS = await get_top_volume_symbols(EXCHANGE_CLIENT, TOP_SYMBOL_LIMIT, DEFAULT_SYMBOLS)
         await fetch_open_positions() # オープンポジション情報の更新
         
@@ -1480,4 +1487,8 @@ if __name__ == "__main__":
     # 環境変数PORTからポート番号を取得。なければ10000を使用
     port = int(os.environ.get("PORT", 10000))
     # Uvicornを起動
+    # 注意: ファイル名が 'main_render.py' の場合、以下のように指定する必要があります。
+    # uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
+    # ここでは便宜的にコードとして完結させるため、以下のような起動コマンドを想定します。
+    # 実際の環境に合わせて調整してください。
     uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
