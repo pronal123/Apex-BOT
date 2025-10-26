@@ -1,6 +1,6 @@
 # ====================================================================================
 # Apex BOT v20.0.39 - Future Trading / 30x Leverage 
-# (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応)
+# (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応, 堅牢性強化)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -16,7 +16,7 @@ import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 import asyncio
-from fastapi import FastAPI, Request, Response # 💡 Request, Responseをインポート
+from fastapi import FastAPI, Request, Response 
 from fastapi.responses import JSONResponse
 import uvicorn
 from dotenv import load_dotenv
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.39"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.39-fix2"       # 💡 BOTバージョンを更新 (FIX適用)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -85,7 +85,6 @@ MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清
 LEVERAGE_SETTING_DELAY = 1.0 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒)
 
 # 💡 【固定ロット】設定 
-# 🚨 リスクベースの動的サイジング設定は全て削除し、この固定値を使用します。
 FIXED_NOTIONAL_USDT = 20.0 
 
 # 💡 WEBSHARE設定 
@@ -113,7 +112,9 @@ if TEST_MODE:
 IS_CLIENT_READY: bool = False
 
 # 取引ルール設定
-TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
+TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 # 12時間
+TRADE_SIGNAL_LIQUIDITY_COOLDOWN = 60 * 60 * 24 # 💡 24時間 (流動性不足時の延長)
+
 SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 1                
 REQUIRED_OHLCV_LIMITS = {'1m': 1000, '5m': 1000, '15m': 1000, '1h': 1000, '4h': 1000} 
@@ -316,6 +317,10 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     # リスク幅、リワード幅の計算をLong/Shortで反転
     risk_width = abs(entry_price - stop_loss)
     reward_width = abs(take_profit - entry_price)
+    
+    # SL比率 (通知用)
+    sl_ratio = abs(entry_price - stop_loss) / entry_price if entry_price else 0.0
+
 
     if context == "取引シグナル":
         # lot_size_units = signal.get('lot_size_units', 0.0) # 数量 (単位)
@@ -338,7 +343,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
                 filled_amount = 0.0
                 
             filled_usdt_notional = trade_result.get('filled_usdt', FIXED_NOTIONAL_USDT) 
-            risk_usdt = abs(filled_usdt_notional) * sl_ratio / (1/LEVERAGE) # 簡易的なSLによる名目リスク
+            risk_usdt = abs(filled_usdt_notional) * sl_ratio / (1/LEVERAGE) # 簡易的なSLによる名目リスク (リスク計算ロジックに依存)
             
             trade_section = (
                 f"💰 **取引実行結果**\n"
@@ -615,8 +620,6 @@ async def initialize_exchange_client() -> bool:
                          # set_leverageに渡すべきCCXTシンボル (例: BTC/USDT:USDT) をリストに追加
                          symbols_to_set_leverage.append(mkt['symbol']) 
             
-            # --- Patch 70 FIX 終了 ---
-
             # set_leverage() が openType と positionType の両方を要求するため、両方の設定を行います。
             for symbol in symbols_to_set_leverage:
                 
@@ -1135,14 +1138,15 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     """
     取引実行ロジック。
-    ロットサイズ計算を固定の 20 USDT に変更する。
+    ロットサイズ計算を固定の 20 USDT に変更し、堅牢性を強化。
     """
     global LAST_SIGNAL_TIME
-    global FIXED_NOTIONAL_USDT # 新しい定数を参照できるように
+    global FIXED_NOTIONAL_USDT 
+    global TRADE_SIGNAL_LIQUIDITY_COOLDOWN # 💡 新しいクールダウン時間
 
-    # 🚨 【変更点】リスクベース計算を削除し、固定値を使用
+    # 🚨 【固定ロット】名目価値
     final_notional_value_usdt = FIXED_NOTIONAL_USDT 
-    sl_ratio = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price'] # SL比率は通知のために保持
+    sl_ratio_for_risk_calc = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price'] # SL比率は通知のために保持
 
     if TEST_MODE:
         # TEST_MODEでは、固定値のみを返す
@@ -1157,13 +1161,10 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     entry_price = signal['entry_price']
     stop_loss = signal['stop_loss']
     
-    # 1. 💡 【固定ロット】名目価値 (Notional Value) の決定
-    # final_notional_value_usdt は既に FIXED_NOTIONAL_USDT (20.0)
-    
-    # 2. 単位数量 (Lot Size Units) の計算
+    # 1. 単位数量 (Lot Size Units) の計算
     lot_size_units_calculated = final_notional_value_usdt / entry_price 
 
-    # 3. 最小取引ロットの精度チェックを強化
+    # 2. 最小取引ロットの精度チェックを強化
     market_info = EXCHANGE_CLIENT.markets[symbol]
     min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
 
@@ -1178,17 +1179,15 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
         return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
 
-    # 4. 最終的に使用するロットサイズを決定
-    
-    # 計算ロット (固定20USDTベース) が最小ロットを下回る場合、最小ロットの乗数で切り上げる
+    # 3. 最終的に使用するロットサイズを決定
     if lot_size_units_calculated < min_amount_adjusted * 1.0000001:
-         # 最小ロットの乗数で切り上げ (最小ロットを下回る場合は、最小ロットの整数倍のロットを使用)
+         # 最小ロットの乗数で切り上げ
          lot_size_units = min_amount_adjusted * math.ceil(lot_size_units_calculated / min_amount_adjusted) 
-         logging.warning(f"⚠️ {symbol}: 固定ロット ({format_usdt(final_notional_value_usdt)} USDT) の計算結果が取引所の最小ロットを下回る可能性があったため、ロットを最小ロット乗数で切り上げました。")
+         logging.warning(f"⚠️ {symbol}: 計算結果が最小ロットを下回る可能性があったため、ロットを最小ロット乗数で切り上げました。")
     else:
          lot_size_units = lot_size_units_calculated
          
-    # 5. 注文の実行
+    # 4. 注文の実行
     try:
         side_ccxt = 'buy' if side == 'long' else 'sell'
         
@@ -1196,23 +1195,25 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units)
         amount_adjusted = float(amount_adjusted_str)
         
+        # 💥 修正ポイント A: 精度調整の結果、0または最小ロットを下回った場合の強制フォールバック
+        if amount_adjusted <= 0.0 or amount_adjusted < min_amount_adjusted * 0.9999999:
+             # 強制的に最小ロットの1.1倍を適用
+             amount_adjusted = min_amount_adjusted * 1.1 
+             # 再度、精度調整を行う
+             amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, amount_adjusted)
+             amount_adjusted = float(amount_adjusted_str)
+             
+             if amount_adjusted <= 0.0:
+                 logging.critical(f"❌ {symbol} 注文実行エラー: ロットサイズの強制再調整後も数量 ({amount_adjusted:.8f}) が0以下になりました。")
+                 return {'status': 'error', 'error_message': 'Amount rounded down to zero even after forced adjustment.'}
+                 
+             logging.warning(f"⚠️ {symbol}: 精度調整後の数量 ({amount_adjusted_str}) が最小ロットを下回ったため、最小ロットの1.1倍に**再調整**しました。")
+        
         # ログ強化: 注文を出す直前の最終ロットサイズと最小ロットを記録
         logging.info(
             f"✅ {symbol}: 最終ロットサイズ {amount_adjusted:.8f} (最小ロット: {min_amount_adjusted:.8f}). "
             f"名目価値: {format_usdt(final_notional_value_usdt)} USDT (固定)."
         )
-        
-        # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合
-        if amount_adjusted < min_amount_adjusted and amount_adjusted > 0:
-             # 強制的に最小ロットの1.1倍を適用 (最後の砦)
-             amount_adjusted = min_amount_adjusted * 1.1
-             amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, amount_adjusted)
-             amount_adjusted = float(amount_adjusted_str)
-             logging.warning(f"⚠️ {symbol}: 精度調整後の数量 ({amount_adjusted_str}) が最小ロットを下回ったため、最小ロットの1.1倍に再調整しました。")
-        
-        if amount_adjusted <= 0.0:
-             logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
-             return {'status': 'error', 'error_message': 'Amount rounded down to zero by precision adjustment.'}
         
         # 注文実行
         order = await EXCHANGE_CLIENT.create_order(
@@ -1223,7 +1224,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             params={}
         )
 
-        # 6. ポジション情報を更新
+        # 5. ポジション情報を更新
         new_position = {
             'symbol': symbol,
             'side': side,
@@ -1252,14 +1253,20 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     except ccxt.ExchangeError as e:
         error_message = e.args[0]
         
+        # 💥 修正ポイント B: 流動性不足エラーの場合、クールダウン時間を大幅に延長
         if 'code":30005' in error_message or 'Oversold' in error_message:
-            detail_msg = "MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。この銘柄の取引を一時的にクールダウンさせます。"
+            # 💡 クールダウンを 24時間 (TRADE_SIGNAL_LIQUIDITY_COOLDOWN) に設定
+            LAST_SIGNAL_TIME[symbol] = time.time() + TRADE_SIGNAL_LIQUIDITY_COOLDOWN 
+            
+            # クールダウン時間のログ
+            cooldown_hrs = TRADE_SIGNAL_LIQUIDITY_COOLDOWN / 3600
+            detail_msg = f"MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。この銘柄の取引を**{cooldown_hrs:.0f}時間**クールダウンさせます。"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
-            LAST_SIGNAL_TIME[symbol] = time.time()
+            
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.8f} / 名目: {format_usdt(final_notional_value_usdt)} USDT)"
+            detail_msg = f"ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.8f} / 名目: {format_usdt(final_notional_value_usdt)} USDT)"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
             LAST_SIGNAL_TIME[symbol] = time.time()
             return {'status': 'error', 'error_message': detail_msg}
@@ -1306,11 +1313,12 @@ async def main_bot_loop():
         # 3. 監視銘柄ごとの分析
         for symbol in CURRENT_MONITOR_SYMBOLS:
             
-            cooldown_remaining = TRADE_SIGNAL_COOLDOWN - (time.time() - LAST_SIGNAL_TIME.get(symbol, 0))
+            cooldown_remaining = LAST_SIGNAL_TIME.get(symbol, 0) - time.time()
             
             # ログ強化ポイント: シグナルスキップ理由のログ
             if cooldown_remaining > 0:
-                logging.info(f"⏭️ {symbol}: スキップ (クールダウン中 - 残り {cooldown_remaining/3600:.1f} 時間)")
+                cooldown_remaining_hrs = cooldown_remaining / 3600
+                logging.info(f"⏭️ {symbol}: スキップ (クールダウン中 - 残り {cooldown_remaining_hrs:.1f} 時間)")
                 continue
             
             # ログ強化ポイント: ポジション重複チェックのログ
@@ -1539,7 +1547,7 @@ app = FastAPI(title="Apex BOT API")
 
 # 💡 UptimeRobot対応の修正箇所: @app.route を使用し、GETとHEADの両方を許可
 @app.route("/status", methods=["GET", "HEAD"], include_in_schema=False)
-async def read_root(request: Request): # 💡 Requestオブジェクトを受け取る
+async def read_root(request: Request): 
     """ヘルスチェック用のルート (GET/HEADメソッドを許可)"""
     
     # HEADリクエストの場合は、ボディなしの200 OKを返す (UptimeRobotの標準動作)
@@ -1618,4 +1626,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     # Uvicornを起動
     # 'main_render:app' はファイル名と変数名に依存するため、適切なファイル名に修正してください。
+    # 例: このファイルを main.py としてデプロイする場合、'main:app' とする必要があります。
     uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
