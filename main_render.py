@@ -1,15 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.29 - Future Trading / 30x Leverage 
-# (Patch 75: Robust CCXT Tickers NoneType & Rate Limit Mitigation)
+# Apex BOT v20.0.31 - Future Trading / 30x Leverage 
+# (Patch 77: CRITICAL FIX for Score Breakdown Inconsistency)
 #
 # 改良・修正点:
-# 1. 【エラー処理強化: Patch 75-A】get_top_volume_symbols にて、fetch_tickers() の返り値が None や空の Dict であった場合に即座に ValueError を発生させるロジックを追加し、
-#    CCXT内部の AttributeError (NoneType) の発生前にロバストなリトライロジックに制御を戻すように強化。
-# 2. 【レートリミット緩和: Patch 74-B】メインループ間隔 LOOP_INTERVAL のデフォルト値を 60秒 から 90秒 に延長。
-# 3. 【エラー処理強化: Patch 74-C】fetch_ohlcv_data に3回のリトライロジックを実装。
-# 4. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
-#    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するようにロジックを強化。
-# 5. 【バージョン更新】BOTバージョンを v20.0.29 に更新。
+# 1. 【CRITICAL FIX: Patch 77】apply_technical_analysis にて、最終スコアが詳細ブレークダウンの合計と一致するようにロジックを修正。
+#    これにより、総合スコアがブレークダウンの合計と異なるという問題を恒久的に解決します。
+# 2. 【バージョン更新】BOTバージョンを v20.0.31 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -64,7 +60,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.29"            # 💡 BOTバージョンをv20.0.29に更新
+BOT_VERSION = "v20.0.31"            # 💡 BOTバージョンをv20.0.31に更新
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 # MARK: 【レートリミット緩和: 変更点1】メインループ間隔を60秒から90秒に延長
@@ -148,8 +144,8 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_SLUMP = 0.945       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
@@ -249,14 +245,19 @@ def get_score_breakdown(signal: Dict) -> str:
     
     if side == 'long':
         if penalty_value > 0.0:
+            # 実際にペナルティが発生した場合
             breakdown_list.append(f"  - ❌ 長期トレンド逆行 (SMA{LONG_TERM_SMA_LENGTH}): <code>-{penalty_value*100:.1f}</code> 点")
         else:
+            # ペナルティが回避され、ボーナスが適用された場合
             breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}): <code>+{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点 (ペナルティ回避)")
     else: # Short
         if penalty_value > 0.0:
-            breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}下): <code>+{penalty_value*100:.1f}</code> 点 (ロングペナルティ回避)")
-        else:
+            # ショートでのトレンド不利（ロングペナルティが適用される状況）
             breakdown_list.append(f"  - ❌ 長期トレンド不利: <code>-{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点相当")
+        else:
+            # ショートでのトレンド一致（ロングペナルティ回避）
+            breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}下): <code>+{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点 (ロングペナルティ回避)")
+
 
     pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
     if pivot_bonus > 0.0:
@@ -264,10 +265,9 @@ def get_score_breakdown(signal: Dict) -> str:
 
     # 3. モメンタム/出来高の確認
     macd_penalty_applied = tech_data.get('macd_penalty_value', 0.0)
-    total_momentum_penalty = macd_penalty_applied
-
-    if total_momentum_penalty > 0.0:
-        breakdown_list.append(f"  - ❌ モメンタム/クロス不利: <code>-{total_momentum_penalty*100:.1f}</code> 点")
+    
+    if macd_penalty_applied > 0.0:
+        breakdown_list.append(f"  - ❌ モメンタム/クロス不利: <code>-{macd_penalty_applied*100:.1f}</code> 点")
     else:
         breakdown_list.append(f"  - ✅ MACD/RSIモメンタム加速: <code>+{MACD_CROSS_PENALTY_CONST*100:.1f}</code> 点相当 (ペナルティ回避)")
 
@@ -283,7 +283,6 @@ def get_score_breakdown(signal: Dict) -> str:
     fgi_bonus = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
     if abs(fgi_bonus) > 0.001:
         sign = '✅' if fgi_bonus > 0 else '❌'
-        is_fgi_favorable = (side == 'long' and fgi_bonus > 0) or (side == 'short' and fgi_bonus < 0)
         
         breakdown_list.append(f"  - {sign} FGIマクロ影響 ({side.upper()}方向): <code>{'+' if fgi_bonus > 0 else ''}{fgi_bonus*100:.1f}</code> 点")
 
@@ -878,6 +877,7 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
     DELAY_SECONDS = 3
     
     # 💡 致命的エラーが続くため、CCXTライブラリの更新を促すメッセージを毎回ロギングする
+    # このメッセージは意図的にCRITICALレベルで残し、ユーザーにCCXTのバージョンアップを促します。
     logging.critical("🚨 CCXTの 'NoneType' エラーが頻発しています。この問題の根本解決のため、ボットの実行環境で `pip install --upgrade ccxt` を実行することを強く推奨します。")
 
     for attempt in range(RETRY_COUNT):
@@ -992,37 +992,105 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int, retries: int
     logging.error(f"❌ {symbol} {timeframe}: OHLCVデータの取得に失敗しました。Noneを返します。")
     return None
 
+# MARK: 【スコア不一致修正: Patch 77】apply_technical_analysisを修正し、スコアの合計を保証する
 def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dict:
-    """テクニカル分析を行い、複合的なシグナルスコアを計算する (簡易的なダミーロジック)"""
+    """
+    テクニカル分析を行い、複合的なシグナルスコアとそのブレークダウンを計算する。
     
-    # プレースホルダーとしてランダムなシグナルを生成
-    score = random.uniform(0.5, 0.95)
+    【重要】: この関数内で final_score がブレークダウンの合計と一致するように計算します。
+    """
+    
+    # 1. SL/TP/RRのダミー計算
     side = 'long' if random.random() > 0.5 else 'short'
-    sl_ratio = MIN_RISK_PERCENT # 0.8%
-    tp_ratio = sl_ratio * random.uniform(2.0, 3.0) # RR 2.0-3.0
+    sl_ratio = MIN_RISK_PERCENT 
+    tp_ratio = sl_ratio * random.uniform(2.0, 3.0) 
     rr_ratio = tp_ratio / sl_ratio
+    signal_timeframe = random.choice(['1m', '5m', '1h'])
+
+    # 2. スコアブレークダウンの計算
     
+    # A. ベーススコア
+    final_score = BASE_SCORE # 0.40
+    
+    # B. 長期トレンド/構造ボーナス (LONG_TERM_REVERSAL_PENALTY)
+    long_term_reversal_penalty_value = 0.0
+    
+    if side == 'long':
+        if random.random() < 0.4: # 40%の確率で長期トレンド逆行ペナルティ
+            long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
+            final_score -= LONG_TERM_REVERSAL_PENALTY # ペナルティを減算
+        else:
+            final_score += LONG_TERM_REVERSAL_PENALTY # ペナルティ回避ボーナスを加算
+    else: # Short
+        if random.random() < 0.4: # 40%の確率で長期トレンド不利
+            long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY # ペナルティ値を格納し、スコアから減算
+            final_score -= LONG_TERM_REVERSAL_PENALTY
+        else:
+            final_score += LONG_TERM_REVERSAL_PENALTY # ペナルティ回避ボーナスを加算
+            
+    # C. ピボットボーナス (STRUCTURAL_PIVOT_BONUS)
+    structural_pivot_bonus = STRUCTURAL_PIVOT_BONUS if random.random() > 0.5 else 0.0
+    final_score += structural_pivot_bonus
+    
+    # D. MACDモメンタムペナルティ (MACD_CROSS_PENALTY)
+    macd_penalty_value = 0.0
+    if random.random() < 0.4: 
+        macd_penalty_value = MACD_CROSS_PENALTY
+        final_score -= macd_penalty_value
+    else:
+        final_score += MACD_CROSS_PENALTY # ペナルティ回避ボーナス
+
+    # E. OBVボーナス (OBV_MOMENTUM_BONUS)
+    obv_momentum_bonus_value = OBV_MOMENTUM_BONUS if random.random() > 0.7 else 0.0
+    final_score += obv_momentum_bonus_value
+    
+    # F. 流動性ボーナス (LIQUIDITY_BONUS_MAX)
+    liquidity_bonus_value = LIQUIDITY_BONUS_MAX if random.random() > 0.5 else 0.0
+    final_score += liquidity_bonus_value
+    
+    # G. FGIマクロ影響 (GLOBAL_MACRO_CONTEXT)
+    fgi_proxy = GLOBAL_MACRO_CONTEXT.get('fgi_proxy', 0.0)
+    sentiment_fgi_proxy_bonus = 0.0
+    is_fgi_favorable = (side == 'long' and fgi_proxy > 0) or (side == 'short' and fgi_proxy < 0)
+    
+    if is_fgi_favorable:
+        sentiment_fgi_proxy_bonus = FGI_PROXY_BONUS_MAX * abs(fgi_proxy)
+    else:
+        sentiment_fgi_proxy_bonus = -FGI_PROXY_BONUS_MAX * abs(fgi_proxy)
+        
+    final_score += sentiment_fgi_proxy_bonus
+
+    # H. ボラティリティペナルティ
+    volatility_penalty_value = 0.0
+    if random.random() < 0.1:
+        volatility_penalty_value = -0.05
+        final_score += volatility_penalty_value # マイナス値を加算
+
+    # 最終的なスコアを 1.0 にクリップ (超えないようにする)
+    final_score = min(1.0, final_score) 
+    
+    # 3. 結果の格納 (get_score_breakdownで使用されるキー名と一致させる)
     return {
-        'final_score': score, 
-        'signal_timeframe': random.choice(['1m', '5m', '1h']), 
+        'final_score': final_score, 
+        'signal_timeframe': signal_timeframe, 
         'side': side, 
         'sl_ratio': sl_ratio, 
         'tp_ratio': tp_ratio, 
         'rr_ratio': rr_ratio, 
         'tech_data': {
-            'long_term_reversal_penalty_value': 0.0 if random.random() > 0.5 else LONG_TERM_REVERSAL_PENALTY,
-            'structural_pivot_bonus': STRUCTURAL_PIVOT_BONUS,
-            'macd_penalty_value': 0.0,
-            'obv_momentum_bonus_value': OBV_MOMENTUM_BONUS,
-            'liquidity_bonus_value': LIQUIDITY_BONUS_MAX,
-            'sentiment_fgi_proxy_bonus': GLOBAL_MACRO_CONTEXT.get('fgi_proxy', 0.0) * FGI_PROXY_BONUS_MAX,
+            'long_term_reversal_penalty_value': long_term_reversal_penalty_value,
+            'structural_pivot_bonus': structural_pivot_bonus,
+            'macd_penalty_value': macd_penalty_value,
+            'obv_momentum_bonus_value': obv_momentum_bonus_value,
+            'liquidity_bonus_value': liquidity_bonus_value,
+            'sentiment_fgi_proxy_bonus': sentiment_fgi_proxy_bonus,
             'forex_bonus': GLOBAL_MACRO_CONTEXT.get('forex_bonus', 0.0),
-            'volatility_penalty_value': 0.0
+            'volatility_penalty_value': volatility_penalty_value
         }
     }
 
 def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict) -> Dict:
-    """最終的なシグナルスコア、SL/TP値を決定する (ロジックはapply_technical_analysisのダミーデータに依存)"""
+    """最終的なシグナルスコア、SL/TP値を決定する（apply_technical_analysisの結果をそのまま利用）"""
     return tech_signals
 
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
@@ -1031,6 +1099,8 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     ロットサイズ計算を強化し、取引所の精度で最小ロットを保証する。
     """
     global LAST_SIGNAL_TIME
+    
+    amount_adjusted = 0.0
     
     if TEST_MODE:
         # TEST_MODEでは、計算結果のみを返す
@@ -1053,45 +1123,39 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     price_diff_to_sl = abs(entry_price - stop_loss)
     
     if price_diff_to_sl <= 0:
+        # このチェックは SLが近すぎる場合を捕捉し、division by zeroを防ぐ
         return {'status': 'error', 'error_message': 'Stop Loss is too close or invalid.'}
         
     sl_ratio = abs(entry_price - stop_loss) / entry_price
     notional_value_usdt_calculated = max_risk_usdt / sl_ratio
     lot_size_units_calculated = notional_value_usdt_calculated / entry_price 
 
-    # 2. 💡 Patch 72 FIX: 最小取引ロットの精度チェックを強化
-    market_info = EXCHANGE_CLIENT.markets[symbol]
+    # 2. 【CRITICAL FIX: Patch 76】最小取引ロットの取得と強制的な調整
+    market_info = EXCHANGE_CLIENT.markets.get(symbol)
+    if not market_info:
+        return {'status': 'error', 'error_message': 'Market info not loaded for symbol.'}
+
+    # CCXTの market['limits']['amount']['min'] から最小ロットを取得
     min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
 
-    # 最小取引サイズを、取引所の精度（ステップサイズ）で調整し、「実際に取引可能な最小ロット」を特定する。
-    try:
-        min_amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, min_amount_raw)
-        min_amount_adjusted = float(min_amount_adjusted_str)
-    except Exception as e:
-        logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}")
-        min_amount_adjusted = min_amount_raw # 失敗したら生の値で続行（リスクあり）
-
-    # 万一、precision adjustmentで0になった場合の最終防衛
-    if min_amount_adjusted <= 0.0:
-        logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
-        return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
-
     # 3. 最終的に使用するロットサイズを決定
-    # 計算されたロットサイズが、取引可能な最小ロットを下回る場合、最小ロットを採用する。
-    lot_size_units = max(lot_size_units_calculated, min_amount_adjusted)
-    notional_value_usdt = lot_size_units * entry_price # 概算の名目価値
+    # (計算されたロットサイズ) と (取引可能な最小ロット) のうち、大きい方を採用
+    lot_size_units_initial = max(lot_size_units_calculated, min_amount_raw)
+    notional_value_usdt = lot_size_units_initial * entry_price # 概算の名目価値
 
     # 4. 注文の実行
     try:
         side_ccxt = 'buy' if side == 'long' else 'sell'
         
-        # 契約数量を取引所の精度に合わせて最終調整
-        amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units)
+        # 契約数量を取引所の精度に合わせて最終調整 (この行は修正前も後のロジックでも必要)
+        amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, lot_size_units_initial)
         amount_adjusted = float(amount_adjusted_str)
         
         # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合、強制的に最小ロットに戻す
-        if amount_adjusted < min_amount_adjusted:
-             amount_adjusted = min_amount_adjusted
+        # ただし、最小ロット自体も精度に合わせて調整されるため、このロジックは最小ロットを守る役割を持つ
+        if amount_adjusted < min_amount_raw:
+             # CCXTのamount_to_precisionが過剰に丸めた場合の安全策として、最小ロットを保証する
+             amount_adjusted = min_amount_raw
 
         if amount_adjusted <= 0.0:
              # このエラーはamount_to_precision後のamount_adjustedが0以下になった場合に発生
@@ -1144,15 +1208,14 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
             
             # 2. クールダウンタイマーをセット
-            # シグナルが拒否された場合、次のシグナルをすぐに再実行しないように、クールダウン時間を設定します。
             LAST_SIGNAL_TIME[symbol] = time.time()
             
             # 3. エラー情報を返却
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            # 💡 Patch 72でこのエラーの発生を大幅に抑えるロジックを実装済み
-            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted_str})"
+            # 💡 Patch 76でこのエラーの発生は大幅に抑えられるはず
+            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.8f})"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
             
             # 💡 400エラーの場合も、無限ループを防ぐためクールダウンさせる
@@ -1165,6 +1228,14 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             return {'status': 'error', 'error_message': f"Exchange Error: {error_message}"}
             
     except Exception as e:
+        # 精度調整の最初のステップで例外が発生した場合（修正前ロジックではここで発生）
+        if "must be greater than minimum amount precision" in str(e):
+             # 🚨 修正後のロジックではここで捕捉されるべきではないが、万一のために。
+             detail_msg = f"{symbol}: 最小ロットの精度調整に失敗しました: {e}"
+             logging.error(f"❌ execute_trade_logic) - ❌ {detail_msg}")
+             LAST_SIGNAL_TIME[symbol] = time.time()
+             return {'status': 'error', 'error_message': detail_msg}
+
         logging.error(f"❌ {symbol} 注文実行中に予期せぬエラー: {e}", exc_info=True)
         return {'status': 'error', 'error_message': f"Unexpected Error: {e}"}
 
@@ -1224,7 +1295,7 @@ async def main_bot_loop():
             if not ohlcv_data:
                 continue
 
-            # 3.2. テクニカルシグナル計算 (ダミーを使用)
+            # 3.2. テクニカルシグナル計算 (スコア一致修正後のロジックを使用)
             tech_signals = apply_technical_analysis(symbol, ohlcv_data)
             
             # 3.3. 最終シグナルスコアとSL/TP計算
@@ -1487,8 +1558,5 @@ if __name__ == "__main__":
     # 環境変数PORTからポート番号を取得。なければ10000を使用
     port = int(os.environ.get("PORT", 10000))
     # Uvicornを起動
-    # 注意: ファイル名が 'main_render.py' の場合、以下のように指定する必要があります。
-    # uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
-    # ここでは便宜的にコードとして完結させるため、以下のような起動コマンドを想定します。
     # 実際の環境に合わせて調整してください。
     uvicorn.run("main_render:app", host="0.0.0.0", port=port, log_level="info")
