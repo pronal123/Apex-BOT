@@ -1,14 +1,13 @@
 # ====================================================================================
-# Apex BOT v20.0.35 - Future Trading / 30x Leverage 
-# (Patch 81: CRITICAL FIX - NameError in get_current_threshold & Startup Message)
+# Apex BOT v20.0.37 - Future Trading / 30x Leverage 
+# (Patch 81 & 80 & 73: CRITICAL FIX - NameError, Robust Lot Size, MEXC Error Cooldown)
 #
 # 改良・修正点:
-# 1. 【CRITICAL FIX: Patch 81】get_current_threshold 内で発生していた NameError を修正するため、
-#    動的閾値の計算とメッセージ整形ロジックを分離。get_current_threshold は閾値のみを返す。
-# 2. 【機能復元: Patch 81】format_startup_message 関数を分離・定義し、起動通知を正常化。
-# 3. 【ロット修正: Patch 80】execute_trade_logic にて、最小ロットをわずかに超える値を使用し、
-#    取引所の「greater than」制約を確実に回避するようにロジックを維持。
-# 4. 【バージョン更新】BOTバージョンを v20.0.35 に更新。
+# 1. 【バージョン更新】BOTバージョンを v20.0.37 に更新。
+# 2. 【CRITICAL FIX: Patch 81】get_current_threshold 内で発生していた NameError を修正済み。
+# 3. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
+#    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するロジックを維持。
+# 4. 【ロット修正: Patch 80】最小ロットをわずかに超える値を使用し、取引所の「greater than」制約を確実に回避するロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -63,7 +62,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.35"            # 💡 BOTバージョンを更新 (Patch 81: NameError Fix)
+BOT_VERSION = "v20.0.37"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -237,6 +236,7 @@ def format_startup_message(account_status: Dict, macro_context: Dict, monitoring
     fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
     forex_bonus = macro_context.get('forex_bonus', 0.0)
     
+    # 💡 current_threshold に応じてテキストを決定するロジック (Patch 81で分離)
     if current_threshold == SIGNAL_THRESHOLD_SLUMP:
         market_condition_text = "低迷/リスクオフ"
     elif current_threshold == SIGNAL_THRESHOLD_ACTIVE:
@@ -371,6 +371,8 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         filled_amount_raw = trade_result.get('filled_amount', 0.0)
         try:
             filled_amount = float(filled_amount_raw)
+            # PNL計算のための符号調整 (ショートの場合、filled_amountはマイナスだが、ここでは絶対値を使用)
+            # filled_amount = abs(filled_amount) 
         except (ValueError, TypeError):
             filled_amount = 0.0
         
@@ -621,7 +623,7 @@ async def initialize_exchange_client() -> bool:
                  # USDT建てのSwap/Future市場を探す
                  if mkt['quote'] == 'USDT' and mkt['type'] in ['swap', 'future'] and mkt['active']:
                      
-                     # 市場の基本通貨がDEFAULT_SYMBOLSのベース通貨に含まれるかチェック
+                     # 市場の基本通貨が DEFAULT_SYMBOLS のベース通貨に含まれるかチェック
                      if mkt['base'] in default_base_quotes:
                          # set_leverageに渡すべきCCXTシンボル (例: BTC/USDT:USDT) をリストに追加
                          symbols_to_set_leverage.append(mkt['symbol']) 
@@ -1185,11 +1187,14 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
 
     # 最小取引サイズを、取引所の精度（ステップサイズ）で調整し、「実際に取引可能な最小ロット」を特定する。
     try:
+        # ⚠️ WARN: MEXCはここでエラーを出すことがあるため、try-exceptで捕捉し、raw値で続行する
         min_amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, min_amount_raw)
         min_amount_adjusted = float(min_amount_adjusted_str)
     except Exception as e:
+        # ログに記録されたエラー「mexc amount of SAND/USDT must be greater than minimum amount precision of 0.01. raw:0.00010000」に対応
         logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}. raw:{min_amount_raw:.8f}", exc_info=False)
-        min_amount_adjusted = min_amount_raw # 失敗したら生の値で続行（リスクあり）
+        # 精度調整に失敗した場合、CCXTが取得した最小ロット値をそのまま使用する（リスクあり）
+        min_amount_adjusted = min_amount_raw
 
     # 万一、precision adjustmentで0になった場合の最終防衛
     if min_amount_adjusted <= 0.0:
@@ -1202,7 +1207,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     # 最小ロット * わずかに大きな値 (1.00001) を使用し、'greater than' の条件を満たすようにする。
     if lot_size_units_calculated < min_amount_adjusted:
          lot_size_units = min_amount_adjusted * 1.00001 # わずかに増やす
-         logging.warning(f"⚠️ {symbol}: 計算ロット ({lot_size_units_calculated:.8f}) が最小ロットを下回ったため、最小ロット ({min_amount_adjusted:.8f}) をわずかに超える値を使用します。")
+         logging.warning(f"⚠️ {symbol}: 計算ロット ({lot_size_units_calculated:.8f}) が最小ロット ({min_amount_adjusted:.8f}) を下回ったため、最小ロットをわずかに超える値を使用します。")
     else:
          lot_size_units = lot_size_units_calculated
          
@@ -1220,6 +1225,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         logging.info(f"✅ {symbol}: 最終ロットサイズ {amount_adjusted:.8f} (最小ロット: {min_amount_adjusted:.8f} / 計算ベース: {lot_size_units_calculated:.8f})")
         
         # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合、強制的に最小ロットに戻す
+        # 💥 Patch 80で *1.00001 を使用しているため、ここでは比較のみで十分（理論上は不要だが安全策として残す）
         if amount_adjusted < min_amount_adjusted:
              amount_adjusted = min_amount_adjusted
              logging.warning(f"⚠️ {symbol}: 精度調整後の数量 ({amount_adjusted_str}) が最小ロット ({min_amount_adjusted:.8f}) を下回ったため、最小ロットを再採用しました。")
@@ -1275,15 +1281,15 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
             
             # 2. クールダウンタイマーをセット
-            # シグナルが拒否された場合、次のシグナルをすぐに再実行しないように、クールダウン時間を設定します。
+            # シグナルが拒否された場合、次のシグナルをすぐに再実行しないように、クールダウン時間 (TRADE_SIGNAL_COOLDOWN) を設定します。
             LAST_SIGNAL_TIME[symbol] = time.time()
             
             # 3. エラー情報を返却
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            # 💡 Patch 72でこのエラーの発生を大幅に抑えるロジックを実装済み
-            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted_str})"
+            # 💡 Patch 72/80でこのエラーの発生を大幅に抑えるロジックを実装済み
+            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.8f})"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
             
             # 💡 400エラーの場合も、無限ループを防ぐためクールダウンさせる
