@@ -1,14 +1,14 @@
 # ====================================================================================
-# Apex BOT v20.0.29 - Future Trading / 30x Leverage 
-# (Patch 75: 致命的エラー対応 - fetch_tickers None & KeyError SMA_200)
+# Apex BOT v20.0.30 - Future Trading / 30x Leverage 
+# (Patch 76: 致命的エラー対応 - KeyError MACDH & fetch_tickers NoneType)
 #
 # 改良・修正点:
-# 1. 【ロジック強化: Patch 74】apply_technical_analysis にて、SMA/MACD/OBV/ATRを用いた複合的な分析ロジックを実装。
-# 2. 【ロジック修正: Patch 74】calculate_signal_score にて、スコア詳細ブレークダウンの数値と最終スコアの合算を保証。
-# 3. 【致命的エラー修正: Patch 75-1】get_top_volume_symbols にて、ccxt.fetch_tickers() が None を返した場合の Null参照エラーを防止し、デフォルト銘柄で続行するロジックを実装。
-# 4. 【致命的エラー修正: Patch 75-2】apply_technical_analysis にて、SMA_200を先に計算することで KeyError: 'SMA_200' を修正。
-# 5. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、クールダウンさせるロジックを維持。
-# 6. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
+# 1. 【致命的エラー修正: Patch 76-1】apply_technical_analysis にて、MACD/OBV/BBands/ATRの計算後、
+#    **カラムの存在チェック**を追加し、計算失敗時の KeyError を防止するロバスト性を強化。
+# 2. 【致命的エラー修正: Patch 76-2】get_top_volume_symbols にて、**fetch_tickers()の呼び出し自体をtry-exceptでラップ**し、
+#    CCXT内部で発生する 'NoneType' object has no attribute 'keys' エラーを確実に捕捉し、クラッシュを防止。
+# 3. 【致命的エラー修正: Patch 75-1】fetch_tickers NoneTypeエラー対応ロジックをより強固な try-except で内包。
+# 4. 【致命的エラー修正: Patch 75-2】SMA_200計算の安定性向上ロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -63,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.29"            # 💡 BOTバージョンを更新 (修正適用)
+BOT_VERSION = "v20.0.30"            # 💡 BOTバージョンを更新 (修正適用)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -875,16 +875,26 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
     """
     取引所から出来高トップの先物銘柄を動的に取得し、基本リストに追加する
     
-    【修正: Patch 75-1】fetch_tickersの結果がNoneTypeの場合のチェックを追加し、クラッシュを防止する。
+    【修正: Patch 76-2】fetch_tickersの結果がNoneTypeの場合のチェックをより強固な try-except で内包する。
     """
     
     logging.info(f"🔄 出来高トップ {limit} 銘柄の動的取得を開始します...")
+    tickers = None
     
     try:
         # 1. 全ティッカー情報（価格、出来高など）を取得
-        tickers = await exchange.fetch_tickers()
+        # 💡 致命的エラー修正: CCXT内部で発生する AttributeError を捕捉するため、呼び出し自体をラップ
+        try:
+            tickers = await exchange.fetch_tickers()
+        except AttributeError as e:
+            # 'NoneType' object has no attribute 'keys' がCCXT内部で発生した場合をキャッチ
+            logging.error(f"❌ fetch_tickers() 実行中に致命的な AttributeError が発生しました (CCXT内部): {e}")
+            tickers = None
+        except Exception as e:
+            logging.error(f"❌ fetch_tickers() 実行中に予期せぬエラーが発生しました: {e}")
+            tickers = None
         
-        # 🚀 致命的エラー修正: NoneTypeチェックを追加 
+        # 🚀 取得結果の最終チェック
         if tickers is None or not isinstance(tickers, dict):
             # 取得失敗の場合、デフォルトリストを使用して続行し、警告をログする
             logging.warning("⚠️ fetch_tickers() が無効なデータ (Noneまたは非Dict型) を返しました。デフォルト銘柄リストを使用します。")
@@ -957,7 +967,7 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     テクニカル分析を行い、複合的なシグナルスコアの構成要素を計算する。
     - SMA/MACD/OBV/ATRを用いた本格的なロジックを実装 (Patch 74)
     
-    【FIX: KeyError対策】SMA_200をdf_mainに明示的に計算し、その後のロジックで利用可能にする。
+    【FIX: KeyError対策】MACD/OBV/BBands/ATRの計算後、カラムの存在チェックを行う。
     """
     
     # ----------------------------------------------------
@@ -1061,52 +1071,77 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
             tech_data['long_term_reversal_penalty_value'] = 0.0 # ペナルティなし
 
     # 3.2. モメンタム/MACDペナルティ (勢いのチェック)
-    # MACDはここで計算し、df_mainに追加される
     df_main.ta.macd(append=True)
-    macd = df_main['MACDH_12_26_9'].iloc[-1] # MACDヒストグラム (勢い)
-
-    if side == 'long':
-        if macd < 0: # ロングシグナルなのに勢いが下降中
-            tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
-        else:
-            tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
-    elif side == 'short':
-        if macd > 0: # ショートシグナルなのに勢いが上昇中
-            tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
-        else:
-            tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
+    macd_column = 'MACDH_12_26_9' # MACDヒストグラム (勢い)
+    
+    # 💡 致命的エラー修正: カラム存在チェック
+    if macd_column in df_main.columns:
+        macd = df_main[macd_column].iloc[-1]
+        
+        if side == 'long':
+            if macd < 0: # ロングシグナルなのに勢いが下降中
+                tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+            else:
+                tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
+        elif side == 'short':
+            if macd > 0: # ショートシグナルなのに勢いが上昇中
+                tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+            else:
+                tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
+    else:
+        # MACDの計算失敗 (KeyError対策)
+        tech_data['macd_penalty_value'] = 0.0
+        logging.warning(f"⚠️ {symbol} {main_tf}: MACD ({macd_column}) の計算に失敗しました。ペナルティをスキップします。")
         
     # 3.3. 出来高 (OBV) 確証ボーナス
-    # OBVはここで計算し、df_mainに追加される
     df_main.ta.obv(append=True)
-    obv_change = df_main['OBV'].iloc[-1] - df_main['OBV'].iloc[-14] # 14期間の変化
+    obv_column = 'OBV'
     
-    if (side == 'long' and obv_change > 0) or (side == 'short' and obv_change < 0):
-        tech_data['obv_momentum_bonus_value'] = OBV_MOMENTUM_BONUS
+    # 💡 致命的エラー修正: カラム存在チェック
+    if obv_column in df_main.columns and len(df_main[obv_column]) >= 14:
+        obv_change = df_main[obv_column].iloc[-1] - df_main[obv_column].iloc[-14] # 14期間の変化
+        
+        if (side == 'long' and obv_change > 0) or (side == 'short' and obv_change < 0):
+            tech_data['obv_momentum_bonus_value'] = OBV_MOMENTUM_BONUS
+        else:
+            tech_data['obv_momentum_bonus_value'] = 0.0
     else:
+        # OBVの計算失敗
         tech_data['obv_momentum_bonus_value'] = 0.0
+        logging.warning(f"⚠️ {symbol} {main_tf}: OBV の計算に失敗しました。ボーナスをスキップします。")
+
 
     # 3.4. ボラティリティ過熱ペナルティ (ボリンジャーバンド幅)
-    # BBandsはここで計算し、df_mainに追加される
     df_main.ta.bbands(append=True)
-    # 直近100期間のBB幅の平均を計算
-    mean_bb_width = (df_main['BBU_20_2.0'].iloc[-100:] - df_main['BBL_20_2.0'].iloc[-100:]).mean() / current_price 
-    current_bb_width = (df_main['BBU_20_2.0'].iloc[-1] - df_main['BBL_20_2.0'].iloc[-1]) / current_price
+    bb_upper_column = 'BBU_20_2.0'
+    bb_lower_column = 'BBL_20_2.0'
     
-    if current_bb_width > 2 * mean_bb_width:
-        tech_data['volatility_penalty_value'] = -0.05
+    # 💡 致命的エラー修正: カラム存在チェック
+    if bb_upper_column in df_main.columns and bb_lower_column in df_main.columns and len(df_main) >= 100:
+        # 直近100期間のBB幅の平均を計算
+        mean_bb_width = (df_main[bb_upper_column].iloc[-100:] - df_main[bb_lower_column].iloc[-100:]).mean() / current_price 
+        current_bb_width = (df_main[bb_upper_column].iloc[-1] - df_main[bb_lower_column].iloc[-1]) / current_price
+        
+        if current_bb_width > 2 * mean_bb_width:
+            tech_data['volatility_penalty_value'] = -0.05
+        else:
+            tech_data['volatility_penalty_value'] = 0.0
     else:
         tech_data['volatility_penalty_value'] = 0.0
+        logging.warning(f"⚠️ {symbol} {main_tf}: BBands の計算に失敗しました。ペナルティをスキップします。")
 
-    # ----------------------------------------------------
-    # 4. SL/TPと固定ボーナスの計算
-    # ----------------------------------------------------
-    
+
     # 4.1. 動的ATR SL/TP幅の計算 (1hベース)
-    # ATRはここで計算し、df_mainに追加される
     df_main.ta.atr(length=ATR_LENGTH, append=True)
-    atr_value = df_main['ATR_14'].iloc[-1]
+    atr_column = 'ATR_14'
     
+    # 💡 致命的エラー修正: カラム存在チェック
+    if atr_column in df_main.columns:
+        atr_value = df_main[atr_column].iloc[-1]
+    else:
+        atr_value = 0.0
+        logging.warning(f"⚠️ {symbol} {main_tf}: ATR の計算に失敗しました。最小SL幅を使用します。")
+
     # SL幅 (価格差) をATRの倍率に基づいて決定
     sl_price_diff = atr_value * ATR_MULTIPLIER_SL 
     
