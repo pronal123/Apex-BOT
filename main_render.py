@@ -1,12 +1,6 @@
 # ====================================================================================
 # Apex BOT v20.0.37 - Future Trading / 30x Leverage 
 # (Patch 81 & 80 & 73 & CRITICAL LOG FIX: トップシグナルログ追加)
-#
-# 改良・修正点:
-# 1. 【バージョン更新】BOTバージョンを v20.0.37 に更新。
-# 2. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
-#    その銘柄の取引を一時的にクールダウンさせるロジックを維持。
-# 3. 【ログ機能追加】main_bot_loop にて、取引閾値を超えなくても、その時点の**トップシグナルとそのスコア**をログに出力。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -62,7 +56,7 @@ DEFAULT_SYMBOLS = [
     "ZEC/USDT", "PUMP/USDT", "PEPE/USDT", "FARTCOIN/USDT", "WORLD/USDT",
     "WLFI/USDT", "PENGU/USDT", "ONDO/USDT", "HBAR/USDT", "TRUMP/USDT",
     "SHIB/USDT", "XPL/USDT", "HYPE/USDT", "LINK/USDT", "ZEC/USDT",
-    "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT",
+    "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
 BOT_VERSION = "v20.0.37"            # 💡 BOTバージョンを更新 
@@ -148,7 +142,7 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.84       
+SIGNAL_THRESHOLD_SLUMP = 0.85       
 SIGNAL_THRESHOLD_NORMAL = 0.80      
 SIGNAL_THRESHOLD_ACTIVE = 0.75      
 
@@ -1567,7 +1561,7 @@ app = FastAPI(title="Apex BOT API")
 
 @app.get("/status", include_in_schema=False)
 async def read_root():
-    """ヘルスチェック用のルート"""
+    """ヘルスチェック用のルート (GETメソッドのみ許可)"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     if IS_CLIENT_READY and IS_FIRST_MAIN_LOOP_COMPLETED:
