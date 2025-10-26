@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v20.0.27 - Future Trading / 30x Leverage 
-# (Patch 73: MEXC 30005 Liquidity/Oversold Error Cooldown & Robust Lot Size)
+# Apex BOT v20.0.28 - Future Trading / 30x Leverage 
+# (Patch 74: スコア計算ロジック修正 & 本格的テクニカル分析実装)
 #
 # 改良・修正点:
-# 1. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
-#    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するようにロジックを強化。
-# 2. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
-# 3. 【機能改良】get_top_volume_symbols にて、出来高トップ40銘柄を動的に取得するロジックを維持。
-# 4. 【バージョン更新】BOTバージョンを v20.0.26 に維持。
+# 1. 【ロジック強化: Patch 74】apply_technical_analysis にて、SMA/MACD/OBV/ATRを用いた複合的な分析ロジックを実装。
+# 2. 【ロジック修正: Patch 74】calculate_signal_score にて、スコア詳細ブレークダウンの数値と最終スコアの合算を保証。
+# 3. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、クールダウンさせるロジックを維持。
+# 4. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -62,7 +61,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.27"            # 💡 BOTバージョン
+BOT_VERSION = "v20.0.28"            # 💡 BOTバージョンを更新
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -232,6 +231,7 @@ def get_score_breakdown(signal: Dict) -> str:
     timeframe = signal.get('timeframe', 'N/A')
     side = signal.get('side', 'long') 
     
+    # スコア計算に使用された定数 (この関数で表示される値)
     LONG_TERM_REVERSAL_PENALTY_CONST = LONG_TERM_REVERSAL_PENALTY 
     MACD_CROSS_PENALTY_CONST = MACD_CROSS_PENALTY                 
     LIQUIDITY_BONUS_POINT_CONST = LIQUIDITY_BONUS_MAX           
@@ -248,12 +248,14 @@ def get_score_breakdown(signal: Dict) -> str:
         if penalty_value > 0.0:
             breakdown_list.append(f"  - ❌ 長期トレンド逆行 (SMA{LONG_TERM_SMA_LENGTH}): <code>-{penalty_value*100:.1f}</code> 点")
         else:
+            # 💡 トレンド一致ボーナス (ペナルティ回避) の表示値は定数を使用
             breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}): <code>+{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点 (ペナルティ回避)")
     else: # Short
         if penalty_value > 0.0:
-            breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}下): <code>+{penalty_value*100:.1f}</code> 点 (ロングペナルティ回避)")
+            breakdown_list.append(f"  - ❌ 長期トレンド逆行 (SMA{LONG_TERM_SMA_LENGTH}): <code>-{penalty_value*100:.1f}</code> 点")
         else:
-            breakdown_list.append(f"  - ❌ 長期トレンド不利: <code>-{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点相当")
+            # 💡 トレンド一致ボーナス (ペナルティ回避) の表示値は定数を使用
+            breakdown_list.append(f"  - ✅ 長期トレンド一致 (SMA{LONG_TERM_SMA_LENGTH}下): <code>+{LONG_TERM_REVERSAL_PENALTY_CONST*100:.1f}</code> 点 (ペナルティ回避)")
 
     pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
     if pivot_bonus > 0.0:
@@ -261,12 +263,12 @@ def get_score_breakdown(signal: Dict) -> str:
 
     # 3. モメンタム/出来高の確認
     macd_penalty_applied = tech_data.get('macd_penalty_value', 0.0)
-    total_momentum_penalty = macd_penalty_applied
-
-    if total_momentum_penalty > 0.0:
-        breakdown_list.append(f"  - ❌ モメンタム/クロス不利: <code>-{total_momentum_penalty*100:.1f}</code> 点")
+    
+    if macd_penalty_applied > 0.0:
+        breakdown_list.append(f"  - ❌ モメンタム/MACD逆行: <code>-{macd_penalty_applied*100:.1f}</code> 点")
     else:
-        breakdown_list.append(f"  - ✅ MACD/RSIモメンタム加速: <code>+{MACD_CROSS_PENALTY_CONST*100:.1f}</code> 点相当 (ペナルティ回避)")
+        # 💡 MACDモメンタム加速ボーナス (ペナルティ回避) の表示値は定数を使用
+        breakdown_list.append(f"  - ✅ MACDモメンタム加速: <code>+{MACD_CROSS_PENALTY_CONST*100:.1f}</code> 点相当 (ペナルティ回避)")
 
     obv_bonus = tech_data.get('obv_momentum_bonus_value', 0.0)
     if obv_bonus > 0.0:
@@ -278,13 +280,16 @@ def get_score_breakdown(signal: Dict) -> str:
         breakdown_list.append(f"  - ✅ 流動性 (板の厚み) 優位: <code>+{LIQUIDITY_BONUS_POINT_CONST*100:.1f}</code> 点")
         
     fgi_bonus = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
+    
+    # FGIのスコア加算/減算は、計算された値を使用
     if abs(fgi_bonus) > 0.001:
-        sign = '✅' if fgi_bonus > 0 else '❌'
         is_fgi_favorable = (side == 'long' and fgi_bonus > 0) or (side == 'short' and fgi_bonus < 0)
+        sign = '✅' if is_fgi_favorable else '❌' # 最終スコアに加算/減算された結果を表示
         
-        breakdown_list.append(f"  - {sign} FGIマクロ影響 ({side.upper()}方向): <code>{'+' if fgi_bonus > 0 else ''}{fgi_bonus*100:.1f}</code> 点")
+        breakdown_list.append(f"  - {sign} FGIマクロ影響 ({side.upper()}方向): <code>{'+' if is_fgi_favorable else '-'}{abs(fgi_bonus)*100:.1f}</code> 点")
 
     forex_bonus = tech_data.get('forex_bonus', 0.0) 
+    # 機能削除済みのボーナスだが、合算に影響するため表示を維持
     breakdown_list.append(f"  - ⚪ 為替マクロ影響: <code>{forex_bonus*100:.1f}</code> 点 (機能削除済)")
     
     volatility_penalty = tech_data.get('volatility_penalty_value', 0.0)
@@ -942,42 +947,252 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[
         return None
 
 def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dict:
-    """テクニカル分析を行い、複合的なシグナルスコアを計算する (簡易的なダミーロジック)"""
+    """
+    テクニカル分析を行い、複合的なシグナルスコアの構成要素を計算する。
+    - SMA/MACD/OBV/ATRを用いた本格的なロジックを実装 (Patch 74)
+    """
     
-    # プレースホルダーとしてランダムなシグナルを生成
-    score = random.uniform(0.5, 0.95)
-    side = 'long' if random.random() > 0.5 else 'short'
-    sl_ratio = MIN_RISK_PERCENT # 0.8%
-    tp_ratio = sl_ratio * random.uniform(2.0, 3.0) # RR 2.0-3.0
+    # ----------------------------------------------------
+    # 1. 総合評価の初期設定と価格情報
+    # ----------------------------------------------------
+    
+    # 分析に最も重要な時間足を決定 (例: 1h)
+    main_tf = '1h'
+    if main_tf not in ohlcv:
+        logging.warning(f"⚠️ {symbol}: 主要時間足 {main_tf} のデータが不足しています。分析をスキップします。")
+        # 最小限の結果を返すことで、calculate_signal_scoreでのエラーを防ぐ
+        return {
+            'signal_timeframe': main_tf, 
+            'side': 'neutral', 
+            'sl_ratio': MIN_RISK_PERCENT, 
+            'tp_ratio': MIN_RISK_PERCENT * 2.5,
+            'rr_ratio': 2.5, 
+            'tech_data': {}
+        }
+
+    # 基準時間足のデータ
+    df_main = ohlcv[main_tf].copy()
+    current_price = df_main['close'].iloc[-1]
+    
+    # ----------------------------------------------------
+    # 2. シグナル方向の決定とスコア要因の計算
+    # ----------------------------------------------------
+    
+    # 各時間足のシグナル方向 (1: Long, -1: Short, 0: Neutral) を計算
+    # 💡 複合トレンドスコア: SMA50とSMA200の方向で主要トレンドを判定
+    # 1m/5m/15m/1h/4h のうち3つ以上が同じ方向なら、その方向を主要シグナルとする
+    
+    signal_counts = {'long': 0, 'short': 0}
+    
+    for tf, df in ohlcv.items():
+        if len(df) < 200: continue # SMA200の計算に必要な最小データ数
+        
+        # SMA: 50, 200の計算
+        df['SMA_50'] = ta.sma(df['close'], length=50)
+        df['SMA_200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH) 
+        
+        if df['SMA_50'].iloc[-1] > df['SMA_200'].iloc[-1]:
+            # 短期線が長期線の上にある (ゴールデンクロス/上昇トレンド)
+            signal_counts['long'] += 1
+        elif df['SMA_50'].iloc[-1] < df['SMA_200'].iloc[-1]:
+            # 短期線が長期線の下にある (デッドクロス/下降トレンド)
+            signal_counts['short'] += 1
+            
+    # 主要シグナル方向の決定 (3票以上の多数決)
+    if signal_counts['long'] >= 3:
+        side = 'long'
+    elif signal_counts['short'] >= 3:
+        side = 'short'
+    else:
+        # 強力な方向性がない場合は取引しない
+        return {
+            'signal_timeframe': main_tf, 
+            'side': 'neutral', 
+            'sl_ratio': MIN_RISK_PERCENT, 
+            'tp_ratio': MIN_RISK_PERCENT * 2.5,
+            'rr_ratio': 2.5, 
+            'tech_data': {}
+        }
+        
+    # ----------------------------------------------------
+    # 3. テクニカル要因の点数化 (df_main=1h を中心に評価)
+    # ----------------------------------------------------
+    
+    tech_data = {}
+    
+    # 3.1. 長期トレンド逆行ペナルティ (SMA200)
+    # 💡 SMA200との乖離率をペナルティの度合いに反映
+    #   - 例: Longシグナルなのに価格がSMA200を大きく下回っている場合
+    sma_200 = df_main['SMA_200'].iloc[-1]
+    price_to_sma_ratio = (current_price - sma_200) / sma_200
+
+    if side == 'long':
+        if price_to_sma_ratio < -0.01: # 価格がSMA200より1%以上下
+            tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
+        else:
+            tech_data['long_term_reversal_penalty_value'] = 0.0 # ペナルティなし
+    elif side == 'short':
+        if price_to_sma_ratio > 0.01: # 価格がSMA200より1%以上上
+            tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY
+        else:
+            tech_data['long_term_reversal_penalty_value'] = 0.0 # ペナルティなし
+
+    # 3.2. モメンタム/MACDペナルティ (勢いのチェック)
+    # 💡 MACDのSignalラインとのクロスで判定
+    df_main.ta.macd(append=True)
+    macd = df_main['MACDH_12_26_9'].iloc[-1] # MACDヒストグラム (勢い)
+
+    if side == 'long':
+        if macd < 0: # ロングシグナルなのに勢いが下降中
+            tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+        else:
+            tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
+    elif side == 'short':
+        if macd > 0: # ショートシグナルなのに勢いが上昇中
+            tech_data['macd_penalty_value'] = MACD_CROSS_PENALTY
+        else:
+            tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
+        
+    # 3.3. 出来高 (OBV) 確証ボーナス
+    # 💡 OBVがシグナル方向に上昇/下降しているか
+    df_main.ta.obv(append=True)
+    obv_change = df_main['OBV'].iloc[-1] - df_main['OBV'].iloc[-14] # 14期間の変化
+    
+    if (side == 'long' and obv_change > 0) or (side == 'short' and obv_change < 0):
+        tech_data['obv_momentum_bonus_value'] = OBV_MOMENTUM_BONUS
+    else:
+        tech_data['obv_momentum_bonus_value'] = 0.0
+
+    # 3.4. ボラティリティ過熱ペナルティ (ボリンジャーバンド幅)
+    # 💡 BB幅が平均的な幅の2倍を超えていたら過熱とみなしペナルティ
+    df_main.ta.bbands(append=True)
+    # 直近100期間のBB幅の平均を計算
+    mean_bb_width = (df_main['BBU_20_2.0'].iloc[-100:] - df_main['BBL_20_2.0'].iloc[-100:]).mean() / current_price 
+    current_bb_width = (df_main['BBU_20_2.0'].iloc[-1] - df_main['BBL_20_2.0'].iloc[-1]) / current_price
+    
+    if current_bb_width > 2 * mean_bb_width:
+        tech_data['volatility_penalty_value'] = -0.05
+    else:
+        tech_data['volatility_penalty_value'] = 0.0
+
+    # ----------------------------------------------------
+    # 4. SL/TPと固定ボーナスの計算
+    # ----------------------------------------------------
+    
+    # 4.1. 動的ATR SL/TP幅の計算 (1hベース)
+    df_main.ta.atr(length=ATR_LENGTH, append=True)
+    atr_value = df_main['ATR_14'].iloc[-1]
+    
+    # SL幅 (価格差) をATRの倍率に基づいて決定
+    sl_price_diff = atr_value * ATR_MULTIPLIER_SL 
+    
+    # SL幅の最小パーセンテージ保証
+    min_sl_price_diff = current_price * MIN_RISK_PERCENT
+    sl_price_diff = max(sl_price_diff, min_sl_price_diff)
+    
+    sl_ratio = sl_price_diff / current_price
+    tp_ratio = sl_ratio * random.uniform(2.0, 3.0) # RR 2.0-3.0の範囲で決定
     rr_ratio = tp_ratio / sl_ratio
     
+    # 4.2. 固定ボーナスとマクロ要因のセット
+    tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS # 固定ボーナスとして加算
+    tech_data['liquidity_bonus_value'] = LIQUIDITY_BONUS_MAX # 流動性ボーナス（ここではダミー）
+    tech_data['sentiment_fgi_proxy_bonus'] = GLOBAL_MACRO_CONTEXT.get('fgi_proxy', 0.0) * FGI_PROXY_BONUS_MAX
+    tech_data['forex_bonus'] = GLOBAL_MACRO_CONTEXT.get('forex_bonus', 0.0)
+    
+    # ----------------------------------------------------
+    # 5. 最終結果の返却
+    # ----------------------------------------------------
     return {
-        'final_score': score, 
-        'signal_timeframe': random.choice(['1m', '5m', '1h']), 
+        'signal_timeframe': main_tf, 
         'side': side, 
         'sl_ratio': sl_ratio, 
         'tp_ratio': tp_ratio, 
         'rr_ratio': rr_ratio, 
-        'tech_data': {
-            'long_term_reversal_penalty_value': 0.0 if random.random() > 0.5 else LONG_TERM_REVERSAL_PENALTY,
-            'structural_pivot_bonus': STRUCTURAL_PIVOT_BONUS,
-            'macd_penalty_value': 0.0,
-            'obv_momentum_bonus_value': OBV_MOMENTUM_BONUS,
-            'liquidity_bonus_value': LIQUIDITY_BONUS_MAX,
-            'sentiment_fgi_proxy_bonus': GLOBAL_MACRO_CONTEXT.get('fgi_proxy', 0.0) * FGI_PROXY_BONUS_MAX,
-            'forex_bonus': GLOBAL_MACRO_CONTEXT.get('forex_bonus', 0.0),
-            'volatility_penalty_value': 0.0
-        }
+        'tech_data': tech_data
     }
 
 def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict) -> Dict:
-    """最終的なシグナルスコア、SL/TP値を決定する (ロジックはapply_technical_analysisのダミーデータに依存)"""
-    return tech_signals
+    """
+    最終的なシグナルスコア、SL/TP値を決定する。
+    - tech_signals の値を合算し、最終スコアを計算する。 (Patch 74 FIX)
+    """
+    
+    # ベーススコアから開始
+    final_score = BASE_SCORE # 0.40
+
+    tech_data = tech_signals.get('tech_data', {})
+    side = tech_signals['side']
+    
+    # --- 1. 長期トレンド/構造の確認 ---
+    
+    # 長期トレンド逆行ペナルティ
+    penalty_value = tech_data.get('long_term_reversal_penalty_value', 0.0)
+    if penalty_value > 0.0:
+        # ペナルティが適用された場合、スコアから減点
+        final_score -= penalty_value
+    else:
+        # ペナルティが適用されなかった場合、長期トレンド一致ボーナス (ペナルティ値と同じ定数を使う)
+        final_score += LONG_TERM_REVERSAL_PENALTY 
+        
+    # 価格構造/ピボット支持ボーナス
+    final_score += tech_data.get('structural_pivot_bonus', 0.0)
+
+    # --- 2. モメンタム/出来高の確認 ---
+    
+    # MACDクロス/モメンタムペナルティ
+    macd_penalty_applied = tech_data.get('macd_penalty_value', 0.0)
+    if macd_penalty_applied > 0.0:
+        # ペナルティが適用された場合、スコアから減点
+        final_score -= macd_penalty_applied
+    else:
+        # ペナルティが適用されなかった場合、モメンタム加速ボーナス (ペナルティ値と同じ定数を使う)
+        final_score += MACD_CROSS_PENALTY 
+        
+    # 出来高/OBV確証ボーナス
+    final_score += tech_data.get('obv_momentum_bonus_value', 0.0)
+    
+    # --- 3. 流動性/マクロ要因 ---
+    
+    # 流動性ボーナス
+    final_score += tech_data.get('liquidity_bonus_value', 0.0)
+    
+    # FGIマクロ影響ボーナス/ペナルティ
+    sentiment_fgi_proxy_bonus = tech_data.get('sentiment_fgi_proxy_bonus', 0.0)
+    
+    # FGIの影響がシグナル方向に有利な場合のみ加算 (例: ロングシグナルでFGIがプラス)
+    is_fgi_favorable = (side == 'long' and sentiment_fgi_proxy_bonus > 0) or \
+                       (side == 'short' and sentiment_fgi_proxy_bonus < 0)
+    
+    if is_fgi_favorable:
+        final_score += abs(sentiment_fgi_proxy_bonus)
+    else:
+        # 不利な場合はペナルティとして減点
+        final_score -= abs(sentiment_fgi_proxy_bonus)
+        
+    # 為替マクロ影響（機能削除済みのボーナス/ペナルティ）
+    final_score += tech_data.get('forex_bonus', 0.0) 
+    
+    # ボラティリティ過熱ペナルティ
+    final_score += tech_data.get('volatility_penalty_value', 0.0)
+
+    # スコアは0.0から1.0の間に収める
+    final_score = max(0.0, min(1.0, final_score))
+
+    # 最終結果を構成
+    result = tech_signals.copy()
+    result['final_score'] = final_score
+    
+    # 既存のロジックが使用できるようにキー名を合わせる
+    result['score'] = final_score 
+    result['timeframe'] = tech_signals['signal_timeframe'] 
+    
+    return result
 
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     """
     取引実行ロジック。
-    ロットサイズ計算を強化し、取引所の精度で最小ロットを保証する。
+    ロットサイズ計算を強化し、取引所の精度で最小ロットを保証する。 (Patch 72 & 73対応)
     """
     global LAST_SIGNAL_TIME
     
@@ -985,8 +1200,12 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         # TEST_MODEでは、計算結果のみを返す
         max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
         sl_ratio = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price']
-        notional_value_usdt_calculated = max_risk_usdt / sl_ratio
         
+        if sl_ratio <= 0:
+            notional_value_usdt_calculated = 0.0
+        else:
+            notional_value_usdt_calculated = max_risk_usdt / sl_ratio
+            
         return {'status': 'skip', 'error_message': 'TEST_MODE is ON', 'filled_usdt': notional_value_usdt_calculated}
     
     if not ACCOUNT_EQUITY_USDT or ACCOUNT_EQUITY_USDT <= 0:
@@ -1147,6 +1366,7 @@ async def main_bot_loop():
         logging.info(f"📊 動的取引閾値: {current_threshold * 100:.2f} / 100")
         
         all_signals: List[Dict] = []
+        eligible_signals: List[Dict] = [] # ループ外でも使用できるように定義
         
         # 3. 監視銘柄ごとの分析
         for symbol in CURRENT_MONITOR_SYMBOLS:
@@ -1171,16 +1391,18 @@ async def main_bot_loop():
             if not ohlcv_data:
                 continue
 
-            # 3.2. テクニカルシグナル計算 (ダミーを使用)
+            # 3.2. テクニカルシグナル計算 (本格ロジック)
             tech_signals = apply_technical_analysis(symbol, ohlcv_data)
             
+            if tech_signals.get('side') == 'neutral':
+                continue # 強力なシグナル方向なし
+
             # 3.3. 最終シグナルスコアとSL/TP計算
             signal = calculate_signal_score(symbol, tech_signals, GLOBAL_MACRO_CONTEXT)
             
             # 必須情報の追加
             signal['symbol'] = symbol
             signal['score'] = signal.pop('final_score')
-            signal['timeframe'] = signal.pop('signal_timeframe')
             
             all_signals.append(signal)
 
@@ -1195,14 +1417,14 @@ async def main_bot_loop():
             # TOP_SIGNAL_COUNT (現在は1) のシグナルのみを処理
             for signal in eligible_signals[:TOP_SIGNAL_COUNT]:
                 
-                # 4.1. SL/TP/清算価格の計算
+                # 4.1. SL/TP/清算価格の計算 (既に apply_technical_analysis で計算されているが、念のため価格を再取得)
                 ticker = await EXCHANGE_CLIENT.fetch_ticker(signal['symbol'])
                 current_price = ticker['last']
                 side = signal['side']
                 
                 signal['entry_price'] = current_price
                 
-                # SL/TP価格の決定
+                # SL/TP価格の再計算 (最新の価格に基づいて再調整)
                 sl_price = current_price * (1 - signal['sl_ratio'] if side == 'long' else 1 + signal['sl_ratio'])
                 tp_price = current_price * (1 + signal['tp_ratio'] if side == 'long' else 1 - signal['tp_ratio'])
                 
