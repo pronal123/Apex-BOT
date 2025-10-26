@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.37 - Future Trading / 30x Leverage 
-# (Patch 81 & 80 & 73 & CRITICAL LOG FIX: トップシグナルログ追加)
+# Apex BOT v20.0.38 - Future Trading / 30x Leverage 
+# (Feature: 最低取引ロット 20 USDT 保証)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.37"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.38"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -81,7 +81,7 @@ LEVERAGE = 30 # 取引倍率
 TRADE_TYPE = 'future' # 取引タイプ
 MIN_MAINTENANCE_MARGIN_RATE = 0.005 # 最低維持証拠金率 (例: 0.5%) - 清算価格計算に使用
 
-# 💡 レートリミット対策用定数 (Patch 68で導入)
+# 💡 レートリミット対策用定数
 LEVERAGE_SETTING_DELAY = 1.0 # レバレッジ設定時のAPIレートリミット対策用遅延 (秒)
 
 # 💡 リスクベースの動的ポジションサイジング設定 
@@ -91,6 +91,9 @@ except ValueError:
     BASE_TRADE_SIZE_USDT = 100.0
     
 MAX_RISK_PER_TRADE_PERCENT = float(os.getenv("MAX_RISK_PER_TRADE_PERCENT", "0.01")) # 最大リスク: 総資産の1%
+
+# 💡 新規導入: 最小名目取引額 (USDT) - 計算ロットがこれを下回っても、最低この金額で取引を試行する
+MIN_NOTIONAL_USDT = 20.0 
 
 # 💡 WEBSHARE設定 
 WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") 
@@ -249,7 +252,7 @@ def format_startup_message(account_status: Dict, macro_context: Dict, monitoring
         f"  - **確認日時**: {now_jst} (JST)\n"
         f"  - **取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code> (先物モード / **{LEVERAGE}x**)\n" 
         f"  - **自動売買**: <b>{trade_status}</b>\n"
-        f"  - **取引ロット**: **リスクベースサイジング**\n" 
+        f"  - **取引ロット**: **リスクベース + 最低** <code>{MIN_NOTIONAL_USDT}</code> **USDT保証**\n" 
         f"  - **最大リスク/取引**: <code>{MAX_RISK_PER_TRADE_PERCENT*100:.2f}</code> %\n" 
         f"  - **監視銘柄数**: <code>{monitoring_count}</code>\n"
         f"  - **BOTバージョン**: <code>{bot_version}</code>\n"
@@ -324,8 +327,8 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     reward_width = abs(take_profit - entry_price)
 
     if context == "取引シグナル":
-        lot_size_units = signal.get('lot_size_units', 0.0) # 数量 (単位)
-        notional_value = signal.get('notional_value', 0.0) # 名目価値
+        # lot_size_units = signal.get('lot_size_units', 0.0) # 数量 (単位)
+        notional_value = trade_result.get('filled_usdt', 0.0) # 実際に約定した名目価値
         
         trade_type_text = "先物ロング" if side == 'long' else "先物ショート"
         order_type_text = "成行買い" if side == 'long' else "成行売り"
@@ -1147,17 +1150,21 @@ def calculate_signal_score(symbol: str, tech_signals: Dict, macro_context: Dict)
 async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     """
     取引実行ロジック。
-    ロットサイズ計算を強化し、取引所の精度で最小ロットを保証する。
+    ロットサイズ計算を強化し、最低取引額 (MIN_NOTIONAL_USDT) を保証する。
     """
     global LAST_SIGNAL_TIME
-    
+    global MIN_NOTIONAL_USDT # 新しい定数を参照できるように
+
     if TEST_MODE:
         # TEST_MODEでは、計算結果のみを返す
         max_risk_usdt = ACCOUNT_EQUITY_USDT * MAX_RISK_PER_TRADE_PERCENT
         sl_ratio = abs(signal['entry_price'] - signal['stop_loss']) / signal['entry_price']
         notional_value_usdt_calculated = max_risk_usdt / sl_ratio
         
-        return {'status': 'skip', 'error_message': 'TEST_MODE is ON', 'filled_usdt': notional_value_usdt_calculated}
+        # 💡 TEST_MODEでもMIN_NOTIONAL_USDTの保証を適用
+        final_notional_value_usdt = max(notional_value_usdt_calculated, MIN_NOTIONAL_USDT)
+        
+        return {'status': 'skip', 'error_message': 'TEST_MODE is ON', 'filled_usdt': final_notional_value_usdt}
     
     if not ACCOUNT_EQUITY_USDT or ACCOUNT_EQUITY_USDT <= 0:
         return {'status': 'error', 'error_message': 'Account equity is zero or not fetched.'}
@@ -1176,41 +1183,43 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         
     sl_ratio = abs(entry_price - stop_loss) / entry_price
     notional_value_usdt_calculated = max_risk_usdt / sl_ratio
-    lot_size_units_calculated = notional_value_usdt_calculated / entry_price 
+    
+    # 2. 💡 【改良ロジック】名目価値 (Notional Value) の決定
+    # 計算ロットと最小固定ロット (20 USDT) を比較し、大きい方を採用する
+    final_notional_value_usdt = max(notional_value_usdt_calculated, MIN_NOTIONAL_USDT)
+    
+    # 3. 単位数量 (Lot Size Units) の計算
+    lot_size_units_calculated = final_notional_value_usdt / entry_price 
 
-    # 2. 💡 Patch 72 FIX: 最小取引ロットの精度チェックを強化
+    # 4. 最小取引ロットの精度チェックを強化
     market_info = EXCHANGE_CLIENT.markets[symbol]
     min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
 
-    # 最小取引サイズを、取引所の精度（ステップサイズ）で調整し、「実際に取引可能な最小ロット」を特定する。
     try:
-        # ⚠️ WARN: MEXCはここでエラーを出すことがあるため、try-exceptで捕捉し、raw値で続行する
         min_amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, min_amount_raw)
         min_amount_adjusted = float(min_amount_adjusted_str)
     except Exception as e:
-        # ログに記録されたエラー「mexc amount of SAND/USDT must be greater than minimum amount precision of 0.01. raw:0.00010000」に対応
         logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}. raw:{min_amount_raw:.8f}", exc_info=False)
-        # 精度調整に失敗した場合、CCXTが取得した最小ロット値をそのまま使用する（リスクあり）
         min_amount_adjusted = min_amount_raw
 
-    # 万一、precision adjustmentで0になった場合の最終防衛
     if min_amount_adjusted <= 0.0:
         logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
         return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
 
-    # 3. 最終的に使用するロットサイズを決定
+    # 5. 最終的に使用するロットサイズを決定
     
-    # 💥 FIX (Patch 80): 最小ロットと同値でのエラー回避のため、計算ロットが最小ロットを下回る場合は、
-    # 最小ロット * わずかに大きな値 (1.00001) を使用し、'greater than' の条件を満たすようにする。
+    # 計算ロットが最小ロットを下回る場合、最小ロット * わずかに大きな値 (1.00001) を使用
     if lot_size_units_calculated < min_amount_adjusted:
-         lot_size_units = min_amount_adjusted * 1.00001 # わずかに増やす
-         logging.warning(f"⚠️ {symbol}: 計算ロット ({lot_size_units_calculated:.8f}) が最小ロット ({min_amount_adjusted:.8f}) を下回ったため、最小ロットをわずかに超える値を使用します。")
+         # 💡 このブロックは、final_notional_value_usdt が MIN_NOTIONAL_USDT に設定されたとしても、
+         # その結果計算された lot_size_units_calculated が min_amount_adjusted を下回る場合に発火します。
+         lot_size_units = min_amount_adjusted * 1.00001 
+         logging.warning(f"⚠️ {symbol}: ロットサイズが取引所の最小ロット ({min_amount_adjusted:.8f}) を下回るため、最小ロットをわずかに超える値を使用します。 (名目: {format_usdt(final_notional_value_usdt)} USDT)")
     else:
          lot_size_units = lot_size_units_calculated
          
-    notional_value_usdt = lot_size_units * entry_price # 概算の名目価値
+    # notional_value_usdt = lot_size_units * entry_price # 概算の名目価値 (今回は final_notional_value_usdt を使用)
 
-    # 4. 注文の実行
+    # 6. 注文の実行
     try:
         side_ccxt = 'buy' if side == 'long' else 'sell'
         
@@ -1219,16 +1228,18 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         amount_adjusted = float(amount_adjusted_str)
         
         # ログ強化: 注文を出す直前の最終ロットサイズと最小ロットを記録
-        logging.info(f"✅ {symbol}: 最終ロットサイズ {amount_adjusted:.8f} (最小ロット: {min_amount_adjusted:.8f} / 計算ベース: {lot_size_units_calculated:.8f})")
+        logging.info(
+            f"✅ {symbol}: 最終ロットサイズ {amount_adjusted:.8f} (最小ロット: {min_amount_adjusted:.8f}). "
+            f"名目価値: {format_usdt(final_notional_value_usdt)} USDT. "
+            f"計算リスク: {sl_ratio*100:.2f}%."
+        )
         
-        # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合、強制的に最小ロットに戻す
-        # 💥 Patch 80で *1.00001 を使用しているため、ここでは比較のみで十分（理論上は不要だが安全策として残す）
-        if amount_adjusted < min_amount_adjusted:
-             amount_adjusted = min_amount_adjusted
+        # 最終チェック: 精度調整の結果、最小取引ロットを下回った場合
+        if amount_adjusted < min_amount_adjusted and amount_adjusted > 0:
+             amount_adjusted = min_amount_adjusted * 1.00001 # 最小ロットをわずかに超える値で再度上書き
              logging.warning(f"⚠️ {symbol}: 精度調整後の数量 ({amount_adjusted_str}) が最小ロット ({min_amount_adjusted:.8f}) を下回ったため、最小ロットを再採用しました。")
         
         if amount_adjusted <= 0.0:
-             # このエラーはamount_to_precision後のamount_adjustedが0以下になった場合に発生
              logging.error(f"❌ {symbol} 注文実行エラー: amount_to_precision後の数量 ({amount_adjusted:.8f}) が0以下になりました。")
              return {'status': 'error', 'error_message': 'Amount rounded down to zero by precision adjustment.'}
         
@@ -1241,13 +1252,13 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
             params={}
         )
 
-        # 5. ポジション情報を更新
+        # 7. ポジション情報を更新
         new_position = {
             'symbol': symbol,
             'side': side,
             'entry_price': order['price'] if order['price'] else entry_price, 
             'contracts': amount_adjusted if side == 'long' else -amount_adjusted,
-            'filled_usdt': notional_value_usdt, 
+            'filled_usdt': final_notional_value_usdt, # 最終的に使用した名目価値
             'timestamp': time.time() * 1000,
             'stop_loss': stop_loss,
             'take_profit': signal['take_profit'],
@@ -1260,7 +1271,7 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
         return {
             'status': 'ok',
             'filled_amount': amount_adjusted,
-            'filled_usdt': notional_value_usdt,
+            'filled_usdt': final_notional_value_usdt,
             'entry_price': new_position['entry_price'],
             'stop_loss': stop_loss,
             'take_profit': signal['take_profit'],
@@ -1270,28 +1281,16 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     except ccxt.ExchangeError as e:
         error_message = e.args[0]
         
-        # 💡 【Patch 73】MEXC: 流動性不足/Oversold (30005) のエラー処理を強化
         if 'code":30005' in error_message or 'Oversold' in error_message:
-            
-            # 1. ログ記録
             detail_msg = "MEXC: 流動性不足/Oversold (30005) により注文が拒否されました。この銘柄の取引を一時的にクールダウンさせます。"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg}")
-            
-            # 2. クールダウンタイマーをセット
-            # シグナルが拒否された場合、次のシグナルをすぐに再実行しないように、クールダウン時間 (TRADE_SIGNAL_COOLDOWN) を設定します。
             LAST_SIGNAL_TIME[symbol] = time.time()
-            
-            # 3. エラー情報を返却
             return {'status': 'error', 'error_message': detail_msg}
 
         elif 'Amount can not be less than zero' in error_message or 'code":400' in error_message:
-            # 💡 Patch 72/80でこのエラーの発生を大幅に抑えるロジックを実装済み
-            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.8f})"
+            detail_msg = f"MEXC: ロットサイズがゼロまたは小さすぎます (400)。(最終数量: {amount_adjusted:.8f} / 名目: {format_usdt(final_notional_value_usdt)} USDT)"
             logging.error(f"❌ {symbol} 注文実行エラー: {detail_msg} - ロット修正を試行しましたが失敗。")
-            
-            # 💡 400エラーの場合も、無限ループを防ぐためクールダウンさせる
             LAST_SIGNAL_TIME[symbol] = time.time()
-            
             return {'status': 'error', 'error_message': detail_msg}
             
         else:
