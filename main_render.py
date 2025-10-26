@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.38 - Future Trading / 30x Leverage 
-# (Feature: 固定取引ロット 20 USDT)
+# Apex BOT v20.0.39 - Future Trading / 30x Leverage 
+# (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -16,7 +16,7 @@ import pandas_ta as ta
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 import asyncio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response # 💡 Request, Responseをインポート
 from fastapi.responses import JSONResponse
 import uvicorn
 from dotenv import load_dotenv
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.38"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.39"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -87,7 +87,6 @@ LEVERAGE_SETTING_DELAY = 1.0 # レバレッジ設定時のAPIレートリミッ�
 # 💡 【固定ロット】設定 
 # 🚨 リスクベースの動的サイジング設定は全て削除し、この固定値を使用します。
 FIXED_NOTIONAL_USDT = 20.0 
-# MAX_RISK_PER_TRADE_PERCENT はリスクベースではないため削除
 
 # 💡 WEBSHARE設定 
 WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") 
@@ -1538,9 +1537,16 @@ async def position_management_loop_async():
 # Uvicorn/FastAPIのアプリケーションインスタンス
 app = FastAPI(title="Apex BOT API")
 
-@app.get("/status", include_in_schema=False)
-async def read_root():
-    """ヘルスチェック用のルート (GETメソッドのみ許可)"""
+# 💡 UptimeRobot対応の修正箇所: @app.route を使用し、GETとHEADの両方を許可
+@app.route("/status", methods=["GET", "HEAD"], include_in_schema=False)
+async def read_root(request: Request): # 💡 Requestオブジェクトを受け取る
+    """ヘルスチェック用のルート (GET/HEADメソッドを許可)"""
+    
+    # HEADリクエストの場合は、ボディなしの200 OKを返す (UptimeRobotの標準動作)
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
+    # GETリクエストの場合、詳細なJSONステータスを返す
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     if IS_CLIENT_READY and IS_FIRST_MAIN_LOOP_COMPLETED:
