@@ -1,13 +1,12 @@
 # ====================================================================================
 # Apex BOT v20.0.37 - Future Trading / 30x Leverage 
-# (Patch 81 & 80 & 73: CRITICAL FIX - NameError, Robust Lot Size, MEXC Error Cooldown)
+# (Patch 81 & 80 & 73 & CRITICAL LOG FIX: トップシグナルログ追加)
 #
 # 改良・修正点:
 # 1. 【バージョン更新】BOTバージョンを v20.0.37 に更新。
-# 2. 【CRITICAL FIX: Patch 81】get_current_threshold 内で発生していた NameError を修正済み。
-# 3. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
-#    その銘柄の取引を一時的にクールダウンさせ、短時間での無駄な再試行とレートリミットを回避するロジックを維持。
-# 4. 【ロット修正: Patch 80】最小ロットをわずかに超える値を使用し、取引所の「greater than」制約を確実に回避するロジックを維持。
+# 2. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、
+#    その銘柄の取引を一時的にクールダウンさせるロジックを維持。
+# 3. 【ログ機能追加】main_bot_loop にて、取引閾値を超えなくても、その時点の**トップシグナルとそのスコア**をログに出力。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -120,7 +119,7 @@ if TEST_MODE:
 IS_CLIENT_READY: bool = False
 
 # 取引ルール設定
-TRADE_SIGNAL_COOLDOWN = 60 * 60 * 1 
+TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
 SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 1                
 REQUIRED_OHLCV_LIMITS = {'1m': 1000, '5m': 1000, '15m': 1000, '1h': 1000, '4h': 1000} 
@@ -145,9 +144,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.85       
-SIGNAL_THRESHOLD_NORMAL = 0.80      
-SIGNAL_THRESHOLD_ACTIVE = 0.75      
+SIGNAL_THRESHOLD_SLUMP = 0.945       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
+SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -1381,14 +1380,23 @@ async def main_bot_loop():
         # スコア降順にソート
         top_signals = sorted(all_signals, key=lambda x: x['score'], reverse=True)
         
+        current_threshold_for_log = current_threshold * 100 # ログ表示用の閾値 (0-100)
         eligible_signals = []
+        
         if top_signals:
             # 閾値を超えたシグナルのみを対象とする
             eligible_signals = [s for s in top_signals if s['score'] >= current_threshold]
             
-            # ログ強化ポイント: 閾値を超えたシグナルの数を記録
-            logging.info(f"📈 検出シグナル: {len(all_signals)} 銘柄。取引閾値 ({current_threshold*100:.2f}) を超えたシグナル: {len(eligible_signals)} 銘柄。")
+            # 💡 [CRITICAL LOG FIX] トップシグナルとそのスコアをログに出力
+            top_signal = top_signals[0]
+            top_symbol = top_signal['symbol']
+            top_score = top_signal['score'] * 100
             
+            logging.info(
+                f"📈 検出シグナル: {len(top_signals)} 銘柄。取引閾値 ({current_threshold_for_log:.2f}) を超えたシグナル: {len(eligible_signals)} 銘柄。"
+                f" (トップ: {top_symbol} - スコア: {top_score:.2f})"
+            )
+
             # TOP_SIGNAL_COUNT (現在は1) のシグナルのみを処理
             for signal in eligible_signals[:TOP_SIGNAL_COUNT]:
                 
@@ -1428,8 +1436,8 @@ async def main_bot_loop():
                 log_signal(signal, "取引シグナル", trade_result)
                 await send_telegram_notification(format_telegram_message(signal, "取引シグナル", current_threshold, trade_result))
         else:
-            # ログ強化ポイント: 閾値を超えたシグナルがなかった場合のログ
-            logging.info(f"🔍 該当銘柄なし: {len(all_signals)} 銘柄のシグナルスコアが取引閾値 ({current_threshold*100:.2f}) を下回りました。** (スコア不足)**")
+            # ログ強化ポイント: 該当銘柄がなかった場合のログ
+            logging.info(f"🔍 該当銘柄なし: {len(all_signals)} 銘柄のシグナルスコアが取引閾値 ({current_threshold_for_log:.2f}) を下回りました。** (スコア不足)**")
 
 
         # 5. 初回完了通知
