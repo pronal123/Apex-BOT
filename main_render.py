@@ -1,12 +1,14 @@
 # ====================================================================================
-# Apex BOT v20.0.28 - Future Trading / 30x Leverage 
-# (Patch 74: スコア計算ロジック修正 & 本格的テクニカル分析実装)
+# Apex BOT v20.0.29 - Future Trading / 30x Leverage 
+# (Patch 75: 致命的エラー対応 - fetch_tickers None & KeyError SMA_200)
 #
 # 改良・修正点:
 # 1. 【ロジック強化: Patch 74】apply_technical_analysis にて、SMA/MACD/OBV/ATRを用いた複合的な分析ロジックを実装。
 # 2. 【ロジック修正: Patch 74】calculate_signal_score にて、スコア詳細ブレークダウンの数値と最終スコアの合算を保証。
-# 3. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、クールダウンさせるロジックを維持。
-# 4. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
+# 3. 【致命的エラー修正: Patch 75-1】get_top_volume_symbols にて、ccxt.fetch_tickers() が None を返した場合の Null参照エラーを防止し、デフォルト銘柄で続行するロジックを実装。
+# 4. 【致命的エラー修正: Patch 75-2】apply_technical_analysis にて、SMA_200を先に計算することで KeyError: 'SMA_200' を修正。
+# 5. 【エラー処理強化: Patch 73】execute_trade_logic にて、MEXCの「流動性不足/Oversold (30005)」エラーを捕捉した場合、クールダウンさせるロジックを維持。
+# 6. 【致命的エラー修正: Patch 72】ロットサイズのエラー (400) 回避のため、最小取引単位を精度調整後に算出し、それを最低ラインとしてロットサイズを決定するロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -61,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.28"            # 💡 BOTバージョンを更新
+BOT_VERSION = "v20.0.29"            # 💡 BOTバージョンを更新 (修正適用)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -133,7 +135,7 @@ STRUCTURAL_PIVOT_BONUS = 0.05
 RSI_MOMENTUM_LOW = 40              
 MACD_CROSS_PENALTY = 0.15          
 LIQUIDITY_BONUS_MAX = 0.06          
-FGI_PROXY_BONUS_MAX = 0.04         
+FGI_PROXY_BONUS_MAX = 0.05         
 FOREX_BONUS_MAX = 0.0               
 
 # ボラティリティ指標 (ATR) の設定 
@@ -144,9 +146,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
-SIGNAL_THRESHOLD_ACTIVE = 0.75      
+SIGNAL_THRESHOLD_SLUMP = 0.945       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
+SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -872,6 +874,8 @@ async def calculate_fgi() -> Dict:
 async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP_SYMBOL_LIMIT, base_symbols: List[str] = DEFAULT_SYMBOLS) -> List[str]:
     """
     取引所から出来高トップの先物銘柄を動的に取得し、基本リストに追加する
+    
+    【修正: Patch 75-1】fetch_tickersの結果がNoneTypeの場合のチェックを追加し、クラッシュを防止する。
     """
     
     logging.info(f"🔄 出来高トップ {limit} 銘柄の動的取得を開始します...")
@@ -880,9 +884,11 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
         # 1. 全ティッカー情報（価格、出来高など）を取得
         tickers = await exchange.fetch_tickers()
         
-        # 'NoneType' object has no attribute 'keys' のエラー対策
+        # 🚀 致命的エラー修正: NoneTypeチェックを追加 
         if tickers is None or not isinstance(tickers, dict):
-            raise Exception("fetch_tickers returned None or invalid data.")
+            # 取得失敗の場合、デフォルトリストを使用して続行し、警告をログする
+            logging.warning("⚠️ fetch_tickers() が無効なデータ (Noneまたは非Dict型) を返しました。デフォルト銘柄リストを使用します。")
+            return base_symbols
 
         volume_data = []
         
@@ -923,7 +929,7 @@ async def get_top_volume_symbols(exchange: ccxt_async.Exchange, limit: int = TOP
         return unique_symbols
 
     except Exception as e:
-        # エラーが発生した場合、デフォルトリストのみを返す (耐障害性の維持)
+        # 予期せぬエラーが発生した場合、デフォルトリストのみを返す (耐障害性の維持)
         logging.error(f"❌ 出来高トップ銘柄の取得に失敗しました。デフォルト ({len(base_symbols)}件) を使用します: {e}", exc_info=True)
         return base_symbols
 
@@ -950,6 +956,8 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     """
     テクニカル分析を行い、複合的なシグナルスコアの構成要素を計算する。
     - SMA/MACD/OBV/ATRを用いた本格的なロジックを実装 (Patch 74)
+    
+    【FIX: KeyError対策】SMA_200をdf_mainに明示的に計算し、その後のロジックで利用可能にする。
     """
     
     # ----------------------------------------------------
@@ -960,7 +968,6 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     main_tf = '1h'
     if main_tf not in ohlcv:
         logging.warning(f"⚠️ {symbol}: 主要時間足 {main_tf} のデータが不足しています。分析をスキップします。")
-        # 最小限の結果を返すことで、calculate_signal_scoreでのエラーを防ぐ
         return {
             'signal_timeframe': main_tf, 
             'side': 'neutral', 
@@ -975,26 +982,43 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     current_price = df_main['close'].iloc[-1]
     
     # ----------------------------------------------------
+    # 1.5. メイン時間足のSMA計算 (KeyError 'SMA_200' 対策)
+    # ----------------------------------------------------
+    # SMA200が必要な最小データ数 (200) がない場合は分析をスキップ
+    if len(df_main) < LONG_TERM_SMA_LENGTH:
+        logging.warning(f"⚠️ {symbol}: {main_tf} のデータが不足しています ({len(df_main)} < {LONG_TERM_SMA_LENGTH})。分析をスキップします。")
+        return {
+            'signal_timeframe': main_tf, 
+            'side': 'neutral', 
+            'sl_ratio': MIN_RISK_PERCENT, 
+            'tp_ratio': MIN_RISK_PERCENT * 2.5,
+            'rr_ratio': 2.5, 
+            'tech_data': {}
+        }
+
+    # df_main に SMA指標を追加 (後のセクション3で参照されるため必須)
+    df_main['SMA_50'] = ta.sma(df_main['close'], length=50)
+    df_main['SMA_200'] = ta.sma(df_main['close'], length=LONG_TERM_SMA_LENGTH) 
+    
+    # ----------------------------------------------------
     # 2. シグナル方向の決定とスコア要因の計算
     # ----------------------------------------------------
     
-    # 各時間足のシグナル方向 (1: Long, -1: Short, 0: Neutral) を計算
     # 💡 複合トレンドスコア: SMA50とSMA200の方向で主要トレンドを判定
-    # 1m/5m/15m/1h/4h のうち3つ以上が同じ方向なら、その方向を主要シグナルとする
-    
     signal_counts = {'long': 0, 'short': 0}
     
     for tf, df in ohlcv.items():
-        if len(df) < 200: continue # SMA200の計算に必要な最小データ数
+        if len(df) < LONG_TERM_SMA_LENGTH: continue # SMA200の計算に必要な最小データ数
         
-        # SMA: 50, 200の計算
-        df['SMA_50'] = ta.sma(df['close'], length=50)
-        df['SMA_200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH) 
+        # 💡 FIX: カラム追加を避け、結果のみを取得して多数決に使用する
+        # SMAを計算し、最後の値のみを取得
+        sma_50 = ta.sma(df['close'], length=50).iloc[-1]
+        sma_200 = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH).iloc[-1]
         
-        if df['SMA_50'].iloc[-1] > df['SMA_200'].iloc[-1]:
+        if sma_50 > sma_200:
             # 短期線が長期線の上にある (ゴールデンクロス/上昇トレンド)
             signal_counts['long'] += 1
-        elif df['SMA_50'].iloc[-1] < df['SMA_200'].iloc[-1]:
+        elif sma_50 < sma_200:
             # 短期線が長期線の下にある (デッドクロス/下降トレンド)
             signal_counts['short'] += 1
             
@@ -1021,8 +1045,7 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     tech_data = {}
     
     # 3.1. 長期トレンド逆行ペナルティ (SMA200)
-    # 💡 SMA200との乖離率をペナルティの度合いに反映
-    #   - 例: Longシグナルなのに価格がSMA200を大きく下回っている場合
+    # 💡 df_main['SMA_200'] がここで安全に利用可能になる
     sma_200 = df_main['SMA_200'].iloc[-1]
     price_to_sma_ratio = (current_price - sma_200) / sma_200
 
@@ -1038,7 +1061,7 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
             tech_data['long_term_reversal_penalty_value'] = 0.0 # ペナルティなし
 
     # 3.2. モメンタム/MACDペナルティ (勢いのチェック)
-    # 💡 MACDのSignalラインとのクロスで判定
+    # MACDはここで計算し、df_mainに追加される
     df_main.ta.macd(append=True)
     macd = df_main['MACDH_12_26_9'].iloc[-1] # MACDヒストグラム (勢い)
 
@@ -1054,7 +1077,7 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
             tech_data['macd_penalty_value'] = 0.0 # ペナルティなし
         
     # 3.3. 出来高 (OBV) 確証ボーナス
-    # 💡 OBVがシグナル方向に上昇/下降しているか
+    # OBVはここで計算し、df_mainに追加される
     df_main.ta.obv(append=True)
     obv_change = df_main['OBV'].iloc[-1] - df_main['OBV'].iloc[-14] # 14期間の変化
     
@@ -1064,7 +1087,7 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
         tech_data['obv_momentum_bonus_value'] = 0.0
 
     # 3.4. ボラティリティ過熱ペナルティ (ボリンジャーバンド幅)
-    # 💡 BB幅が平均的な幅の2倍を超えていたら過熱とみなしペナルティ
+    # BBandsはここで計算し、df_mainに追加される
     df_main.ta.bbands(append=True)
     # 直近100期間のBB幅の平均を計算
     mean_bb_width = (df_main['BBU_20_2.0'].iloc[-100:] - df_main['BBL_20_2.0'].iloc[-100:]).mean() / current_price 
@@ -1080,6 +1103,7 @@ def apply_technical_analysis(symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Dic
     # ----------------------------------------------------
     
     # 4.1. 動的ATR SL/TP幅の計算 (1hベース)
+    # ATRはここで計算し、df_mainに追加される
     df_main.ta.atr(length=ATR_LENGTH, append=True)
     atr_value = df_main['ATR_14'].iloc[-1]
     
@@ -1478,6 +1502,17 @@ async def main_bot_loop():
         logging.error(f"❌ メインループ実行中にエラー: {e}", exc_info=True)
 
 
+async def position_monitor_scheduler():
+    """TP/SL監視ループを定期実行するスケジューラ (10秒ごと)"""
+    while True:
+        try:
+            await position_management_loop_async()
+        except Exception as e:
+            logging.critical(f"❌ ポジション監視ループ実行中に致命的なエラー: {e}", exc_info=True)
+
+        await asyncio.sleep(MONITOR_INTERVAL) 
+
+
 async def position_management_loop_async():
     """TP/SLを監視し、決済注文を実行する非同期関数"""
     global OPEN_POSITIONS
@@ -1609,23 +1644,12 @@ async def main_bot_scheduler():
             LAST_SUCCESS_TIME = time.time()
         except Exception as e:
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
-            await send_telegram_notification(f"🚨 **致命的なエラー**\\nメインループでエラーが発生しました: `{e}`")
+            await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: <code>{e}</code>")
 
         # 待機時間を LOOP_INTERVAL (60秒) に基づいて計算
         wait_time = max(1, LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME))
         logging.info(f"次のメインループまで {wait_time:.1f} 秒待機します。")
         await asyncio.sleep(wait_time)
-
-
-async def position_monitor_scheduler():
-    """TP/SL監視ループを定期実行するスケジューラ (10秒ごと)"""
-    while True:
-        try:
-            await position_management_loop_async()
-        except Exception as e:
-            logging.critical(f"❌ ポジション監視ループ実行中に致命的なエラー: {e}", exc_info=True)
-
-        await asyncio.sleep(MONITOR_INTERVAL) 
 
 
 @app.on_event("startup")
