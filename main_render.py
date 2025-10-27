@@ -1,6 +1,6 @@
 # ====================================================================================
 # Apex BOT v20.0.39 - Future Trading / 30x Leverage 
-# (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応, 堅牢性強化)
+# (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応, 最小ロット堅牢性強化)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.39-fix2"       # 💡 BOTバージョンを更新 (FIX適用)
+BOT_VERSION = "v20.0.39-fix3"       # 💡 BOTバージョンを更新 (FIX適用)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -139,8 +139,8 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.90       
-SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_SLUMP = 0.945       
+SIGNAL_THRESHOLD_NORMAL = 0.90      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
@@ -148,7 +148,7 @@ VOLATILITY_BB_PENALTY_THRESHOLD = 0.01
 OBV_MOMENTUM_BONUS = 0.04           
 
 # ====================================================================================
-# UTILITIES & FORMATTING 
+# UTILITIES & FORMATTING
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -1164,26 +1164,46 @@ async def execute_trade_logic(signal: Dict) -> Optional[Dict]:
     # 1. 単位数量 (Lot Size Units) の計算
     lot_size_units_calculated = final_notional_value_usdt / entry_price 
 
-    # 2. 最小取引ロットの精度チェックを強化
+    # 2. 最小取引ロットの精度チェックを強化 💥 修正ポイント: 最小ロットの取得ロジックをより防御的に
+    
     market_info = EXCHANGE_CLIENT.markets[symbol]
-    min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.0001)
+    
+    # 最小ロットの取得。安全のため、0.01を最小フォールバックとする。
+    min_amount_raw = market_info.get('limits', {}).get('amount', {}).get('min', 0.01)
+    
+    # min_amount_raw がゼロまたは非常に小さい値（例: 1e-9未満）の場合、0.01に強制設定
+    if min_amount_raw <= 1e-9:
+        min_amount_raw = 0.01
+        logging.warning(f"⚠️ {symbol}: market_info の min_amount_raw が無効なため、フォールバック値 0.01 を使用します。")
 
+    min_amount_adjusted: float
     try:
+        # CCXTの amount_to_precision で調整
         min_amount_adjusted_str = EXCHANGE_CLIENT.amount_to_precision(symbol, min_amount_raw)
         min_amount_adjusted = float(min_amount_adjusted_str)
-    except Exception as e:
-        logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}. raw:{min_amount_raw:.8f}", exc_info=False)
-        min_amount_adjusted = min_amount_raw
+        
+        # 精度調整の結果、0以下になった場合の最終チェック
+        if min_amount_adjusted <= 0.0:
+            min_amount_adjusted = 0.01
+            logging.warning(f"❌ {symbol}: 精度調整の結果 min_amount_adjusted が0以下になりましたが、フォールバック値 0.01 を使用します。")
 
+    except Exception as e:
+        # 精度調整自体が失敗した場合 (前回のログのエラーの原因)
+        logging.error(f"❌ {symbol}: 最小ロットの精度調整に失敗しました: {e}. フォールバック値 0.01 を使用します。raw:{min_amount_raw:.8f}", exc_info=False)
+        min_amount_adjusted = 0.01 
+        
     if min_amount_adjusted <= 0.0:
-        logging.error(f"❌ {symbol}: min_amount_raw ({min_amount_raw:.8f}) を precision 調整した結果、0以下になりました。取引を停止します。")
-        return {'status': 'error', 'error_message': 'Precision adjustment makes min_amount zero or less.'}
+         logging.critical(f"❌ {symbol}: 最小ロットのフォールバック値も0以下です。取引を停止します。")
+         return {'status': 'error', 'error_message': 'Final min_amount is zero or less even after fallback.'}
+
 
     # 3. 最終的に使用するロットサイズを決定
+    
+    # 計算ロット (固定20USDTベース) が最小ロットを下回る場合、最小ロットの乗数で切り上げる
     if lot_size_units_calculated < min_amount_adjusted * 1.0000001:
-         # 最小ロットの乗数で切り上げ
+         # 最小ロットの乗数で切り上げ 
          lot_size_units = min_amount_adjusted * math.ceil(lot_size_units_calculated / min_amount_adjusted) 
-         logging.warning(f"⚠️ {symbol}: 計算結果が最小ロットを下回る可能性があったため、ロットを最小ロット乗数で切り上げました。")
+         logging.warning(f"⚠️ {symbol}: 固定ロット ({format_usdt(final_notional_value_usdt)} USDT) の計算結果が取引所の最小ロットを下回る可能性があったため、ロットを最小ロット乗数で切り上げました。")
     else:
          lot_size_units = lot_size_units_calculated
          
