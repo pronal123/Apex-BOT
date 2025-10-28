@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.47 - Future Trading / 30x Leverage 
-# (Feature: 最高スコアの分析結果をログファイルに必ず記録)
+# Apex BOT v20.0.48 - Future Trading / 30x Leverage 
+# (Feature: ATRデータ不足による分析スキップ問題を緩和)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.47"            # 💡 BOTバージョンを更新 (最高スコア分析ログ)
+BOT_VERSION = "v20.0.48"            # 💡 BOTバージョンを更新 (ATRデータ不足問題の緩和)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -481,7 +481,7 @@ def get_score_breakdown(signal: Dict) -> str:
     # トレンド一致/逆行
     trend_val = tech_data.get('long_term_reversal_penalty_value', 0.0)
     trend_text = "🟢 長期トレンド一致" if trend_val > 0 else ("🔴 長期トレンド逆行" if trend_val < 0 else "🟡 長期トレンド中立")
-    # 1m分析でSMA200をスキップした場合、trend_valは0.0になるため、テキストを修正
+    # 1m分析でSMA200をスキップした場合、テキストを修正
     if signal['timeframe'] == '1m' and trend_val == 0.0:
         trend_text = "🟡 長期トレンド分析スキップ (1m軽量モード)"
         
@@ -525,8 +525,15 @@ def get_score_breakdown(signal: Dict) -> str:
     
     # 構造的ボーナス
     struct_val = tech_data.get('structural_pivot_bonus', 0.0)
-    breakdown_list.append(f"🟢 構造的優位性 (ベース): {struct_val*100:+.2f} 点")
-
+    
+    # SMA_50が計算できたかどうかに応じてテキストを分ける
+    sma50_calculated = signal['tech_data'].get('sma50_calculated', True)
+    if sma50_calculated:
+        struct_text = "🟢 構造的優位性 (SMA50一致)" if struct_val == STRUCTURAL_PIVOT_BONUS else "🟡 構造的優位性 (SMA50不一致)"
+        breakdown_list.append(f"{struct_text}: {struct_val*100:+.2f} 点")
+    else:
+        breakdown_list.append(f"🟡 構造的優位性 (SMA50データ不足): {struct_val*100:+.2f} 点")
+    
     # ペナルティ要因の表示
     
     # ボラティリティペナルティ
@@ -864,7 +871,7 @@ async def fetch_open_positions() -> List[Dict]:
     return []
 
 # ====================================================================================
-# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.47 INTEGRATION)
+# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.48 INTEGRATION)
 # ====================================================================================
 
 # ------------------------------------------------
@@ -890,6 +897,7 @@ def calculate_signal_score(signal: Dict[str, Any]) -> float:
     score += tech_data.get('macd_penalty_value', 0.0)
     score += tech_data.get('rsi_divergence_bonus_value', 0.0) 
     score += tech_data.get('obv_momentum_bonus_value', 0.0) 
+    score += tech_data.get('rsi_momentum_bonus_value', 0.0) # 再計算したRSIモメンタムボーナスを反映
     
     # 💎 新規追加: 高度分析要素
     score += tech_data.get('adl_accumulation_bonus', 0.0)
@@ -976,12 +984,13 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
         tech_data['macd_penalty_value'] = -MACD_CROSS_PENALTY 
         
     # 構造的優位性 (SMA50との比較)
-    if 'SMA_50' in df.columns: # SMA_50は1mでも計算される
+    tech_data['sma50_calculated'] = 'SMA_50' in df.columns # ログ用に計算できたか否かを記録
+    if tech_data['sma50_calculated']: 
         sma_50 = last_row['SMA_50']
+        # SMA50が計算できた場合
         tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS if (signal_type == 'long' and current_close > sma_50) or (signal_type == 'short' and current_close < sma_50) else 0.0
     else:
-        # SMA_50すら計算できない場合はベースボーナスを固定で付与
-        logging.warning(f"SMA_50が計算されていません。構造的優位性ボーナスを固定値 {STRUCTURAL_PIVOT_BONUS} に設定。")
+        # SMA_50が計算できない場合はベースボーナスを固定で付与し、警告ログは省略 (データ不足による頻発を避けるため)
         tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS
 
     # 流動性ボーナス (暫定的にTOP銘柄の有無で判断)
@@ -1068,9 +1077,9 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         # 1. データの取得
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit) 
         
-        # ATR/SMA計算に必要な期間（例: 200期間）のチェックは、1m軽量化のためスキップ
-        if len(ohlcv) < ATR_LENGTH + 50: # SMA50とATR14の計算に必要な最低限のデータ
-            logging.warning(f"データ不足: {symbol} - {timeframe} ({len(ohlcv)}期間)。SMA50とATR14の計算に必要なデータが不足しています。")
+        # 💥 V20.0.48 修正: 最低限のデータ要求をATR計算に必要な15期間に緩和
+        if len(ohlcv) < ATR_LENGTH + 1: 
+            logging.warning(f"データ不足: {symbol} - {timeframe} ({len(ohlcv)}期間)。ATR計算に必要な最低データ ({ATR_LENGTH + 1}期間) が不足しています。分析をスキップします。")
             return []
             
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
@@ -1130,7 +1139,7 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         
         # ATRが存在しない場合は、データが完全に不足しているため、スキップ
         if atr_column_name not in df.columns or df[atr_column_name].iloc[-1] is None or pd.isna(df[atr_column_name].iloc[-1]):
-            # 🚨 SMA200依存を解消したため、ここでエラーになる場合はデータ自体が14本も取得できていない極端なケース
+            # 🚨 データ不足のため分析をスキップ
             logging.warning(f"⚠️ {symbol} - {timeframe} の分析をスキップ: ATRデータ '{atr_column_name}' の最終値が計算されていません。データが極度に不足しています。")
             return [] 
             
