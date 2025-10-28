@@ -6,6 +6,7 @@
 # 🚨 致命的エラー修正強化: AttributeError ('NoneType' object has no attribute 'keys')
 # 🚨 FGI取得ロジック修正済み: APIからの値取得とスコア正規化を修正
 # 🆕 機能追加済み: 取引閾値未満の最高スコアを定期通知
+# 🆕 ログ改善: fetch_tickers失敗時に、フォールバック動作を明示
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -68,7 +69,7 @@ BOT_VERSION = "v20.0.39"            # 💡 BOTバージョンを更新
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
-ANALYSIS_ONLY_INTERVAL = 60 * 60    # 分析専用通知の実行間隔 (秒) - 1時間ごと
+ANALYSIS_ONLY_INTERVAL = 60 * 5     # 分析専用通知の実行間隔 (秒) - 5分ごと (テスト用)
 WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
 MONITOR_INTERVAL = 10               # ポジション監視ループの実行間間隔 (秒) - 10秒ごと
 
@@ -1257,8 +1258,10 @@ async def update_current_monitor_symbols():
         
         # 🚨 修正強化: Noneまたは辞書型でない場合に処理を中断し、AttributeErrorを回避
         if tickers is None or not isinstance(tickers, dict):
-            logging.error(f"❌ 監視対象銘柄の更新に失敗しました: fetch_tickers が {type(tickers).__name__} を返しました。取引所のAPIステータスを確認してください。")
-            return
+            # Noneが返された場合、CCXT内部でエラーが発生している可能性が高いため、
+            # 外部のAPI呼び出しが失敗したとみなし、ここで明示的にログを出力して処理を中断する。
+            raise ccxt.ExchangeError(f"fetch_tickersが有効なデータを返しませんでした: {type(tickers).__name__}")
+
 
         # 出来高データの整形と抽出 (既存ロジックを再現)
         top_tickers: List[Dict] = []
@@ -1289,7 +1292,11 @@ async def update_current_monitor_symbols():
         logging.info(f"✅ 監視対象銘柄を更新しました (出来高TOP {TOP_SYMBOL_LIMIT} + Default) - 合計 {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
         
     except Exception as e:
-        logging.error(f"❌ 監視対象銘柄の更新に失敗しました: {e}", exc_info=True)
+        # ログメッセージを改善し、フォールバックしたことを伝える
+        logging.error(
+            f"❌ 監視対象銘柄の更新に失敗しました: {e}。 (現在の銘柄リスト({len(CURRENT_MONITOR_SYMBOLS)}件)を継続使用します。)", 
+            exc_info=True
+        )
 
 
 async def upload_webshare_log_data():
