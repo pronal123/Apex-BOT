@@ -1,13 +1,10 @@
 # ====================================================================================
-# Apex BOT v20.0.46 - Future Trading / 30x Leverage 
-# (Feature: v20.0.45機能 + 毎ループ最高スコアのログ出力)
+# Apex BOT v20.0.47 - Future Trading / 30x Leverage 
+# (Feature: v20.0.46機能 + 銘柄取得失敗時の強制フォールバック修正)
 # 
 # 🚨 致命的エラー修正強化: 
-# 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
-# 2. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 
-# 3. 注文失敗エラー (Amount can not be less than zero) 対策
-# 4. 💡 修正: main_bot_scheduler内のLAST_WEBSHARE_UPLOAD_TIMEに関するUnboundLocalErrorを修正 (v20.0.45)
-# 5. 💡 新規: 毎分析ループで最高スコア銘柄の情報をログ出力 (v20.0.46)
+# 1. 💡 修正: fetch_top_volume_tickersが0件を返した場合、分析対象銘柄がなくなる問題を修正 (v20.0.47)
+# 2. 💡 新規: 毎分析ループで最高スコア銘柄の情報をログ出力 (v20.0.46)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +62,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.46"            # 💡 BOTバージョンを v20.0.46 に更新 
+BOT_VERSION = "v20.0.47"            # 💡 BOTバージョンを v20.0.47 に更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -1313,8 +1310,14 @@ async def fetch_top_volume_tickers(limit: int = TOP_SYMBOL_LIMIT) -> List[str]:
             if d_symbol not in top_symbols and d_symbol in future_markets.keys():
                 top_symbols.append(d_symbol)
 
+        # 💡 v20.0.47 修正: 出来高上位の取得自体が失敗した場合（0件の場合）、強制的にDEFAULT_SYMBOLSを返す
+        if not top_symbols:
+            # top_symbolsが空の場合、DEFAULT_SYMBOLSをそのまま返すことで分析を強制する
+            logging.warning(f"⚠️ 出来高上位銘柄の取得または市場マッチングに失敗しました。DEFAULT_SYMBOLS ({len(DEFAULT_SYMBOLS)}件) を強制的に使用します。")
+            return DEFAULT_SYMBOLS
+        
         # 最終的なリストをCCXT標準シンボル形式(BTC/USDT)で返す
-        logging.info(f"✅ 出来高上位銘柄 ({len(top_symbols)}件) を取得しました。")
+        logging.info(f"✅ 出来高上位銘柄 (合計 {len(top_symbols)}件) を取得しました。")
         return top_symbols
         
     except ccxt.ExchangeNotAvailable as e:
@@ -1836,6 +1839,9 @@ async def main_bot_scheduler():
 
             # --- WebShareアップロード ---
             if current_time - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
+                 # UnboundLocalError回避のため、ここで初期化
+                 webshare_data = {} 
+                 
                  webshare_data = {
                     'timestamp_jst': datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
                     'bot_version': BOT_VERSION,
