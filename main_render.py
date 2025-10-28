@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.44 - Future Trading / 30x Leverage 
-# (Feature: スコア判別能力強化: ADX/StochRSIを追加、TOPシグナル数を3に増加)
+# Apex BOT v20.0.45 - Future Trading / 30x Leverage 
+# (Feature: v20.0.44機能 + 致命的バグ修正)
 # 
 # 🚨 致命的エラー修正強化: 
 # 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
@@ -9,6 +9,7 @@
 # 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決 (v20.0.42で対応済み)
 # 5. 💡 新規: ダミーロジックを実践的スコアリングロジックに置換 (v20.0.43)
 # 6. 💡 新規: ADX/StochRSIによるスコア判別能力強化 (v20.0.44)
+# 7. 💡 修正: main_bot_scheduler内のLAST_WEBSHARE_UPLOAD_TIMEに関するUnboundLocalErrorを修正 (v20.0.45)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -66,7 +67,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.44"            # 💡 BOTバージョンを v20.0.44 に更新 
+BOT_VERSION = "v20.0.45"            # 💡 BOTバージョンを v20.0.45 に更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -106,7 +107,7 @@ LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
 LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0 
-LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 
+LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 # 💡 グローバル変数の初期化を明示
 GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0}
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False 
 OPEN_POSITIONS: List[Dict] = [] 
@@ -121,7 +122,7 @@ IS_CLIENT_READY: bool = False
 # 取引ルール設定
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
 SIGNAL_THRESHOLD = 0.65             
-TOP_SIGNAL_COUNT = 1
+TOP_SIGNAL_COUNT = 3                
 REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} 
 
 # テクニカル分析定数 
@@ -140,7 +141,7 @@ FOREX_BONUS_MAX = 0.0
 ATR_LENGTH = 14
 ATR_MULTIPLIER_SL = 2.0             # SL = 2.0 * ATR
 MIN_RISK_PERCENT = 0.008            # 最低リスク幅 (0.8%) 
-RR_RATIO_TARGET = 1.5               # 💡 新規追加: 基本的なリスクリワード比率 (1:1.5)
+RR_RATIO_TARGET = 1.5               # 基本的なリスクリワード比率 (1:1.5)
 
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
@@ -1753,7 +1754,10 @@ async def main_bot_scheduler():
     """
     メインの分析・取引スケジューラ。
     """
-    global CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_SIGNALS
+    # 💡 修正: LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加
+    global CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_SIGNALS, \
+           LAST_SUCCESS_TIME, ACCOUNT_EQUITY_USDT, LAST_HOURLY_NOTIFICATION_TIME, \
+           LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_WEBSHARE_UPLOAD_TIME
     
     logging.info("⏳ メインボットスケジューラを開始します。")
     
@@ -1775,11 +1779,12 @@ async def main_bot_scheduler():
     while True:
         try:
             start_time = time.time()
+            current_time = start_time # 実行開始時刻を現在の時刻として使用
             
             # --- データ更新フェーズ ---
             
             # 出来高上位銘柄の更新 (レートリミット対策のため頻度は抑える)
-            if not IS_FIRST_MAIN_LOOP_COMPLETED or start_time - LAST_SUCCESS_TIME > (60 * 30): # 30分に1回更新
+            if not IS_FIRST_MAIN_LOOP_COMPLETED or current_time - LAST_SUCCESS_TIME > (60 * 30): # 30分に1回更新
                 if not SKIP_MARKET_UPDATE:
                     CURRENT_MONITOR_SYMBOLS = await fetch_top_volume_tickers(TOP_SYMBOL_LIMIT)
                 else:
@@ -1820,7 +1825,8 @@ async def main_bot_scheduler():
             await notify_highest_analysis_score() 
 
             # --- WebShareアップロード ---
-            if start_time - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
+            # 💡 修正: global宣言されたため、変数参照が可能に
+            if current_time - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
                  webshare_data = {
                     'timestamp_jst': datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
                     'bot_version': BOT_VERSION,
@@ -1831,7 +1837,7 @@ async def main_bot_scheduler():
                     'last_signals': best_signals # 最後に選定されたシグナル
                  }
                  await send_webshare_update(webshare_data)
-                 LAST_WEBSHARE_UPLOAD_TIME = start_time
+                 LAST_WEBSHARE_UPLOAD_TIME = current_time
                  
             
             # --- ループ完了と待機 ---
