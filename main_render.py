@@ -1,12 +1,9 @@
 # ====================================================================================
-# Apex BOT v20.0.39 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.40 - Future Trading / 30x Leverage 
 # (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応)
 # 
-# 🚨 致命的エラー修正済み: UnboundLocalError (LAST_HOURLY_NOTIFICATION_TIME)
-# 🚨 致命的エラー修正強化: AttributeError ('NoneType' object has no attribute 'keys')
-# 🚨 FGI取得ロジック修正済み: APIからの値取得とスコア正規化を修正
-# 🆕 機能追加済み: 取引閾値未満の最高スコアを定期通知
-# 🆕 ログ改善: fetch_tickers失敗時に、フォールバック動作を明示
+# 🚨 致命的エラー修正強化: AttributeError ('NoneType' object has no attribute 'keys') 
+# 🆕 機能追加: fetch_tickersに3回のリトライロジックを導入
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +62,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.39"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.40"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -144,9 +141,9 @@ MIN_RISK_PERCENT = 0.008 # SL幅の最小パーセンテージ (0.8%)
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.95       
-SIGNAL_THRESHOLD_NORMAL = 0.90      
-SIGNAL_THRESHOLD_ACTIVE = 0.85      
+SIGNAL_THRESHOLD_SLUMP = 0.90       
+SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
@@ -1253,50 +1250,64 @@ async def update_current_monitor_symbols():
         logging.error("❌ 監視対象銘柄の更新に失敗しました: CCXTクライアントが準備できていません。")
         return
 
-    try:
-        tickers = await EXCHANGE_CLIENT.fetch_tickers()
-        
-        # 🚨 修正強化: Noneまたは辞書型でない場合に処理を中断し、AttributeErrorを回避
-        if tickers is None or not isinstance(tickers, dict):
-            # Noneが返された場合、CCXT内部でエラーが発生している可能性が高いため、
-            # 外部のAPI呼び出しが失敗したとみなし、ここで明示的にログを出力して処理を中断する。
-            raise ccxt.ExchangeError(f"fetch_tickersが有効なデータを返しませんでした: {type(tickers).__name__}")
+    MAX_RETRIES = 3
+    for attempt in range(MAX_RETRIES):
+        try:
+            logging.info(f"ℹ️ 監視銘柄データ取得を試行中... (試行 {attempt + 1}/{MAX_RETRIES})")
+            
+            # APIコール (AttributeErrorの原因箇所)
+            tickers = await EXCHANGE_CLIENT.fetch_tickers()
+            
+            # Noneまたは辞書型でない場合に例外を発生させ、リトライさせる
+            if tickers is None or not isinstance(tickers, dict):
+                raise ccxt.ExchangeError("fetch_tickersが有効なデータを返しませんでした (None/非辞書型)。")
 
+            # 出来高データの整形と抽出 (成功時の処理)
+            top_tickers: List[Dict] = []
+            for symbol, data in tickers.items():
+                # USDT建ての先物/スワップシンボルのみを考慮
+                if '/USDT' in symbol and (data.get('info', {}).get('isSwap') or data.get('info', {}).get('contractType') in ['PERPETUAL', 'Future']):
+                    # 出来高 (USDT) は 'quoteVolume' or 'baseVolume' * last price で推定
+                    volume_usdt = data.get('quoteVolume', 0.0)
+                    if volume_usdt > 0:
+                        top_tickers.append({
+                            'symbol': symbol,
+                            'volume': volume_usdt,
+                        })
 
-        # 出来高データの整形と抽出 (既存ロジックを再現)
-        top_tickers: List[Dict] = []
-        for symbol, data in tickers.items():
-            # USDT建ての先物/スワップシンボルのみを考慮
-            if '/USDT' in symbol and (data.get('info', {}).get('isSwap') or data.get('info', {}).get('contractType') in ['PERPETUAL', 'Future']):
-                # 出来高 (USDT) は 'quoteVolume' or 'baseVolume' * last price で推定
-                volume_usdt = data.get('quoteVolume', 0.0)
-                if volume_usdt > 0:
-                    top_tickers.append({
-                        'symbol': symbol,
-                        'volume': volume_usdt,
-                    })
+            # 出来高でソートし、上位TOP_SYMBOL_LIMIT個を取得
+            top_tickers.sort(key=lambda x: x['volume'], reverse=True)
+            top_symbols = [t['symbol'] for t in top_tickers[:TOP_SYMBOL_LIMIT]]
+            
+            # デフォルト銘柄のうち、上位リストに含まれていないものを追加
+            unique_symbols = set(top_symbols)
+            for d_sym in DEFAULT_SYMBOLS:
+                if d_sym not in unique_symbols:
+                    unique_symbols.add(d_sym)
+                    
+            new_monitor_symbols = list(unique_symbols)
+            CURRENT_MONITOR_SYMBOLS = new_monitor_symbols
+            
+            logging.info(f"✅ 監視対象銘柄を更新しました (出来高TOP {TOP_SYMBOL_LIMIT} + Default) - 合計 {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
+            return # 成功したら関数を終了
 
-        # 出来高でソートし、上位TOP_SYMBOL_LIMIT個を取得
-        top_tickers.sort(key=lambda x: x['volume'], reverse=True)
-        top_symbols = [t['symbol'] for t in top_tickers[:TOP_SYMBOL_LIMIT]]
-        
-        # デフォルト銘柄のうち、上位リストに含まれていないものを追加
-        unique_symbols = set(top_symbols)
-        for d_sym in DEFAULT_SYMBOLS:
-            if d_sym not in unique_symbols:
-                unique_symbols.add(d_sym)
-                
-        new_monitor_symbols = list(unique_symbols)
-        CURRENT_MONITOR_SYMBOLS = new_monitor_symbols
-        
-        logging.info(f"✅ 監視対象銘柄を更新しました (出来高TOP {TOP_SYMBOL_LIMIT} + Default) - 合計 {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
-        
-    except Exception as e:
-        # ログメッセージを改善し、フォールバックしたことを伝える
-        logging.error(
-            f"❌ 監視対象銘柄の更新に失敗しました: {e}。 (現在の銘柄リスト({len(CURRENT_MONITOR_SYMBOLS)}件)を継続使用します。)", 
-            exc_info=True
-        )
+        except (ccxt.NetworkError, ccxt.ExchangeError, ccxt.DDoSProtection, AttributeError) as e:
+            # AttributeErrorを含めて、CCXT関連のエラーを全て捕捉
+            logging.warning(f"⚠️ 監視銘柄の取得に失敗しました (試行 {attempt + 1}/{MAX_RETRIES})。エラー: {type(e).__name__}: {e}")
+            if attempt < MAX_RETRIES - 1:
+                # リトライ前に少し待機 (指数バックオフ 2, 4秒)
+                await asyncio.sleep(2 ** attempt * 2) 
+            else:
+                # 最終試行で失敗
+                logging.error(
+                    f"❌ 監視対象銘柄の更新に最終的に失敗しました。現在の銘柄リスト({len(CURRENT_MONITOR_SYMBOLS)}件)を継続使用します。", 
+                    exc_info=True
+                )
+                return # リトライ失敗で終了
+        except Exception as e:
+            # 予期せぬその他のエラー
+            logging.error(f"❌ 監視銘柄の取得中に予期せぬエラーが発生しました: {e}", exc_info=True)
+            return
 
 
 async def upload_webshare_log_data():
@@ -1333,7 +1344,7 @@ async def main_bot_loop():
     macro_context = await get_macro_context()
     current_threshold = get_current_threshold(macro_context)
     
-    # 3. 監視銘柄の更新
+    # 3. 監視銘柄の更新 (リトライロジック導入済み)
     await update_current_monitor_symbols() 
     
     # 4. ポジション監視・SL/TPの更新 (ポジションが一つでもあれば実行)
