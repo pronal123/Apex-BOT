@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.43 - Future Trading / 30x Leverage 
-# (Feature: ATR_14 KeyError の修正 / OHLCV取得本数を1000から250に最適化)
+# Apex BOT v20.0.45 - Future Trading / 30x Leverage 
+# (Feature: ATRデータ不足解消のため、5m分析を削除し、1m分析に切り替え)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.43"            # 💡 BOTバージョンを更新 (OHLCV取得本数を250に最適化)
+BOT_VERSION = "v20.0.45"            # 💡 BOTバージョンを更新 (5m分析を削除)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -116,11 +116,12 @@ IS_CLIENT_READY: bool = False
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
 SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 1                
-# 💥 修正: 取得するOHLCVの期間を1000から250に減らす (新規銘柄のATRエラー対策)
-REQUIRED_OHLCV_LIMITS = {'1m': 250, '5m': 250, '15m': 250, '1h': 250, '4h': 250} 
+# 💥 修正: 取得するOHLCVの期間を500に再調整 (SMA200計算に必要なデータ不足を解消するため)
+REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} 
 
 # テクニカル分析定数 
-TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
+# 💥 修正: 5mを削除
+TARGET_TIMEFRAMES = ['1m', '15m', '1h', '4h'] 
 BASE_SCORE = 0.40                  # 初期スコア
 LONG_TERM_SMA_LENGTH = 200         
 LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンド逆行時のペナルティ/一致時のボーナス
@@ -375,6 +376,9 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         filled_amount_raw = trade_result.get('filled_amount', 0.0)
         try:
             filled_amount = float(filled_amount_raw)
+            # 🚨 数量が0の場合のエラーを回避
+            if filled_amount == 0.0:
+                filled_amount = trade_result.get('contracts', 0.0)
         except (ValueError, TypeError):
             filled_amount = 0.0
         
@@ -830,7 +834,7 @@ async def fetch_open_positions() -> List[Dict]:
     return []
 
 # ====================================================================================
-# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.43 INTEGRATION)
+# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.45 INTEGRATION)
 # ====================================================================================
 
 # ------------------------------------------------
@@ -1024,8 +1028,8 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
     OHLCVデータを取得し、テクニカル分析を行い、シグナルスコアを計算する。
     """
     
-    # 💥 修正: 設定されたOHLCVの最大取得期間を使用
-    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 250)
+    # 💥 修正: 設定されたOHLCVの最大取得期間 (500) を使用
+    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 500)
     
     try:
         # 1. データの取得
@@ -1034,7 +1038,6 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         # ATR/SMA計算に必要な期間（例: 200期間）のチェック
         # LONG_TERM_SMA_LENGTH (200) よりもデータ本数が少ない場合は、分析続行に不十分と見なす
         if len(ohlcv) < LONG_TERM_SMA_LENGTH + ATR_LENGTH: # 200+14=214本が必要
-            # ATRエラーの原因がデータ不足であることを警告
             logging.warning(f"データ不足: {symbol} - {timeframe} ({len(ohlcv)}/{LONG_TERM_SMA_LENGTH+ATR_LENGTH}期間未満)。ATR_14が計算できない可能性があります。")
             # ただし、ATRのチェックは後で行うため、ここでは続行
             
@@ -1085,11 +1088,14 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         # 4. 🚀 高度なテクニカル分析とスコアリングの実行
         final_signals = []
         
-        # 💥 修正点: ATR列の存在チェック (KeyError対策 v20.0.42で追加済み)
+        # 💥 修正点: ATR列の存在チェック
         atr_column_name = f'ATR_{ATR_LENGTH}'
-        if atr_column_name not in df.columns:
+        
+        # ATRが存在しない場合は、データが完全に不足しているため、スキップ
+        if atr_column_name not in df.columns or df[atr_column_name].iloc[-1] is None or pd.isna(df[atr_column_name].iloc[-1]):
+            # 🚨 以前のコードでこの警告が出ていた原因は、取得リミットの不足であるため、今回の修正で解消されるはず
             logging.warning(f"⚠️ {symbol} - {timeframe} の分析をスキップ: ATRデータ '{atr_column_name}' の計算に必要なデータが不足しています。")
-            return [] # ATRがない場合、リスク計算ができないため、この銘柄の分析全体をスキップ
+            return [] 
             
         last_row = df.iloc[-1]
         
@@ -1162,6 +1168,9 @@ async def main_bot_loop():
     await fetch_open_positions()
     
     current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+    
+    # 💥 修正: 5mの代わりに、TARGET_TIMEFRAMESの最初の要素 ('1m') を分析対象とする
+    target_timeframe = TARGET_TIMEFRAMES[0]
 
     # 3. 全ターゲットシンボルの分析
     for symbol in CURRENT_MONITOR_SYMBOLS:
@@ -1169,8 +1178,8 @@ async def main_bot_loop():
         if any(p['symbol'] == symbol for p in OPEN_POSITIONS):
             continue 
             
-        # 💡 5mタイムフレームを固定で分析
-        signals = await fetch_and_analyze(EXCHANGE_CLIENT, symbol, '5m')
+        # 💡 5m分析を削除し、1mタイムフレームを固定で分析
+        signals = await fetch_and_analyze(EXCHANGE_CLIENT, symbol, target_timeframe)
         
         # フィルタリングされたシグナルを処理
         for signal in signals:
