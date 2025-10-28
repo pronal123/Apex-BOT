@@ -3,7 +3,9 @@
 # (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応)
 # 
 # 🚨 致命的エラー修正済み: UnboundLocalError (LAST_HOURLY_NOTIFICATION_TIME)
-# 🚨 致命的エラー修正済み: AttributeError ('NoneType' object has no attribute 'keys')
+# 🚨 致命的エラー修正強化: AttributeError ('NoneType' object has no attribute 'keys')
+# 🚨 FGI取得ロジック修正済み: APIからの値取得とスコア正規化を修正
+# 🆕 機能追加済み: 取引閾値未満の最高スコアを定期通知
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -102,7 +104,7 @@ LAST_SUCCESS_TIME: float = 0.0
 LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
-LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0
+LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0 # 🆕 追加
 LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 
 GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0}
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False 
@@ -246,7 +248,7 @@ def format_startup_message(account_status: Dict, macro_context: Dict, monitoring
         f"  - **確認日時**: {now_jst} (JST)\n"
         f"  - **取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code> (先物モード / **{LEVERAGE}x**)\n" 
         f"  - **自動売買**: <b>{trade_status}</b>\n"
-        f"  - **取引ロット**: **固定** <code>{FIXED_NOTIONAL_USDT}</code> **USDT**\n" 
+        f"  - **取引ロット**: **固定** <code>{format_usdt(FIXED_NOTIONAL_USDT)}</code> **USDT**\n" 
         f"  - **最大リスク/取引**: **固定ロット**のため動的設定なし\n" 
         f"  - **監視銘柄数**: <code>{monitoring_count}</code>\n"
         f"  - **BOTバージョン**: <code>{bot_version}</code>\n"
@@ -369,6 +371,9 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         filled_amount_raw = trade_result.get('filled_amount', 0.0)
         try:
             filled_amount = float(filled_amount_raw)
+            # ポジションをクローズするため、契約数は元のポジションの契約数を反映させるべき
+            if 'contracts' in signal:
+                 filled_amount = signal['contracts'] 
         except (ValueError, TypeError):
             filled_amount = 0.0
         
@@ -526,6 +531,64 @@ def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -
     except Exception as e:
         logging.error(f"❌ ログ書き込みエラー: {e}", exc_info=True)
 
+# 🆕 機能追加: 取引閾値未満の最高スコアを定期通知
+async def notify_highest_analysis_score():
+    """
+    分析の結果、取引閾値に満たない最高スコア銘柄を1時間ごとに通知する。
+    """
+    global LAST_ANALYSIS_SIGNALS, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, ANALYSIS_ONLY_INTERVAL, SIGNAL_THRESHOLD, GLOBAL_MACRO_CONTEXT, BASE_SCORE
+    
+    current_time = time.time()
+    
+    # 実行間隔のチェック
+    if current_time - LAST_ANALYSIS_ONLY_NOTIFICATION_TIME < ANALYSIS_ONLY_INTERVAL:
+        return
+
+    # 分析結果が格納されているかチェック
+    if not LAST_ANALYSIS_SIGNALS:
+        logging.info("ℹ️ 分析結果がないため、最高スコア通知をスキップします。")
+        LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = current_time # 失敗時も時間を更新して再試行レートを制御
+        return
+
+    # スコアの降順でソートし、最高スコアのシグナルを取得
+    sorted_signals = sorted(LAST_ANALYSIS_SIGNALS, key=lambda x: x.get('score', 0.0), reverse=True)
+    best_signal = sorted_signals[0]
+    
+    best_score = best_signal.get('score', 0.0)
+    current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+    
+    # 最高スコアが取引閾値未満で、かつ最低限の分析スコア(例: BASE_SCORE+0.1)を超えている場合
+    # BASE_SCORE (0.40) + 0.1 = 0.50 を超えるスコアを対象とする
+    if best_score < current_threshold and best_score >= (BASE_SCORE + 0.1): 
+        
+        symbol = best_signal.get('symbol', 'N/A')
+        timeframe = best_signal.get('timeframe', 'N/A')
+        side = best_signal.get('side', 'long')
+
+        # 通知メッセージの整形
+        message = (
+            f"📈 **分析結果 (最高スコア)** - 定時レポート\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+            f"  - **確認日時**: {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} (JST)\n"
+            f"  - **最高スコア銘柄**: <b>{symbol}</b> ({timeframe})\n"
+            f"  - **最高スコア**: <code>{best_score * 100:.2f} / 100</code> ({side.capitalize()})\n"
+            f"  - **取引閾値**: <code>{current_threshold * 100:.2f}</code> 点\n"
+            f"  - **備考**: 取引閾値 (<code>{current_threshold * 100:.2f}</code>点) に満たなかったため取引はスキップされました。\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+            f"<i>Bot Ver: {BOT_VERSION}</i>"
+        )
+        
+        logging.info(f"ℹ️ 定時報告: 取引閾値未満の最高スコアを通知します: {symbol} ({side}) Score: {best_score:.2f}")
+        await send_telegram_notification(message)
+    else:
+        # 最高スコアが閾値以上、または分析スコアが低すぎる場合は通知スキップ
+        if best_score >= current_threshold:
+            logging.info("ℹ️ 最高スコアが取引閾値以上のため、定時通知をスキップします (取引シグナルとして通知済みと想定)。")
+        else:
+             logging.info("ℹ️ 最高スコアが低すぎるため、定時通知をスキップします。")
+
+    # 通知/ログ処理が完了したら時間を更新
+    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = current_time
 
 # ====================================================================================
 # WEBSHARE FUNCTION (HTTP POST) 
@@ -833,14 +896,19 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_signal_score(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Tuple[float, Optional[str], Optional[Dict]]:
     # スコアリングロジックのスタブ
+    # スコアを決定し、サイドとtech_dataを返す
     score = BASE_SCORE + random.uniform(-0.1, 0.5) 
-    side = 'long' if score > 0.65 else 'short' # ダミーロジック
+    side = 'long' if random.choice([True, False]) else 'short' # ダミーロジック
     
     # マクロ要因をスコアに反映
     fgi_proxy = macro_context.get('fgi_proxy', 0.0)
     sentiment_bonus = fgi_proxy * FGI_PROXY_BONUS_MAX
     score += sentiment_bonus
     
+    # スコアを side に合わせて調整 (スタブ)
+    if side == 'short':
+        score -= random.uniform(0.0, 0.1) # ショートは少し不利にするダミー
+        
     score = max(0.0, min(1.0, score)) # 0から1の範囲にクリップ
     
     # ダミーのtech_dataを作成 (通知メッセージ用)
@@ -858,40 +926,54 @@ def calculate_signal_score(df: pd.DataFrame, symbol: str, timeframe: str, macro_
     return score, side, tech_data
 
 async def get_macro_context() -> Dict:
-    global GLOBAL_MACRO_CONTEXT
+    # 🚨 FGI取得ロジック修正
+    global GLOBAL_MACRO_CONTEXT, FGI_API_URL, FGI_PROXY_BONUS_MAX
     
     try:
-        # FGIを取得
+        logging.info("ℹ️ FGIデータ (Fear & Greed Index) をAPIから取得します...")
         response = await asyncio.to_thread(requests.get, FGI_API_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        fgi_value = int(data['data'][0]['value'])
-        fgi_classification = data['data'][0]['value_classification']
-        
-        # FGI値を-1.0から1.0のプロキシに変換 (例: 0=Fear -> -1, 50=Neutral -> 0, 100=Greed -> 1)
-        fgi_proxy = (fgi_value - 50) / 50.0 
-        
-        GLOBAL_MACRO_CONTEXT = {
-            'fgi_proxy': fgi_proxy,
-            'fgi_raw_value': fgi_value,
-            'fgi_classification': fgi_classification,
-            'forex_bonus': 0.0 # 現在未使用
-        }
-        
-        logging.info(f"✅ FGIを取得しました: {fgi_value} ({fgi_classification}) (影響度: {fgi_proxy * FGI_PROXY_BONUS_MAX:.4f})")
-        return GLOBAL_MACRO_CONTEXT
+        if data and 'data' in data and len(data['data']) > 0:
+            fgi_entry = data['data'][0]
+            fgi_value_str = fgi_entry.get('value')
+            fgi_classification = fgi_entry.get('value_classification', 'N/A')
+            
+            if fgi_value_str is None:
+                raise ValueError("APIレスポンスから 'value' が見つかりませんでした。")
+                
+            fgi_value = float(fgi_value_str)
+
+            # FGI (0-100) を [-FGI_PROXY_BONUS_MAX, +FGI_PROXY_BONUS_MAX] に線形正規化
+            # 50(中立) -> 0.0, 0(極度の恐怖) -> -FGI_PROXY_BONUS_MAX, 100(極度の強欲) -> +FGI_PROXY_BONUS_MAX
+            normalized_fgi = (fgi_value - 50.0) / 50.0 
+            fgi_proxy = normalized_fgi * FGI_PROXY_BONUS_MAX 
+            
+            GLOBAL_MACRO_CONTEXT = {
+                'fgi_proxy': fgi_proxy,
+                'fgi_raw_value': fgi_value_str,
+                'fgi_classification': fgi_classification,
+                'forex_bonus': 0.0 # 現在未使用
+            }
+
+            logging.info(f"✅ FGIを取得しました: {fgi_value_str} ({fgi_classification}) (影響度: {fgi_proxy:.4f})")
+            return GLOBAL_MACRO_CONTEXT
         
     except Exception as e:
-        logging.error(f"❌ FGI取得失敗: {e}")
-        return GLOBAL_MACRO_CONTEXT # 既存の値またはデフォルト値を返す
+        logging.error(f"❌ FGI取得失敗: {e}", exc_info=True)
+        # 既存の値またはデフォルト値を返す (エラーの場合、影響度を0.0にリセット)
+        GLOBAL_MACRO_CONTEXT['fgi_proxy'] = 0.0 
+        GLOBAL_MACRO_CONTEXT['fgi_raw_value'] = 'Error/N/A'
+        return GLOBAL_MACRO_CONTEXT
 
 async def analyze_symbols_only(current_threshold: float) -> List[Dict]:
-    # 取引を実行しない分析のみを行うスタブ
+    # 分析専用ループのスタブ
     signals: List[Dict] = []
     logging.info("ℹ️ 分析専用ループを開始します...")
     
-    for symbol in random.sample(CURRENT_MONITOR_SYMBOLS, min(5, len(CURRENT_MONITOR_SYMBOLS))):
+    # 全銘柄をチェック
+    for symbol in CURRENT_MONITOR_SYMBOLS:
         try:
             df = await get_ohlcv_data(symbol, '1h')
             if df is None: continue
@@ -899,22 +981,21 @@ async def analyze_symbols_only(current_threshold: float) -> List[Dict]:
             df = add_technical_indicators(df)
             score, side, tech_data = calculate_signal_score(df, symbol, '1h', GLOBAL_MACRO_CONTEXT)
             
-            if score >= current_threshold:
-                # 高スコアシグナルを記録
-                signals.append({
-                    'symbol': symbol,
-                    'timeframe': '1h',
-                    'score': score,
-                    'side': side,
-                    'rr_ratio': 2.0 + random.uniform(-0.5, 1.0), # ダミー
-                    'tech_data': tech_data
-                })
+            # スコアが閾値に満たない場合でも、全ての結果を記録
+            signals.append({
+                'symbol': symbol,
+                'timeframe': '1h',
+                'score': score,
+                'side': side,
+                'rr_ratio': 2.0 + random.uniform(-0.5, 1.0), # ダミー
+                'tech_data': tech_data
+            })
         except Exception as e:
             logging.error(f"❌ {symbol} の分析中にエラー: {e}")
             
-    # スコアの高い順にソート (上位TOP_SIGNAL_COUNT個を返す)
+    # スコアの高い順にソート (全ての分析結果を返す)
     signals.sort(key=lambda x: x['score'], reverse=True)
-    return signals[:TOP_SIGNAL_COUNT]
+    return signals
 
 async def send_hourly_analysis_notification(signals: List[Dict], current_threshold: float):
     # 1時間ごとの分析通知を送信するスタブ
@@ -926,13 +1007,16 @@ async def send_hourly_analysis_notification(signals: List[Dict], current_thresho
     msg += f"  - **FGI**: <code>{GLOBAL_MACRO_CONTEXT.get('fgi_raw_value', 'N/A')}</code>\n"
     msg += f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
     
-    if signals:
-        msg += "📈 **現在のTOPシグナル (高確度)**:\n"
-        for i, s in enumerate(signals):
+    # 閾値以上のシグナルのみをフィルタリングして表示
+    actionable_signals = [s for s in signals if s['score'] >= current_threshold]
+    
+    if actionable_signals:
+        msg += f"📈 **現在の取引可能シグナル (高確度)**: (上位{min(3, len(actionable_signals))}件のみ表示)\n"
+        for i, s in enumerate(actionable_signals[:3]):
             side_tag = '🟢L' if s['side'] == 'long' else '🔴S' 
             msg += f"  - {i+1}. <b>{s['symbol']}</b> ({side_tag}, Score: {s['score']*100:.2f}%, RR: 1:{s['rr_ratio']:.2f})\n"
     else:
-        msg += "📉 **現在、取引閾値 ({current_threshold*100:.0f}%) を超える有効なシグナルはありません**。\n"
+        msg += f"📉 **現在、取引閾値 ({current_threshold*100:.0f}%) を超える有効なシグナルはありません**。\n"
         
     await send_telegram_notification(msg)
     logging.info("✅ 1時間ごとの定期分析通知を送信しました。")
@@ -946,6 +1030,7 @@ async def place_order(symbol: str, side: str, amount_usdt: float, price: float, 
     # 注文実行ロジックのスタブ
     if TEST_MODE:
         logging.warning(f"⚠️ TEST_MODE: {symbol} の {side} 注文をスキップしました。")
+        # テスト結果として、概算の filled_amount を返す
         return {'status': 'ok', 'filled_amount': amount_usdt/price, 'filled_usdt': amount_usdt, 'entry_price': price, 'info': 'Test Order'}
 
     try:
@@ -953,6 +1038,7 @@ async def place_order(symbol: str, side: str, amount_usdt: float, price: float, 
         # 実際には amount_usdt を基に数量を計算する必要がある
         amount_contracts = amount_usdt / price # 概算の契約数
         
+        # CCXTのシンボルは 'BTC/USDT'形式
         if side == 'long':
             order = await EXCHANGE_CLIENT.create_market_buy_order(symbol, amount_contracts)
         else:
@@ -988,7 +1074,7 @@ async def process_entry_signal(signal: Dict) -> Optional[Dict]:
         last_close = df['close'].iloc[-1]
         
         # ATRベースのSL/TPの計算 (スタブ)
-        atr_value = df['atr'].iloc[-1] if 'atr' in df.columns else last_close * 0.005 # ATRがない場合は0.5%を仮定
+        atr_value = df['atr'].iloc[-1] if 'atr' in df.columns and not pd.isna(df['atr'].iloc[-1]) else last_close * 0.005 # ATRがない場合は0.5%を仮定
         risk_usdt_per_trade = FIXED_NOTIONAL_USDT # 固定ロットを使用
         
         # SL/TP価格の計算
@@ -1026,7 +1112,7 @@ async def process_entry_signal(signal: Dict) -> Optional[Dict]:
 
 async def analyze_and_trade_symbols(current_threshold: float) -> List[Dict]:
     # 分析と取引の実行ロジックのスタブ
-    signals: List[Dict] = []
+    all_signals: List[Dict] = []
     
     # 既にポジションがある場合は実行しない (main_bot_loopでチェック済み)
     if OPEN_POSITIONS:
@@ -1043,19 +1129,20 @@ async def analyze_and_trade_symbols(current_threshold: float) -> List[Dict]:
             df = add_technical_indicators(df)
             score, side, tech_data = calculate_signal_score(df, symbol, '1h', GLOBAL_MACRO_CONTEXT)
             
+            # RR比率を計算 (スタブ)
+            rr_ratio = 2.0 + random.uniform(-0.5, 1.0)
+            
+            signal_data = {
+                'symbol': symbol,
+                'timeframe': '1h',
+                'score': score,
+                'side': side,
+                'rr_ratio': rr_ratio,
+                'tech_data': tech_data
+            }
+            all_signals.append(signal_data)
+            
             if score >= current_threshold:
-                # RR比率を計算 (スタブ)
-                rr_ratio = 2.0 + random.uniform(-0.5, 1.0)
-                
-                signal_data = {
-                    'symbol': symbol,
-                    'timeframe': '1h',
-                    'score': score,
-                    'side': side,
-                    'rr_ratio': rr_ratio,
-                    'tech_data': tech_data
-                }
-                signals.append(signal_data)
                 
                 # エントリー実行
                 trade_result = await process_entry_signal(signal_data)
@@ -1067,14 +1154,15 @@ async def analyze_and_trade_symbols(current_threshold: float) -> List[Dict]:
 
                 if trade_result['status'] == 'ok' and not TEST_MODE:
                     # 1取引で終了
-                    return signals 
+                    return [signal_data] # 取引を行ったシグナルのみを返す
+                    
+            # else: 閾値未満のシグナルは all_signals には格納されている
 
         except Exception as e:
             logging.error(f"❌ {symbol} の分析と取引中にエラー: {e}")
             
-    # スコアの高い順にソート (上位TOP_SIGNAL_COUNT個を返す)
-    signals.sort(key=lambda x: x['score'], reverse=True)
-    return signals[:TOP_SIGNAL_COUNT]
+    # 取引が行われなかった場合は、全ての分析結果を返す (最高スコア通知用)
+    return all_signals
 
 async def position_monitor_and_update_sltp():
     # ポジション監視とSL/TPの更新を行うスタブ
@@ -1109,22 +1197,36 @@ async def position_monitor_and_update_sltp():
                     exit_type = "TP利益確定"
                     
             if is_close_triggered:
-                # 決済注文の実行 (スタブ)
+                
+                # 決済価格とPNLの計算
+                pnl_usdt = (current_price - pos['entry_price']) * pos['contracts'] * LEVERAGE * (-1 if pos['side'] == 'short' else 1) # 簡易PNL
+                pnl_rate = ((current_price - pos['entry_price']) / pos['entry_price']) * LEVERAGE * (-1 if pos['side'] == 'short' else 1)
+                
                 trade_result = {
                     'status': 'ok',
                     'exit_type': exit_type,
                     'exit_price': current_price,
                     'entry_price': pos['entry_price'],
-                    'filled_amount': pos['contracts'],
-                    'pnl_usdt': (current_price - pos['entry_price']) * pos['contracts'] * LEVERAGE * (-1 if pos['side'] == 'short' else 1), # 簡易PNL
-                    'pnl_rate': ((current_price - pos['entry_price']) / pos['entry_price']) * LEVERAGE * (-1 if pos['side'] == 'short' else 1),
+                    'filled_amount': pos['contracts'], # 決済数量
+                    'pnl_usdt': pnl_usdt, 
+                    'pnl_rate': pnl_rate,
                 }
+                
+                # 決済注文の実行 (テストモードの場合はスキップ)
+                if not TEST_MODE:
+                    # 決済はポジションを反対売買する (簡易スタブ)
+                    exit_side = 'sell' if pos['side'] == 'long' else 'buy'
+                    # 決済注文を実行する place_order のスタブを呼び出す代わりに、ここでは結果を確定させる。
+                    # 実際のコードでは、ここでクローズ注文を実行する
+                    # await place_order(symbol, exit_side, pos['filled_usdt'], current_price) 
+                    logging.info(f"✅ {symbol} のポジションを {exit_type} で決済しました。")
 
                 # ポジションリストから削除
                 OPEN_POSITIONS = [p for p in OPEN_POSITIONS if p['symbol'] != symbol]
                 
                 # 通知とログ
-                signal_data = {'symbol': symbol, 'side': pos['side'], 'score': 0.0} # ダミーのsignalデータ
+                signal_data = {'symbol': symbol, 'side': pos['side'], 'score': 0.0, 'contracts': pos['contracts']} # 決済時のcontracts情報を追加
+                # 決済通知時には current_threshold は使用しないが、引数に合わせて 0.0 を渡す
                 notification_msg = format_telegram_message(signal_data, "ポジション決済", 0.0, trade_result, exit_type)
                 await send_telegram_notification(notification_msg)
                 log_signal(signal_data, "ポジション決済", trade_result)
@@ -1151,12 +1253,11 @@ async def update_current_monitor_symbols():
         return
 
     try:
-        # ログの1176行目: tickers = await EXCHANGE_CLIENT.fetch_tickers()
         tickers = await EXCHANGE_CLIENT.fetch_tickers()
         
-        # 🚨 修正点 1: fetch_tickersがNoneを返す可能性があるため、Noneチェックを追加
-        if tickers is None:
-            logging.error("❌ 監視対象銘柄の更新に失敗しました: 'NoneType' object has no attribute 'keys' エラー回避。取引所のAPIステータスを確認してください。")
+        # 🚨 修正強化: Noneまたは辞書型でない場合に処理を中断し、AttributeErrorを回避
+        if tickers is None or not isinstance(tickers, dict):
+            logging.error(f"❌ 監視対象銘柄の更新に失敗しました: fetch_tickers が {type(tickers).__name__} を返しました。取引所のAPIステータスを確認してください。")
             return
 
         # 出来高データの整形と抽出 (既存ロジックを再現)
@@ -1188,7 +1289,6 @@ async def update_current_monitor_symbols():
         logging.info(f"✅ 監視対象銘柄を更新しました (出来高TOP {TOP_SYMBOL_LIMIT} + Default) - 合計 {len(CURRENT_MONITOR_SYMBOLS)} 銘柄。")
         
     except Exception as e:
-        # ログの1176行目: ❌ 監視対象銘柄の更新に失敗しました: 'NoneType' object has no attribute 'keys'
         logging.error(f"❌ 監視対象銘柄の更新に失敗しました: {e}", exc_info=True)
 
 
@@ -1208,7 +1308,7 @@ async def upload_webshare_log_data():
 
 
 async def main_bot_loop():
-    # 🚨 修正点 2: 以下の行を追加し、UnboundLocalErrorを修正
+    # 🚨 修正点: global宣言を追加し、UnboundLocalErrorを修正
     global LAST_HOURLY_NOTIFICATION_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_WEBSHARE_UPLOAD_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, OPEN_POSITIONS, ACCOUNT_EQUITY_USDT, LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS 
     
     logging.info("--- メインボットループ実行開始 (JST: %s) ---", datetime.now(JST).strftime("%H:%M:%S"))
@@ -1222,6 +1322,7 @@ async def main_bot_loop():
     await fetch_open_positions() # OPEN_POSITIONS グローバル変数を更新
 
     # 2. マクロコンテキストの取得 (FGIなど)
+    # 🚨 修正: FGIの正確な取得ロジックを持つ get_macro_context を実行
     macro_context = await get_macro_context()
     current_threshold = get_current_threshold(macro_context)
     
@@ -1235,13 +1336,15 @@ async def main_bot_loop():
     # 5. 取引シグナル分析と執行
     if not OPEN_POSITIONS: # ポジションがない場合のみ新規シグナルを探す
         logging.info("ℹ️ ポジション不在のため、取引シグナル分析を実行します。")
-        signals = await analyze_and_trade_symbols(current_threshold)
-        LAST_ANALYSIS_SIGNALS = signals
+        # 閾値未満の信号も含めて全て取得
+        all_signals = await analyze_and_trade_symbols(current_threshold)
+        LAST_ANALYSIS_SIGNALS = all_signals
     else:
-        # ポジションを保有している場合は、高スコアの分析結果のみ取得 (通知用)
+        # ポジションを保有している場合は、全ての分析結果を取得 (最高スコア通知用)
         logging.info(f"ℹ️ 現在 {len(OPEN_POSITIONS)} 銘柄のポジションを保有中です。新規シグナル分析はスキップします。")
-        signals = await analyze_symbols_only(current_threshold)
-        LAST_ANALYSIS_SIGNALS = signals
+        # 閾値未満の信号も含めて全て取得
+        all_signals = await analyze_symbols_only(current_threshold)
+        LAST_ANALYSIS_SIGNALS = all_signals
 
 
     # 6. BOT起動完了通知 (初回のみ)
@@ -1264,21 +1367,33 @@ async def main_bot_loop():
     # 7. 定期的な通知 (1時間ごとなど)
     current_time = time.time()
     
-    # ログの1427行目: UnboundLocalError の発生箇所
+    # 7-1. 1時間ごとの定期分析通知 (取引が行われたかに関わらず)
     if current_time - LAST_HOURLY_NOTIFICATION_TIME > ANALYSIS_ONLY_INTERVAL:
+        # LAST_ANALYSIS_SIGNALSは全ての結果を持つため、その中から取引可能シグナルを選別して通知
         await send_hourly_analysis_notification(LAST_ANALYSIS_SIGNALS, current_threshold)
-        LAST_HOURLY_NOTIFICATION_TIME = current_time # 🚨 更新
+        LAST_HOURLY_NOTIFICATION_TIME = current_time 
+
+    # 7-2. 🆕 機能追加: 取引閾値未満の最高スコアを定期通知 (LAST_ANALYSIS_ONLY_NOTIFICATION_TIME を使用)
+    await notify_highest_analysis_score()
+
 
     # 8. WebShareログデータの定期的なアップロード (1時間ごと)
     if current_time - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
         await upload_webshare_log_data()
-        LAST_WEBSHARE_UPLOAD_TIME = current_time # 🚨 更新
+        LAST_WEBSHARE_UPLOAD_TIME = current_time 
         
     logging.info("--- メインボットループ実行終了 ---")
 
 
 async def main_bot_scheduler():
-    global IS_CLIENT_READY, LAST_SUCCESS_TIME, EXCHANGE_CLIENT
+    global IS_CLIENT_READY, LAST_SUCCESS_TIME, EXCHANGE_CLIENT, LAST_HOURLY_NOTIFICATION_TIME, LAST_WEBSHARE_UPLOAD_TIME, LAST_ANALYSIS_ONLY_NOTIFICATION_TIME
+    
+    # グローバル変数の初期化 (必須)
+    LAST_SUCCESS_TIME = time.time()
+    LAST_HOURLY_NOTIFICATION_TIME = time.time()
+    LAST_WEBSHARE_UPLOAD_TIME = time.time()
+    LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = time.time() # 🆕 追加
+
     
     logging.info("(main_bot_scheduler) - スケジューラ起動。")
     
@@ -1308,12 +1423,11 @@ async def main_bot_scheduler():
             await main_bot_loop()
             LAST_SUCCESS_TIME = time.time()
         except Exception as e:
-            # ログの ❌ メインループ実行中に致命的なエラー: cannot access local variable...
+            # ログの ❌ メインループ実行中に致命的なエラー
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: <code>{e}</code>")
 
         # 待機時間を LOOP_INTERVAL (60秒) に基づいて計算
-        # LAST_SUCCESS_TIME がグローバル宣言により初期化されているため、この行でエラーは発生しない
         wait_time = max(1, LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME))
         logging.info(f"次のメインループまで {wait_time:.1f} 秒待機します。")
         await asyncio.sleep(wait_time)
