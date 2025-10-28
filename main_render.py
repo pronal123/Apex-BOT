@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.40 - Future Trading / 30x Leverage 
-# (Feature: スコアリングシステム v2.0, 高度分析 ADX/ADL/RSI過熱 統合)
+# Apex BOT v20.0.41 - Future Trading / 30x Leverage 
+# (Feature: ATR_14 KeyError の修正, 高度分析 ADX/ADL/RSI過熱 統合)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.40"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.41"            # 💡 BOTバージョンを更新 (ATR_14 KeyError Fix)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -130,7 +130,7 @@ LIQUIDITY_BONUS_MAX = 0.06          # 流動性ボーナス
 FGI_PROXY_BONUS_MAX = 0.05         # FGIマクロ要因最大影響度
 FOREX_BONUS_MAX = 0.0               # 為替マクロ要因最大影響度 (未使用)
 
-# 💎 新規追加: 高度分析用定数 (前回の回答で定義されたもの)
+# 💎 新規追加: 高度分析用定数 
 RSI_OVERBOUGHT_PENALTY = -0.12  # RSIが極端な水準にある場合の重大な減点
 RSI_OVERSOLD_THRESHOLD = 30     # 買いシグナル時のRSI下限閾値
 RSI_OVERBOUGHT_THRESHOLD = 70   # 売りシグナル時のRSI上限閾値
@@ -832,7 +832,7 @@ async def fetch_open_positions() -> List[Dict]:
     return []
 
 # ====================================================================================
-# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.40 INTEGRATION)
+# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.41 INTEGRATION)
 # ====================================================================================
 
 # ------------------------------------------------
@@ -933,14 +933,12 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
         tech_data['macd_penalty_value'] = -MACD_CROSS_PENALTY 
         
     # 構造的優位性 (SMA50との比較による簡略化)
-    # SMA_50が計算されていない可能性があるため、ここで再計算 (df.ta.sma(length=50, append=True))
-    # DataFrameの再利用を避けるため、必要な指標は fetch_and_analyze で全て計算済みとする
     # SMA_50の有無をチェック
     if 'SMA_50' in df.columns:
         sma_50 = last_row['SMA_50']
         tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS if (signal_type == 'long' and current_close > sma_50) or (signal_type == 'short' and current_close < sma_50) else 0.0
     else:
-        # SMA_50が存在しない場合は、SMA200を一時的に使用 (SMA50の計算はfetch_and_analyzeで追加済みのため、ここは不要だが念のため)
+        # SMA_50が存在しない場合は、SMA200を一時的に使用 
         tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS if (signal_type == 'long' and current_close > long_term_sma) or (signal_type == 'short' and current_close < long_term_sma) else 0.0
 
 
@@ -1052,6 +1050,9 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         df.ta.ad(append=True) # A/Dライン
         df.ta.adx(append=True) # ADX/DMI
         
+        # 💥 修正点: 欠落していた ATR の計算を追加
+        df.ta.atr(length=ATR_LENGTH, append=True) # ATR_14を追加
+        
         # データが NaN を含む行を削除
         df = df.dropna()
         if df.empty or len(df) < 5:
@@ -1085,9 +1086,9 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
             # 4-2. 💰 総合スコアの計算
             final_score = calculate_signal_score(signal)
             
-            # 4-3. リスク/リワードの計算
+            # 4-3. リスク/リワードの計算 (ATRを使用して動的に計算)
             last_row = df.iloc[-1]
-            atr = last_row[f'ATR_{ATR_LENGTH}']
+            atr = last_row[f'ATR_{ATR_LENGTH}'] # 修正済み: KeyErrorの発生源だった行
             entry_price = signal['entry_price']
             
             # ATRベースのリスク幅
@@ -1121,14 +1122,18 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         return final_signals
 
     except Exception as e:
-        logging.error(f"❌ {symbol} - {timeframe} の分析中にエラー: {e}", exc_info=True)
+        # エラーログにATR_14以外のKeyErrorなど、他の致命的なエラーの可能性を追記
+        if 'ATR' not in str(e) and 'KeyError' in str(e):
+             logging.error(f"❌ {symbol} - {timeframe} の分析中に致命的なKeyError: {e}", exc_info=True)
+        else:
+            logging.error(f"❌ {symbol} - {timeframe} の分析中にエラー: {e}", exc_info=True)
         return []
 
 # ====================================================================================
 # EXCHANGE AND MAIN BOT LOOP
 # ====================================================================================
 
-# ... (fetch_and_analyzeは上記で定義済み) ...
+# ... (main_bot_loop, fetch_fgi_score, position_monitor_loop, position_monitor_scheduler, main_bot_scheduler, FastAPI関連は省略) ...
 
 async def main_bot_loop():
     """メインの取引判断と実行ループ"""
