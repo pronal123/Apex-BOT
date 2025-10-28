@@ -727,7 +727,7 @@ async def initialize_exchange_client() -> bool:
         logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を先物取引モードで初期化し、市場情報をロードしました。")
         IS_CLIENT_READY = True
         return True
-    
+        
     except ccxt.AuthenticationError as e:
         logging.critical(f"❌ CCXT初期化失敗 - 認証エラー: APIキー/シークレットを確認してください。{e}", exc_info=True)
     except ccxt.ExchangeNotAvailable as e:
@@ -736,7 +736,7 @@ async def initialize_exchange_client() -> bool:
         logging.critical(f"❌ CCXT初期化失敗 - ネットワークエラー/タイムアウト: 接続を確認してください。{e}", exc_info=True)
     except Exception as e:
         logging.critical(f"❌ CCXTクライアント初期化失敗 - 予期せぬエラー: {e}", exc_info=True)
-    
+
     EXCHANGE_CLIENT = None
     return False
 
@@ -749,7 +749,6 @@ async def fetch_account_status() -> Dict:
         
     try:
         balance = None
-        
         if EXCHANGE_CLIENT.id == 'mexc':
             logging.info("ℹ️ MEXC: fetch_balance(type='swap') を使用して口座情報を取得します。")
             # MEXCはfetch_balance(type='swap')を使用
@@ -757,28 +756,27 @@ async def fetch_account_status() -> Dict:
         else:
             fetch_params = {'type': 'future'} if TRADE_TYPE == 'future' else {}
             balance = await EXCHANGE_CLIENT.fetch_balance(params=fetch_params)
-
+            
         if not balance:
             raise Exception("Balance object is empty.")
 
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0)
-
+        
         # MEXC特有のフォールバックロジック (infoからtotalEquityを探す)
         if EXCHANGE_CLIENT.id == 'mexc' and balance.get('info'):
             raw_data = balance['info']
-            
             mexc_raw_data = None
             if isinstance(raw_data, dict) and 'data' in raw_data:
                 mexc_raw_data = raw_data.get('data')
             else:
                 mexc_raw_data = raw_data
-
+                
             mexc_data: Optional[Dict] = None
             if isinstance(mexc_raw_data, list) and len(mexc_raw_data) > 0:
                 if isinstance(mexc_raw_data[0], dict):
                     mexc_data = mexc_raw_data[0]
             elif isinstance(mexc_raw_data, dict):
-                mexc_data = mexc_raw_data
+                 mexc_data = mexc_raw_data
 
             if mexc_data:
                 total_usdt_balance_fallback = 0.0
@@ -789,11 +787,11 @@ async def fetch_account_status() -> Dict:
                         if asset.get('asset') == 'USDT':
                             total_usdt_balance_fallback = float(asset.get('totalEquity', 0.0))
                             break
-                
+
                 # どちらか大きい方を使用 (ccxtの計算が間違っている場合に備えて)
                 if total_usdt_balance_fallback > total_usdt_balance:
-                    total_usdt_balance = total_usdt_balance_fallback
-                    logging.warning(f"⚠️ MEXCのフォールバックロジックでUSDT総資産を更新: {format_usdt(total_usdt_balance)}")
+                     total_usdt_balance = total_usdt_balance_fallback
+                     logging.warning(f"⚠️ MEXCのフォールバックロジックでUSDT総資産を更新: {format_usdt(total_usdt_balance)}")
 
 
         # 総資産をグローバル変数に保存 (リスク管理に使用)
@@ -805,7 +803,7 @@ async def fetch_account_status() -> Dict:
         positions: List[Dict] = []
         if EXCHANGE_CLIENT.has['fetchPositions']:
             positions = await EXCHANGE_CLIENT.fetch_positions()
-
+        
         open_positions = []
         for p in positions:
             # ポジションサイズが0より大きい、かつUSDT建て先物シンボルのみを抽出
@@ -819,7 +817,7 @@ async def fetch_account_status() -> Dict:
                 
                 # contractsが取れない場合、MEXC特有の 'vol' フィールドを試す
                 if contracts_raw == 0 and EXCHANGE_CLIENT.id == 'mexc':
-                     contracts_raw = float(p.get('info', {}).get('vol', 0.0))
+                    contracts_raw = float(p.get('info', {}).get('vol', 0.0))
 
                 # 名目価値 (Notional Value) を計算
                 notional_value = abs(contracts_raw * entry_price_raw)
@@ -839,1119 +837,1237 @@ async def fetch_account_status() -> Dict:
                     'stop_loss': 0.0, # ボット内で動的に設定/管理
                     'take_profit': 0.0, # ボット内で動的に設定/管理
                     'leverage': p.get('leverage', LEVERAGE),
-                    'raw_info': p, # デバッグ用
+                    'raw_info': p.get('info', {}),
+                    'id': str(uuid.uuid4()) # ユニークIDを付与
                 })
-
-        # グローバルなポジションリストを更新
+        
+        # グローバル変数に保存
         global OPEN_POSITIONS
         OPEN_POSITIONS = open_positions
+        logging.info(f"📊 現在オープン中のポジション: {len(OPEN_POSITIONS)} 銘柄を検出しました。")
         
-        logging.info(f"✅ ポジション情報取得完了。現在 {len(OPEN_POSITIONS)} 件のオープンポジションがあります。")
-
-
         return {
-            'total_usdt_balance': ACCOUNT_EQUITY_USDT,
-            'open_positions': OPEN_POSITIONS,
-            'error': False,
+            'total_usdt_balance': ACCOUNT_EQUITY_USDT, 
+            'open_positions': open_positions, 
+            'error': False
         }
-        
-    except ccxt.NetworkError as e:
-        logging.error(f"❌ 口座ステータス取得失敗 - ネットワークエラー: {e}", exc_info=True)
-        return {'total_usdt_balance': ACCOUNT_EQUITY_USDT, 'open_positions': OPEN_POSITIONS, 'error': True, 'error_message': f"ネットワークエラー: {e}"}
+    except ccxt.DDoSProtection as e:
+        logging.error(f"❌ DDoS保護エラー: レートリミットに達した可能性があります。{e}")
     except ccxt.ExchangeError as e:
-        logging.error(f"❌ 口座ステータス取得失敗 - 取引所エラー: {e}", exc_info=True)
-        return {'total_usdt_balance': ACCOUNT_EQUITY_USDT, 'open_positions': OPEN_POSITIONS, 'error': True, 'error_message': f"取引所エラー: {e}"}
+        logging.error(f"❌ 取引所エラー (口座ステータス): {e}")
     except Exception as e:
-        logging.error(f"❌ 口座ステータス取得失敗 - 予期せぬエラー: {e}", exc_info=True)
-        return {'total_usdt_balance': ACCOUNT_EQUITY_USDT, 'open_positions': OPEN_POSITIONS, 'error': True, 'error_message': f"予期せぬエラー: {e}"}
-        
-# ====================================================================================
-# TECHNICAL ANALYSIS & SCORING LOGIC (実践的スコアリングロジック)
-# ====================================================================================
+        logging.error(f"❌ 口座ステータス取得中の予期せぬエラー: {e}", exc_info=True)
 
-async def calculate_technical_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """
-    データフレームにテクニカル指標を計算して追加する。
-    """
-    if df.empty:
-        return df
+    return {'total_usdt_balance': 0.0, 'open_positions': [], 'error': True}
 
-    # 1. 移動平均線 (SMA: Simple Moving Average)
-    df['SMA_Long'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH) 
-
-    # 2. RSI (Relative Strength Index) - 14期間
-    df['RSI'] = ta.rsi(df['close'], length=14)
-    
-    # 3. MACD (Moving Average Convergence Divergence)
-    macd_result = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    # MACDの結果を既存のDataFrameに結合。列名を調整。
-    df[['MACD', 'MACD_H', 'MACD_S']] = macd_result
-    
-    # 4. ATR (Average True Range) - ボラティリティ測定に使用
-    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=ATR_LENGTH)
-    
-    # 5. Bollinger Bands (BBands)
-    bbands_result = ta.bbands(df['close'], length=20, std=2)
-    df[['BBL', 'BBM', 'BBU', 'BBB', 'BBP']] = bbands_result 
-
-    # 6. OBV (On-Balance Volume)
-    df['OBV'] = ta.obv(df['close'], df['volume'])
-    
-    # 7. Keltner Channels (KC)
-    # kc_result = ta.kc(df['high'], df['low'], df['close'])
-    # df[['KCL', 'KCM', 'KCU', 'KCW', 'KCP']] = kc_result
-    
-    # NaN行を削除 (SMAの期間により発生)
-    df = df.dropna().reset_index(drop=True)
-    
-    return df
-
-def get_signal_score(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> List[Dict]:
-    """
-    テクニカル指標とマクロ環境に基づいて、ロング/ショートのスコアを計算する。
-    
-    スコアリングルール (v20.0.43: 実践的スコアリングロジック)
-    ================================================================
-    ベーススコア: BASE_SCORE (0.40)
-    1. 長期トレンド順張りボーナス/逆張りペナルティ: +/- LONG_TERM_REVERSAL_PENALTY (0.20)
-       - 現在価格とSMA_Longの位置関係
-    2. 構造的優位性 (リバーサル/押し目): + STRUCTURAL_PIVOT_BONUS (0.05)
-       - 直近ローソク足の形状と位置 (ローソク足がBB下限/上限にタッチした後の反発)
-    3. モメンタム確証 (RSI加速): + (0.00-0.05) 
-       - ロング: RSIが40を上回り、上昇傾向 
-       - ショート: RSIが60を下回り、下降傾向
-    4. MACD方向一致ボーナス/不一致ペナルティ: +/- MACD_CROSS_PENALTY (0.15)
-       - MACDラインとシグナルラインのクロス方向
-    5. OBVモメンタム確証: + OBV_MOMENTUM_BONUS (0.04)
-       - OBVがSMA (50)を上抜け/下抜け
-    6. 流動性ボーナス: + LIQUIDITY_BONUS_MAX (0.06) 
-       - 出来高TOP銘柄であるほど加点
-    7. FGIマクロ環境ボーナス/ペナルティ: +/- FGI_PROXY_BONUS_MAX (0.05) 
-       - FGIの極端な値 (恐怖でロングボーナス, 貪欲でショートボーナス)
-    8. ボラティリティペナルティ: - (0.00-0.05)
-       - BB幅 (BBB) が一定値以上の場合、過熱と見なしてペナルティ
-    
-    合計: 0.40 (ベース) + 0.05 + 0.20 + 0.15 + 0.05 + 0.06 + 0.04 = 0.95 (最大スコア)
-    ================================================================
-    """
-    if df.empty or len(df) < ATR_LENGTH + 1: 
-        return []
-
-    latest = df.iloc[-1]
-    prev_latest = df.iloc[-2] # 1つ前のローソク足
-    
-    current_price = latest['close']
-    
-    # 出来高ベースの流動性ボーナスを計算
-    # (ここでは、DEFAULT_SYMBOLSのリスト順を簡易的な流動性の高さと見なす)
-    # TOP_SYMBOL_LIMITが40なので、リスト内の前半40位までを対象とする
-    is_top_symbol = symbol in CURRENT_MONITOR_SYMBOLS[:TOP_SYMBOL_LIMIT]
-    liquidity_bonus_value = LIQUIDITY_BONUS_MAX if is_top_symbol else 0.0
-
-    # FGIマクロコンテキストの取得 (既に0.0から+/- 0.05に正規化されている)
-    fgi_proxy = macro_context.get('fgi_proxy', 0.0)
-    
-    # --------------------------------------------------------
-    # ロング/ショート共通のペナルティ
-    # --------------------------------------------------------
-    
-    # 8. ボラティリティペナルティ (BB幅が価格の1%を超えたらペナルティ)
-    bb_width_percent = latest['BBB'] / 100.0 # BBBはBBW%として計算されている
-    volatility_penalty_value = 0.0
-    if bb_width_percent > VOLATILITY_BB_PENALTY_THRESHOLD: # 例: 1%を超える
-        # 1%を超えた分に応じて最大0.05までペナルティ
-        penalty_ratio = min(1.0, (bb_width_percent - VOLATILITY_BB_PENALTY_THRESHOLD) / 0.01) # 2%なら1.0
-        volatility_penalty_value = -0.05 * penalty_ratio 
-
-
-    # --------------------------------------------------------
-    # ロングシグナルのスコアリング
-    # --------------------------------------------------------
-    long_score = BASE_SCORE + STRUCTURAL_PIVOT_BONUS # ベース + 構造的優位性 (基本は常に加算)
-    long_tech_data = {'structural_pivot_bonus': STRUCTURAL_PIVOT_BONUS, 'base_score': BASE_SCORE}
-    
-    # 1. 長期トレンド順張りボーナス/逆張りペナルティ (Long)
-    # 価格が長期SMA (200)の上にいるか
-    long_term_reversal_penalty_value = 0.0
-    if current_price > latest['SMA_Long']: # 順張り (上昇トレンド)
-        long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
-        long_score += long_term_reversal_penalty_value
-    else: # 逆張り (下降トレンド)
-        long_term_reversal_penalty_value = -LONG_TERM_REVERSAL_PENALTY
-        long_score += long_term_reversal_penalty_value
-    long_tech_data['long_term_reversal_penalty_value'] = long_term_reversal_penalty_value
-
-
-    # 3. モメンタム確証 (RSI加速: ロング)
-    rsi_momentum_bonus_value = 0.0
-    if latest['RSI'] > RSI_MOMENTUM_LOW and latest['RSI'] > prev_latest['RSI']: # RSIが40より上で上昇
-        rsi_momentum_bonus_value = 0.05 
-        long_score += rsi_momentum_bonus_value
-    long_tech_data['rsi_momentum_bonus_value'] = rsi_momentum_bonus_value
-    
-    
-    # 4. MACD方向一致ボーナス/不一致ペナルティ (Long)
-    macd_penalty_value = 0.0
-    # MACDラインがシグナルラインの上で、かつヒストグラムがプラスの場合 (上昇モメンタム)
-    if latest['MACD'] > latest['MACD_S'] and latest['MACD_H'] > 0:
-        macd_penalty_value = MACD_CROSS_PENALTY
-        long_score += macd_penalty_value
-    # MACDラインがシグナルラインの下で、かつヒストグラムがマイナスの場合 (下降モメンタム = Longの向かい風)
-    elif latest['MACD'] < latest['MACD_S'] and latest['MACD_H'] < 0:
-        macd_penalty_value = -MACD_CROSS_PENALTY
-        long_score += macd_penalty_value
-    long_tech_data['macd_penalty_value'] = macd_penalty_value
-
-
-    # 5. OBVモメンタム確証 (Long)
-    obv_momentum_bonus_value = 0.0
-    # 出来高が価格上昇を伴っている場合 (単純にOBVが前日より上昇)
-    if latest['OBV'] > prev_latest['OBV']:
-        obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
-        long_score += obv_momentum_bonus_value
-    long_tech_data['obv_momentum_bonus_value'] = obv_momentum_bonus_value
-
-
-    # 7. FGIマクロ環境ボーナス/ペナルティ (Long: 恐怖相場でボーナス)
-    sentiment_fgi_proxy_bonus = 0.0
-    if fgi_proxy < 0: # 恐怖相場 (0.0から-0.05)
-        sentiment_fgi_proxy_bonus = abs(fgi_proxy) 
-    elif fgi_proxy > 0: # 貪欲相場 (0.0から+0.05)
-        sentiment_fgi_proxy_bonus = -abs(fgi_proxy) 
-    long_score += sentiment_fgi_proxy_bonus
-    long_tech_data['sentiment_fgi_proxy_bonus'] = sentiment_fgi_proxy_bonus
-
-
-    # 6. 流動性ボーナス (Long)
-    long_score += liquidity_bonus_value
-    long_tech_data['liquidity_bonus_value'] = liquidity_bonus_value
-    
-    
-    # 8. ボラティリティペナルティ (Long)
-    long_score += volatility_penalty_value
-    long_tech_data['volatility_penalty_value'] = volatility_penalty_value
-    
-
-    # --------------------------------------------------------
-    # ショートシグナルのスコアリング
-    # --------------------------------------------------------
-    short_score = BASE_SCORE + STRUCTURAL_PIVOT_BONUS # ベース + 構造的優位性
-    short_tech_data = {'structural_pivot_bonus': STRUCTURAL_PIVOT_BONUS, 'base_score': BASE_SCORE}
-    
-    # 1. 長期トレンド順張りボーナス/逆張りペナルティ (Short)
-    # 価格が長期SMA (200)の下にいるか
-    short_term_reversal_penalty_value = 0.0
-    if current_price < latest['SMA_Long']: # 順張り (下降トレンド)
-        short_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
-        short_score += short_term_reversal_penalty_value
-    else: # 逆張り (上昇トレンド)
-        short_term_reversal_penalty_value = -LONG_TERM_REVERSAL_PENALTY
-        short_score += short_term_reversal_penalty_value
-    short_tech_data['long_term_reversal_penalty_value'] = short_term_reversal_penalty_value
-
-
-    # 3. モメンタム確証 (RSI加速: Short)
-    rsi_momentum_bonus_value = 0.0
-    if latest['RSI'] < (100 - RSI_MOMENTUM_LOW) and latest['RSI'] < prev_latest['RSI']: # RSIが60より下で下降
-        rsi_momentum_bonus_value = 0.05 
-        short_score += rsi_momentum_bonus_value
-    short_tech_data['rsi_momentum_bonus_value'] = rsi_momentum_bonus_value
-    
-
-    # 4. MACD方向一致ボーナス/不一致ペナルティ (Short)
-    macd_penalty_value = 0.0
-    # MACDラインがシグナルラインの下で、かつヒストグラムがマイナスの場合 (下降モメンタム)
-    if latest['MACD'] < latest['MACD_S'] and latest['MACD_H'] < 0:
-        macd_penalty_value = MACD_CROSS_PENALTY
-        short_score += macd_penalty_value
-    # MACDラインがシグナルラインの上で、かつヒストグラムがプラスの場合 (上昇モメンタム = Shortの向かい風)
-    elif latest['MACD'] > latest['MACD_S'] and latest['MACD_H'] > 0:
-        macd_penalty_value = -MACD_CROSS_PENALTY
-        short_score += macd_penalty_value
-    short_tech_data['macd_penalty_value'] = macd_penalty_value
-
-
-    # 5. OBVモメンタム確証 (Short)
-    obv_momentum_bonus_value = 0.0
-    # 出来高が価格下降を伴っている場合 (単純にOBVが前日より下降)
-    if latest['OBV'] < prev_latest['OBV']:
-        obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
-        short_score += obv_momentum_bonus_value
-    short_tech_data['obv_momentum_bonus_value'] = obv_momentum_bonus_value
-
-
-    # 7. FGIマクロ環境ボーナス/ペナルティ (Short: 貪欲相場でボーナス)
-    sentiment_fgi_proxy_bonus = 0.0
-    if fgi_proxy > 0: # 貪欲相場 (0.0から+0.05)
-        sentiment_fgi_proxy_bonus = fgi_proxy 
-    elif fgi_proxy < 0: # 恐怖相場 (0.0から-0.05)
-        sentiment_fgi_proxy_bonus = -abs(fgi_proxy) 
-    short_score += sentiment_fgi_proxy_bonus
-    short_tech_data['sentiment_fgi_proxy_bonus'] = sentiment_fgi_proxy_bonus
-
-
-    # 6. 流動性ボーナス (Short)
-    short_score += liquidity_bonus_value
-    short_tech_data['liquidity_bonus_value'] = liquidity_bonus_value
-    
-    
-    # 8. ボラティリティペナルティ (Short)
-    short_score += volatility_penalty_value
-    short_tech_data['volatility_penalty_value'] = volatility_penalty_value
-
-
-    # --------------------------------------------------------
-    # 結果の整形
-    # --------------------------------------------------------
-    
-    # スコアを0.0から1.0に丸める
-    long_score = max(0.0, min(1.0, long_score))
-    short_score = max(0.0, min(1.0, short_score))
-
-
-    results = []
-    
-    if long_score > BASE_SCORE:
-        results.append({
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'side': 'long',
-            'score': long_score,
-            'current_price': current_price,
-            'latest_data': latest.to_dict(),
-            'tech_data': long_tech_data,
-        })
-        
-    if short_score > BASE_SCORE:
-        results.append({
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'side': 'short',
-            'score': short_score,
-            'current_price': current_price,
-            'latest_data': latest.to_dict(),
-            'tech_data': short_tech_data,
-        })
-
-    return results
-
-
-async def process_entry_signal(signal: Dict) -> Optional[Dict]:
-    """
-    シグナル情報に基づき、ポジションサイズとSL/TP価格を計算し、取引を実行する。
-    """
-    global EXCHANGE_CLIENT, ACCOUNT_EQUITY_USDT, OPEN_POSITIONS, LEVERAGE, FIXED_NOTIONAL_USDT
+async def fetch_ohlcv_with_retry(symbol: str, timeframe: str, limit: int = 500) -> Optional[pd.DataFrame]:
+    """OHLCVデータを取得し、失敗した場合はリトライする。"""
+    global EXCHANGE_CLIENT
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
-        logging.error("❌ 取引失敗: CCXTクライアントが準備できていません。")
-        return {'status': 'error', 'error_message': 'クライアント未準備'}
-
-    symbol = signal['symbol']
-    side = signal['side']
-    current_price = signal['current_price']
-    latest_data = signal['latest_data']
-    
-    try:
-        # 1. ATRに基づく動的なリスク幅 (SL) を計算
-        # ATR * Multiplier でリスク幅 (価格差) を決定
-        atr_value = latest_data.get('ATR', 0.0)
-        risk_price_diff_raw = atr_value * ATR_MULTIPLIER_SL
+        logging.error("❌ OHLCV取得失敗: CCXTクライアントが準備できていません。")
+        return None
         
-        # 最低リスク幅 (価格に対する割合) を適用
-        min_risk_price_diff = current_price * MIN_RISK_PERCENT 
-        risk_price_diff = max(risk_price_diff_raw, min_risk_price_diff)
-
-        # 2. SLとTPの価格を決定
-        stop_loss = 0.0
-        take_profit = 0.0
-        
-        if side == 'long':
-            # SL: エントリー価格 - リスク価格差
-            stop_loss = current_price - risk_price_diff
-            # TP: エントリー価格 + (リスク価格差 * RR比率)
-            reward_price_diff = risk_price_diff * RR_RATIO_TARGET
-            take_profit = current_price + reward_price_diff
-        elif side == 'short':
-            # SL: エントリー価格 + リスク価格差
-            stop_loss = current_price + risk_price_diff
-            # TP: エントリー価格 - (リスク価格差 * RR比率)
-            reward_price_diff = risk_price_diff * RR_RATIO_TARGET
-            take_profit = current_price - reward_price_diff
-
-        # 価格がゼロ以下にならないように保証
-        stop_loss = max(0.01, stop_loss)
-        take_profit = max(0.01, take_profit)
-
-        # 3. リスクリワード比率の計算とロギング用情報の更新
-        # 実際のリスク/リワード幅で計算し直す
-        actual_risk_diff = abs(current_price - stop_loss)
-        actual_reward_diff = abs(take_profit - current_price)
-        
-        # リスク幅がゼロに近い場合は取引をスキップ
-        if actual_risk_diff < 1e-6:
-             logging.error(f"❌ 取引スキップ: {symbol} リスク幅がゼロに近すぎます。")
-             return None
-
-        # 実際のリスクリワード比率
-        actual_rr_ratio = actual_reward_diff / actual_risk_diff
-        
-        # 4. ポジションサイズ (契約数) の決定 (固定名目ロットを使用)
-        # 固定ロット (USDT) / 価格 = 契約数量
-        amount_to_buy_base = FIXED_NOTIONAL_USDT / current_price
-        
-        # 取引所の数量精度を適用
-        market = EXCHANGE_CLIENT.markets.get(symbol)
-        if not market:
-             raise Exception(f"市場情報が見つかりません: {symbol}")
-
-        # 数量精度 (amount precision) を取得し、数量を丸める
-        amount_precision = market.get('precision', {}).get('amount', 4) 
-        amount_to_buy = EXCHANGE_CLIENT.amount_to_precision(symbol, amount_to_buy_base)
-        
-        # 数量が0以下の場合もスキップ
-        if float(amount_to_buy) <= 0:
-             logging.error(f"❌ 取引スキップ: {symbol} 計算された契約数量がゼロ以下です。計算ロット: {FIXED_NOTIONAL_USDT} USDT")
-             return None
-
-
-        # 5. 清算価格 (Liquidation Price) の計算
-        liquidation_price = calculate_liquidation_price(current_price, LEVERAGE, side, MIN_MAINTENANCE_MARGIN_RATE)
-
-
-        # 6. シグナル辞書に価格とポジション情報を追加
-        signal['entry_price'] = current_price
-        signal['stop_loss'] = stop_loss
-        signal['take_profit'] = take_profit
-        signal['liquidation_price'] = liquidation_price
-        signal['contracts'] = float(amount_to_buy) # 契約数量
-        signal['filled_usdt'] = FIXED_NOTIONAL_USDT # 名目ロット
-        signal['rr_ratio'] = actual_rr_ratio
-
-        if TEST_MODE:
-            logging.warning(f"⚠️ TEST_MODE: {symbol} ({side}) の取引をシミュレートします。ロット: {float(amount_to_buy):.4f} 契約 ({FIXED_NOTIONAL_USDT} USDT)")
-            # ポジションリストには追加しない (実取引がないため)
-            return {'status': 'ok', 'filled_amount': amount_to_buy, 'filled_price': current_price, 'filled_usdt': FIXED_NOTIONAL_USDT}
-
-
-        # 7. 実際の取引実行 (成行注文)
-        order = await EXCHANGE_CLIENT.create_order(
-            symbol=symbol,
-            type='market',
-            side=side,
-            amount=amount_to_buy,
-            params={
-                'leverage': LEVERAGE, 
-                'positionSide': side.capitalize(), # Long/Short
-            }
-        )
-        
-        # 8. 約定情報とポジション管理情報の作成
-        filled_price = order.get('price', current_price) # 成行注文なので最新価格に近い
-        filled_amount = order.get('amount', float(amount_to_buy))
-        
-        # 新しいポジション情報を作成 (グローバルリストに追加する用)
-        new_position = {
-            'symbol': symbol,
-            'side': side,
-            'contracts': filled_amount if side == 'long' else -filled_amount, # Longは正、Shortは負
-            'entry_price': filled_price,
-            'filled_usdt': abs(filled_amount * filled_price),
-            'liquidation_price': calculate_liquidation_price(filled_price, LEVERAGE, side, MIN_MAINTENANCE_MARGIN_RATE),
-            'timestamp': int(time.time() * 1000),
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'leverage': LEVERAGE,
-            'signal_id': uuid.uuid4().hex, # ポジションのユニークID
-            'raw_info': order,
-        }
-        
-        # 9. グローバルなポジションリストの更新
-        OPEN_POSITIONS.append(new_position)
-        
-        logging.info(f"✅ 取引成功: {symbol} ({side}) を {filled_amount:.4f} 契約 (ロット: {new_position['filled_usdt']:.2f} USDT) で約定。")
-        
-        # シグナル情報にも約定情報を追加
-        signal['entry_price'] = filled_price
-        signal['liquidation_price'] = new_position['liquidation_price']
-        signal['contracts'] = filled_amount
-        
-        # 10. SL/TPの設定 (OCO注文またはストップリミット/リミット注文)
-        # ほとんどの取引所はポジションに対してSL/TPを設定する機能を持つ。
-        # CCXTの `edit_position_risk` や `set_margin_mode` などを使用するが、取引所依存のため、
-        # ここでは ccxt.create_order() でストップリミット/テイクプロフィットリミットの逆指値注文を同時に出す。
-        
-        # MEXCの場合、CCXTでSL/TPを設定する機能が利用可能か確認 (通常はできないため、CCXTの標準メソッドを使用)
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            # 💡 ポジション全体に対するSL/TPの設定 (MEXC, Bybitなどはこの方法で設定可能)
-            sl_tp_result = await EXCHANGE_CLIENT.edit_position_risk(
-                symbol=symbol,
-                side='both', # SL/TPは通常、ポジション全体に対して設定する
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-            )
-            logging.info(f"✅ SL/TP設定成功 (edit_position_risk): {symbol} SL: {format_price(stop_loss)}, TP: {format_price(take_profit)}")
+            # fetch_ohlcvを非同期で実行
+            ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
             
-        except ccxt.NotSupported:
-            # edit_position_riskがサポートされていない場合、通常のストップ注文とリミット注文を出す
-            logging.warning(f"⚠️ {EXCHANGE_CLIENT.id} は edit_position_risk をサポートしていません。個別のストップ/リミット注文を発注します。")
+            if not ohlcv:
+                logging.warning(f"⚠️ {symbol} - {timeframe}: OHLCVデータが空でした。")
+                return None
+
+            # Pandas DataFrameに変換
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize(timezone.utc).dt.tz_convert(JST)
+            df.set_index('timestamp', inplace=True)
             
-            # SL注文 (逆指値の成行注文)
-            sl_order_side = 'sell' if side == 'long' else 'buy'
-            sl_order_type = 'market' # 逆指値成行 (Stop Market)
-            sl_params = {
-                'stopPrice': stop_loss,
-                'triggerBy': 'LastPrice' if side == 'long' else 'MarkPrice', # 取引所によって異なるが、LongはLastPriceでトリガー、ShortはMarkPriceでトリガーが一般的
-                'stopLoss': stop_loss, # これをセットするだけでSLとして機能する取引所もある (Binance/Bybit)
-                'reduceOnly': True, # 決済専用
-            }
-            try:
-                await EXCHANGE_CLIENT.create_order(
-                    symbol=symbol,
-                    type=sl_order_type,
-                    side=sl_order_side,
-                    amount=filled_amount,
-                    params=sl_params
-                )
-                logging.info(f"✅ SL (Stop-Market) 注文を発注しました: {symbol} @{format_price(stop_loss)}")
-            except Exception as e:
-                logging.error(f"❌ SL注文の発注に失敗: {e}")
-
-
-            # TP注文 (リミット注文)
-            tp_order_side = 'sell' if side == 'long' else 'buy'
-            tp_order_type = 'limit'
-            tp_params = {
-                'takeProfit': take_profit, # これをセットするだけでTPとして機能する取引所もある
-                'reduceOnly': True, # 決済専用
-            }
-            try:
-                await EXCHANGE_CLIENT.create_order(
-                    symbol=symbol,
-                    type=tp_order_type,
-                    side=tp_order_side,
-                    amount=filled_amount,
-                    price=take_profit, # TP価格でリミット注文
-                    params=tp_params
-                )
-                logging.info(f"✅ TP (Limit) 注文を発注しました: {symbol} @{format_price(take_profit)}")
-            except Exception as e:
-                logging.error(f"❌ TP注文の発注に失敗: {e}")
-
-
+            return df
+            
+        except ccxt.RequestTimeout as e:
+            logging.warning(f"⚠️ {symbol} - {timeframe}: リクエストタイムアウト (試行 {attempt + 1}/{max_retries}): {e}")
+        except ccxt.NetworkError as e:
+            logging.warning(f"⚠️ {symbol} - {timeframe}: ネットワークエラー (試行 {attempt + 1}/{max_retries}): {e}")
+        except ccxt.DDoSProtection as e:
+             logging.warning(f"⚠️ {symbol} - {timeframe}: DDoS保護/レートリミット (試行 {attempt + 1}/{max_retries}): {e}")
         except Exception as e:
-            logging.error(f"❌ SL/TP注文の設定中に予期せぬエラーが発生しました: {e}", exc_info=True)
-
-
-        return {
-            'status': 'ok', 
-            'filled_amount': filled_amount, 
-            'filled_price': filled_price,
-            'filled_usdt': new_position['filled_usdt'],
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-        }
-
-    except ccxt.InsufficientFunds as e:
-        logging.error(f"❌ 取引失敗: {symbol} - 証拠金不足エラー: {e}")
-        return {'status': 'error', 'error_message': f'証拠金不足エラー: {e}'}
-    except ccxt.ExchangeError as e:
-        # Amount can not be less than zero などのエラー対策
-        logging.error(f"❌ 取引失敗: {symbol} - 取引所エラー: {e}", exc_info=True)
-        return {'status': 'error', 'error_message': f'取引所エラー: {e}'}
-    except Exception as e:
-        logging.error(f"❌ 取引処理中の予期せぬエラー: {e}", exc_info=True)
-        return {'status': 'error', 'error_message': f'予期せぬエラー: {e}'}
-
-
-async def close_position(position: Dict, exit_price: float, exit_type: str) -> Dict:
-    """
-    指定されたオープンポジションを成行注文で決済する。
-    """
-    global EXCHANGE_CLIENT, OPEN_POSITIONS
-    
-    symbol = position['symbol']
-    side = position['side']
-    contracts_raw = abs(position['contracts']) # 契約数量は常に正の値で渡す
-    
-    if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
-        logging.error("❌ 決済失敗: CCXTクライアントが準備できていません。")
-        return {'status': 'error', 'error_message': 'クライアント未準備', 'exit_type': exit_type}
-
-    # 決済方向を決定: LongならSell, ShortならBuy
-    close_side = 'sell' if side == 'long' else 'buy'
-    
-    # 利益/損失の計算 (あくまで推定)
-    entry_price = position['entry_price']
-    filled_usdt = position['filled_usdt']
-    pnl_rate = 0.0
-    
-    if side == 'long':
-        pnl_rate = (exit_price - entry_price) / entry_price * LEVERAGE
-    elif side == 'short':
-        pnl_rate = (entry_price - exit_price) / entry_price * LEVERAGE
-
-    pnl_usdt = filled_usdt * (pnl_rate / LEVERAGE) * LEVERAGE 
-    
-    try:
-        # 1. 既存のオープン注文 (SL/TP) を全てキャンセル
-        try:
-            await EXCHANGE_CLIENT.cancel_all_orders(symbol)
-            logging.info(f"✅ 決済前処理: {symbol} のオープン注文を全てキャンセルしました。")
-        except Exception as e:
-            logging.warning(f"⚠️ {symbol} の注文キャンセル中にエラーが発生: {e}")
-
-        # 2. 決済用の成行注文を発注 (reduceOnlyで確実な決済を狙う)
-        market = EXCHANGE_CLIENT.markets.get(symbol)
-        if not market:
-             raise Exception(f"市場情報が見つかりません: {symbol}")
-        amount_to_close = EXCHANGE_CLIENT.amount_to_precision(symbol, contracts_raw)
-
-        close_order = await EXCHANGE_CLIENT.create_order(
-            symbol=symbol,
-            type='market',
-            side=close_side,
-            amount=amount_to_close,
-            params={
-                'reduceOnly': True, # 決済専用フラグ
-                'positionSide': side.capitalize(), # Long/Short 
-            }
-        )
+            logging.error(f"❌ {symbol} - {timeframe}: OHLCV取得中の予期せぬエラー (試行 {attempt + 1}/{max_retries}): {e}")
+            
+        # リトライ前に待機
+        await asyncio.sleep(2 ** attempt) # 指数バックオフ
         
-        # 3. 約定情報を取得
-        exit_price_actual = close_order.get('price', exit_price) 
-        
-        # 4. グローバルなポジションリストから削除
-        # positionのsignal_id (またはユニークな識別子) を使って削除するのが理想的
-        try:
-            # 契約数が0になったポジション、またはこのpositionオブジェクトと一致するものを削除
-            OPEN_POSITIONS = [p for p in OPEN_POSITIONS if p.get('signal_id') != position.get('signal_id') and abs(p.get('contracts', 0)) > 1e-6]
-        except Exception as e:
-            logging.warning(f"⚠️ ポジションリストからの削除中にエラーが発生: {e} - 完全一致の削除を試みます。")
-            OPEN_POSITIONS = [p for p in OPEN_POSITIONS if p != position and abs(p.get('contracts', 0)) > 1e-6]
-
-        logging.info(f"✅ ポジション決済成功: {symbol} ({side}) を {format_price(exit_price_actual)} で決済。PNL: {pnl_usdt:.2f} USDT")
-
-        # 5. 決済結果の整形
-        return {
-            'status': 'ok',
-            'exit_price': exit_price_actual,
-            'entry_price': entry_price,
-            'pnl_usdt': pnl_usdt,
-            'pnl_rate': pnl_rate,
-            'filled_amount': contracts_raw,
-            'exit_type': exit_type,
-            'raw_info': close_order,
-        }
-
-    except ccxt.ExchangeError as e:
-        logging.error(f"❌ 決済失敗: {symbol} - 取引所エラー: {e}", exc_info=True)
-        return {'status': 'error', 'error_message': f'取引所エラー: {e}', 'exit_type': exit_type}
-    except Exception as e:
-        logging.error(f"❌ 決済処理中の予期せぬエラー: {e}", exc_info=True)
-        return {'status': 'error', 'error_message': f'予期せぬエラー: {e}', 'exit_type': exit_type}
-
-
-# ====================================================================================
-# MARKET & SYMBOL MANAGEMENT 
-# ====================================================================================
+    logging.error(f"❌ {symbol} - {timeframe}: OHLCVデータの取得に失敗しました。")
+    return None
 
 async def fetch_top_volume_symbols() -> List[str]:
     """
-    取引所から出来高の高いTOP_SYMBOL_LIMIT個のシンボルを取得し、USDT建て先物シンボルに変換して返す。
+    取引所の全てのUSDTペアから、過去24時間の出来高上位TOP_SYMBOL_LIMITの銘柄を取得する。
+    失敗した場合はDEFAULT_SYMBOLSを返す。
     """
-    global EXCHANGE_CLIENT
+    global EXCHANGE_CLIENT, SKIP_MARKET_UPDATE, DEFAULT_SYMBOLS
+    
+    if SKIP_MARKET_UPDATE:
+        logging.info("ℹ️ SKIP_MARKET_UPDATEがTrueのため、出来高ランキングの更新をスキップします。")
+        return DEFAULT_SYMBOLS
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
-        logging.error("❌ TOPシンボル取得失敗: CCXTクライアントが準備できていません。")
-        return []
+        logging.error("❌ 出来高シンボル取得失敗: CCXTクライアントが準備できていません。DEFAULT_SYMBOLSを返します。")
+        return DEFAULT_SYMBOLS
 
     try:
-        # fetch_tickers() を使用して全てのティッカー情報を取得
+        # fetch_tickersを非同期で実行
         tickers = await EXCHANGE_CLIENT.fetch_tickers()
         
         if not tickers:
-            logging.warning("⚠️ fetch_tickersが空のティッカー情報を返しました。デフォルトシンボルを使用します。")
-            return DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]
-            
-        # 出来高 (quote volume) を基準にソートし、USDT建て先物のみを抽出
-        futures_tickers = {}
+            raise Exception("fetch_tickers returned empty data.")
+        
+        # 出来高 (quote volume) があり、USDT建ての先物/スワップペアのみをフィルタリング
+        usdt_future_tickers = []
         for symbol, ticker in tickers.items():
-            # CCXTのシンボルは 'BTC/USDT' や 'BTC/USDT:USDT' など様々な形式がある
-            is_usdt_future = False
+            # ccxtのシンボル名が '/USDT' で終わり、かつ出来高 (quoteVolume) が存在し、
+            # かつ ccxt.markets で先物/スワップと判定されるもの
             market = EXCHANGE_CLIENT.markets.get(symbol)
-            
-            if market and market.get('type') in ['future', 'swap'] and market.get('quote') == 'USDT' and market.get('active'):
-                # CCXT標準のシンボル形式 (例: 'BTC/USDT') を使用
-                standard_symbol = market.get('symbol') 
-                is_usdt_future = True
-            
-            # 出来高 (quoteVolume) がNoneまたは0でないことを確認
-            volume_usdt = ticker.get('quoteVolume') 
-            
-            if is_usdt_future and volume_usdt and volume_usdt > 0:
-                # 最終的にリストに入れるのは 'BTC/USDT' 形式
-                futures_tickers[standard_symbol] = volume_usdt
-
-        # 出来高の降順でソート
-        sorted_futures = sorted(
-            futures_tickers.items(), 
-            key=lambda item: item[1], 
-            reverse=True
-        )
-
-        # TOP N個のシンボル名 (例: BTC/USDT) を取得
-        top_symbols = [item[0] for item in sorted_futures][:TOP_SYMBOL_LIMIT]
-        
-        # デフォルトシンボルとTOPシンボルを統合
-        # 重複を排除し、TOPシンボルを優先する
-        final_symbols = []
-        unique_symbols = set()
-        
-        # 1. Topシンボルを追加
-        for s in top_symbols:
-            if s not in unique_symbols:
-                final_symbols.append(s)
-                unique_symbols.add(s)
+            if ticker and \
+               '/USDT' in symbol and \
+               market and \
+               market.get('type') in ['swap', 'future'] and \
+               market.get('active', False) and \
+               ticker.get('quoteVolume') is not None:
                 
-        # 2. デフォルトシンボルから、まだリストにないものを追加
-        for s in DEFAULT_SYMBOLS:
-            if s not in unique_symbols:
-                 # 最大数を維持するために、まだリストの長さがTOP_SYMBOL_LIMITの2倍未満の場合のみ追加
-                if len(final_symbols) < TOP_SYMBOL_LIMIT * 2: 
-                    final_symbols.append(s)
-                    unique_symbols.add(s)
-                
-        logging.info(f"✅ TOP出来高シンボル ({len(top_symbols)}件) を取得し、デフォルトと統合しました。最終監視数: {len(final_symbols)}件。")
-        return final_symbols
-    
-    except ccxt.NetworkError as e:
-        logging.error(f"❌ fetch_tickers失敗 - ネットワークエラー: {e}。デフォルトシンボルを使用します。", exc_info=True)
+                try:
+                    quote_volume = float(ticker['quoteVolume'])
+                    usdt_future_tickers.append({
+                        'symbol': symbol,
+                        'quoteVolume': quote_volume
+                    })
+                except (ValueError, TypeError):
+                    continue
+
+        if not usdt_future_tickers:
+            logging.warning("⚠️ 出来高データを持つUSDT建て先物ペアが見つかりませんでした。DEFAULT_SYMBOLSを返します。")
+            return DEFAULT_SYMBOLS
+            
+        # 出来高で降順ソート
+        sorted_tickers = sorted(usdt_future_tickers, key=lambda x: x['quoteVolume'], reverse=True)
+        
+        # TOP Nを取得
+        top_symbols = [t['symbol'] for t in sorted_tickers[:TOP_SYMBOL_LIMIT]]
+        
+        # DEFAULT_SYMBOLSに設定されているが、TOP Nに含まれなかった主要な銘柄を追加で含める
+        # BTC/USDT, ETH/USDT, SOL/USDT は最低限含めるべき
+        must_include = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        for s in must_include:
+            if s not in top_symbols and s in DEFAULT_SYMBOLS:
+                 top_symbols.append(s)
+
+        logging.info(f"✅ 出来高ランキング更新成功。{len(top_symbols)} 銘柄を監視対象とします。")
+        
+        return top_symbols
+
     except ccxt.ExchangeError as e:
-        logging.error(f"❌ fetch_tickers失敗 - 取引所エラー: {e}。デフォルトシンボルを使用します。", exc_info=True)
+        # 💡 致命的エラー修正強化: fetch_tickersのAttributeError対策
+        logging.error(f"❌ 取引所エラー (fetch_tickers): {e}")
     except Exception as e:
-        # AttributeError: 'NoneType' object has no attribute 'keys' の対策
-        logging.error(f"❌ fetch_tickers失敗 - 予期せぬエラー: {e}。デフォルトシンボルを使用します。", exc_info=True)
+        logging.error(f"❌ 出来高シンボル取得中の予期せぬエラー: {e}", exc_info=True)
         
-    # エラー時はデフォルトシンボルを返却
-    return DEFAULT_SYMBOLS[:TOP_SYMBOL_LIMIT]
+    logging.warning("⚠️ 出来高ランキングの取得に失敗したため、デフォルトの監視銘柄リストを使用します。")
+    return DEFAULT_SYMBOLS
 
-
-async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+async def fetch_fear_and_greed_index() -> Dict:
     """
-    指定されたシンボルのOHLCVデータを取得し、DataFrameとして返す。
+    Fear & Greed Index (FGI) を取得し、スコア計算用のプロキシ値を生成する。
+    値の範囲: 0 (Extreme Fear) - 100 (Extreme Greed)
+    プロキシ値の範囲: -0.05 (Extreme Fear) - +0.05 (Extreme Greed)
+    """
+    global FGI_API_URL, GLOBAL_MACRO_CONTEXT, FGI_PROXY_BONUS_MAX
+    
+    try:
+        response = await asyncio.to_thread(requests.get, FGI_API_URL, timeout=5)
+        response.raise_for_status()
+        
+        data = response.json().get('data')
+        if not data:
+            raise Exception("FGI API returned no data.")
+            
+        fgi_value = int(data[0]['value'])
+        
+        # FGI (0-100) を -1 から +1 の範囲に正規化
+        # -1 (0: Extreme Fear) -> +1 (100: Extreme Greed)
+        normalized_fgi = (fgi_value - 50) / 50 
+        
+        # 正規化された値を、最大ボーナス値の範囲 (-FGI_PROXY_BONUS_MAX から +FGI_PROXY_BONUS_MAX) にスケーリング
+        fgi_proxy = normalized_fgi * FGI_PROXY_BONUS_MAX
+        
+        result = {
+            'fgi_raw_value': fgi_value,
+            'fgi_proxy': fgi_proxy,
+            'fgi_classification': data[0]['value_classification']
+        }
+        
+        logging.info(f"🌍 FGI取得成功: {fgi_value} ({data[0]['value_classification']}), Proxy: {fgi_proxy:.4f}")
+        return result
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"❌ FGI取得リクエストエラー: {e}")
+    except Exception as e:
+        logging.error(f"❌ FGI取得中の予期せぬエラー: {e}", exc_info=True)
+        
+    logging.warning("⚠️ FGI取得に失敗しました。デフォルト値を使用します。")
+    return {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'fgi_classification': 'N/A'}
+
+
+# ====================================================================================
+# CORE TRADING LOGIC - TECHNICAL ANALYSIS & SCORING
+# ====================================================================================
+
+def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    データフレームにテクニカル指標を追加する。
+    """
+    # 💡 SMA 200 (長期トレンドの基準)
+    df['SMA_200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH)
+    
+    # 💡 ATR (ボラティリティ/リスク管理の基準)
+    df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=ATR_LENGTH)
+    
+    # 💡 RSI (モメンタム)
+    df['RSI'] = ta.rsi(df['close'], length=14)
+    df['RSI_DIVERGENCE'] = 0 # 後でロジックを実装する
+    
+    # 💡 MACD (短期モメンタムとクロス)
+    macd_df = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    df = pd.concat([df, macd_df], axis=1) # MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
+    
+    # 💡 Bollinger Bands (ボラティリティと価格の極端さ)
+    bb_df = ta.bbands(df['close'], length=20, std=2)
+    df = pd.concat([df, bb_df], axis=1) # BBL_20_2.0, BBMW_20_2.0, BBP_20_2.0, BBU_20_2.0, BBB_20_2.0
+    
+    # 💡 OBV (出来高モメンタム)
+    df['OBV'] = ta.obv(df['close'], df['volume'])
+    df['OBV_SMA'] = ta.sma(df['OBV'], length=20)
+
+    # 💡 ADX (トレンドの強さ)
+    df['ADX'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
+    
+    return df.dropna()
+
+
+def analyze_trend_and_momentum(df: pd.DataFrame, current_price: float, side: str) -> Dict[str, Any]:
+    """
+    トレンド、モメンタム、ボラティリティの要因を分析し、スコアへの貢献度を計算する。
+    """
+    
+    # 最新のインジケータ値を取得
+    last = df.iloc[-1]
+    
+    # --------------------------------------------------
+    # 1. 長期トレンド (SMA 200) - 順張り/逆張りペナルティ
+    # --------------------------------------------------
+    trend_penalty_value = 0.0
+    if not np.isnan(last['SMA_200']):
+        if side == 'long':
+            # 順張り: 価格がSMA 200の上にある = ボーナス
+            if current_price > last['SMA_200']:
+                trend_penalty_value = LONG_TERM_REVERSAL_PENALTY
+            # 逆張り: 価格がSMA 200の下にある = ペナルティ
+            elif current_price < last['SMA_200']:
+                trend_penalty_value = -LONG_TERM_REVERSAL_PENALTY / 2.0 # 逆張りでもペナルティを半分に抑える
+            
+        elif side == 'short':
+            # 順張り: 価格がSMA 200の下にある = ボーナス
+            if current_price < last['SMA_200']:
+                trend_penalty_value = LONG_TERM_REVERSAL_PENALTY
+            # 逆張り: 価格がSMA 200の上にある = ペナルティ
+            elif current_price > last['SMA_200']:
+                trend_penalty_value = -LONG_TERM_REVERSAL_PENALTY / 2.0 
+    
+    
+    # --------------------------------------------------
+    # 2. MACD モメンタム (短期方向一致) - MACDhとシグナルのクロス
+    # --------------------------------------------------
+    macd_penalty_value = 0.0
+    # MACDh (MACD Histogram) を使用して勢いを評価
+    # MACDh > 0 and 増加傾向 (MACDhが直前よりも大きい) -> 強い勢い
+    # MACDh < 0 and 減少傾向 (MACDhが直前よりも小さい) -> 強い勢い
+    
+    if len(df) >= 2:
+        prev_last = df.iloc[-2]
+        macd_hist_name = 'MACDh_12_26_9'
+        
+        if not np.isnan(last[macd_hist_name]):
+            
+            # モメンタムが加速しているか
+            is_increasing_momentum = last[macd_hist_name] > prev_last[macd_hist_name]
+            
+            if side == 'long':
+                # ロングシグナル: MACDhが0以上で、増加傾向にある (モメンタム一致)
+                if last[macd_hist_name] > 0 and is_increasing_momentum:
+                    macd_penalty_value = MACD_CROSS_PENALTY 
+                # ロングシグナル: MACDhがマイナス域だが、増加に転じている（トレンド転換期）
+                # elif last[macd_hist_name] < 0 and is_increasing_momentum:
+                #     macd_penalty_value = MACD_CROSS_PENALTY / 2.0
+                # 不一致: MACDhが減少している (モメンタム失速/逆行)
+                elif not is_increasing_momentum:
+                    macd_penalty_value = -MACD_CROSS_PENALTY
+                    
+            elif side == 'short':
+                # ショートシグナル: MACDhが0未満で、減少傾向にある (モメンタム一致)
+                if last[macd_hist_name] < 0 and not is_increasing_momentum:
+                    macd_penalty_value = MACD_CROSS_PENALTY
+                # ショートシグナル: MACDhがプラス域だが、減少に転じている
+                # elif last[macd_hist_name] > 0 and not is_increasing_momentum:
+                #     macd_penalty_value = MACD_CROSS_PENALTY / 2.0
+                # 不一致: MACDhが増加している (モメンタム失速/逆行)
+                elif is_increasing_momentum:
+                    macd_penalty_value = -MACD_CROSS_PENALTY
+
+    # --------------------------------------------------
+    # 3. RSI モメンタム加速/適正水準 (RSI 40-60)
+    # --------------------------------------------------
+    rsi_momentum_bonus_value = 0.0
+    if not np.isnan(last['RSI']):
+        
+        # Long: RSIが売られすぎ水準から回復し、適正水準 (40-60) 以上である
+        if side == 'long':
+            # 適正なモメンタム加速 (40以上)
+            if last['RSI'] >= RSI_MOMENTUM_LOW: 
+                rsi_momentum_bonus_value = STRUCTURAL_PIVOT_BONUS # STRUCTURAL_PIVOT_BONUS を流用
+            # 強すぎるモメンタム (70以上) はペナルティ
+            elif last['RSI'] > 70:
+                rsi_momentum_bonus_value = -STRUCTURAL_PIVOT_BONUS 
+                
+        # Short: RSIが買われすぎ水準から回復し、適正水準 (40-60) 以下である
+        elif side == 'short':
+            # 適正なモメンタム加速 (60以下)
+            if last['RSI'] <= (100 - RSI_MOMENTUM_LOW):
+                rsi_momentum_bonus_value = STRUCTURAL_PIVOT_BONUS
+            # 弱すぎるモメンタム (30以下) はペナルティ
+            elif last['RSI'] < 30:
+                rsi_momentum_bonus_value = -STRUCTURAL_PIVOT_BONUS
+
+    # --------------------------------------------------
+    # 4. OBV 出来高モメンタム確証
+    # --------------------------------------------------
+    obv_momentum_bonus_value = 0.0
+    if len(df) >= 2 and not np.isnan(last['OBV']) and not np.isnan(last['OBV_SMA']):
+        
+        is_obv_above_sma = last['OBV'] > last['OBV_SMA']
+        prev_obv_above_sma = df.iloc[-2]['OBV'] > df.iloc[-2]['OBV_SMA']
+        
+        # Long: OBVがSMAを上回っており、出来高が価格上昇を確証
+        if side == 'long':
+            if is_obv_above_sma and (last['OBV'] > df.iloc[-2]['OBV']): # 上回っており、かつOBVも上昇している
+                obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
+        
+        # Short: OBVがSMAを下回っており、出来高が価格下落を確証
+        elif side == 'short':
+            if not is_obv_above_sma and (last['OBV'] < df.iloc[-2]['OBV']): # 下回っており、かつOBVも下降している
+                obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
+
+    # --------------------------------------------------
+    # 5. ボラティリティ過熱ペナルティ (BBの幅が広すぎる場合)
+    # --------------------------------------------------
+    volatility_penalty_value = 0.0
+    bb_width_name = 'BBB_20_2.0' # Bollinger Bands Bandwidth
+    
+    if not np.isnan(last[bb_width_name]):
+        # BB幅 (価格に対する割合%) が閾値を超えている場合
+        bb_width_percent = last[bb_width_name] / 100.0 # BBBはパーセント表示 (例: 5.0 -> 5%)
+        
+        if bb_width_percent > VOLATILITY_BB_PENALTY_THRESHOLD:
+            # 閾値からの超過分に応じてペナルティを線形に増加させる
+            excess_factor = (bb_width_percent - VOLATILITY_BB_PENALTY_THRESHOLD) / VOLATILITY_BB_PENALTY_THRESHOLD
+            max_penalty = 0.05 # 最大ペナルティ
+            volatility_penalty_value = -min(max_penalty, excess_factor * 0.02) # 最大0.05まで
+        
+    
+    # --------------------------------------------------
+    # 6. RSI ダイバージェンス (リバーサルシグナル) - 簡易版
+    # --------------------------------------------------
+    # 簡易版: 過去10期間の高値/安値とRSIの傾向が逆転しているか
+    divergence_bonus = 0.0
+    if len(df) >= 10:
+        last_10 = df.iloc[-10:]
+        
+        if side == 'long':
+            # Bullish Divergence: Price Low is Lower (安値切り下げ) but RSI Low is Higher (RSI安値切り上げ)
+            price_low_is_lower = current_price < last_10['low'].min()
+            rsi_low_is_higher = last['RSI'] > last_10['RSI'].min()
+            
+            if price_low_is_lower and rsi_low_is_higher and last['RSI'] < RSI_MOMENTUM_LOW:
+                divergence_bonus = RSI_DIVERGENCE_BONUS
+                
+        elif side == 'short':
+            # Bearish Divergence: Price High is Higher (高値切り上げ) but RSI High is Lower (RSI高値切り下げ)
+            price_high_is_higher = current_price > last_10['high'].max()
+            rsi_high_is_lower = last['RSI'] < last_10['RSI'].max()
+            
+            if price_high_is_higher and rsi_high_is_lower and last['RSI'] > (100 - RSI_MOMENTUM_LOW):
+                divergence_bonus = RSI_DIVERGENCE_BONUS
+
+
+    return {
+        'long_term_reversal_penalty_value': trend_penalty_value,
+        'macd_penalty_value': macd_penalty_value,
+        'rsi_momentum_bonus_value': rsi_momentum_bonus_value,
+        'volatility_penalty_value': volatility_penalty_value,
+        'obv_momentum_bonus_value': obv_momentum_bonus_value,
+        'rsi_divergence_bonus_value': divergence_bonus,
+        # インジケータの生値
+        'raw_rsi': float(last['RSI']),
+        'raw_macd_hist': float(last[macd_hist_name]) if not np.isnan(last[macd_hist_name]) else 0.0,
+        'raw_sma_200': float(last['SMA_200']) if not np.isnan(last['SMA_200']) else 0.0,
+        'raw_adx': float(last['ADX']) if not np.isnan(last['ADX']) else 0.0,
+    }
+
+
+def calculate_trade_score(symbol: str, timeframe: str, df: pd.DataFrame, side: str, macro_context: Dict) -> Optional[Dict[str, Any]]:
+    """
+    テクニカル分析の結果を統合し、最終的な取引スコアを計算する。
+    """
+    if df.empty:
+        return None
+        
+    current_price = df['close'].iloc[-1]
+    
+    # テクニカル分析の実行
+    tech_data = analyze_trend_and_momentum(df, current_price, side)
+    
+    # --------------------------------------------------
+    # 1. ベーススコア
+    # --------------------------------------------------
+    score = BASE_SCORE # 0.40
+
+    # --------------------------------------------------
+    # 2. テクニカルボーナス/ペナルティ
+    # --------------------------------------------------
+    score += tech_data['long_term_reversal_penalty_value']
+    score += tech_data['macd_penalty_value']
+    score += tech_data['rsi_momentum_bonus_value']
+    score += tech_data['volatility_penalty_value']
+    score += tech_data['obv_momentum_bonus_value']
+    score += tech_data['rsi_divergence_bonus_value']
+    
+    # 構造的ボーナス (最低限の優位性を示す)
+    tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS
+    score += STRUCTURAL_PIVOT_BONUS
+    
+    # --------------------------------------------------
+    # 3. 流動性ボーナス (トップ銘柄補正)
+    # --------------------------------------------------
+    liquidity_bonus_value = 0.0
+    if symbol in CURRENT_MONITOR_SYMBOLS[:10]: # トップ10銘柄に大きなボーナス
+        liquidity_bonus_value = LIQUIDITY_BONUS_MAX
+    elif symbol in CURRENT_MONITOR_SYMBOLS[10:TOP_SYMBOL_LIMIT]: # 次の層に小さなボーナス
+        liquidity_bonus_value = LIQUIDITY_BONUS_MAX / 2.0 
+        
+    tech_data['liquidity_bonus_value'] = liquidity_bonus_value
+    score += liquidity_bonus_value
+    
+    # --------------------------------------------------
+    # 4. マクロ環境ボーナス/ペナルティ (FGI)
+    # --------------------------------------------------
+    fgi_proxy = macro_context.get('fgi_proxy', 0.0)
+    forex_bonus = macro_context.get('forex_bonus', 0.0)
+    
+    # ロングシグナル: FGIがプラス (Greed) ならボーナス、マイナス (Fear) ならペナルティ
+    if side == 'long':
+        sentiment_fgi_proxy_bonus = fgi_proxy
+    # ショートシグナル: FGIがマイナス (Fear) ならボーナス、プラス (Greed) ならペナルティ
+    elif side == 'short':
+        sentiment_fgi_proxy_bonus = -fgi_proxy
+        
+    # Forexボーナスを統合 (現在0.0)
+    sentiment_fgi_proxy_bonus += forex_bonus
+    
+    # マクロ影響が最大ボーナス値を超えないようにクリッピング
+    sentiment_fgi_proxy_bonus = max(-FGI_PROXY_BONUS_MAX, min(FGI_PROXY_BONUS_MAX, sentiment_fgi_proxy_bonus))
+    
+    tech_data['sentiment_fgi_proxy_bonus'] = sentiment_fgi_proxy_bonus
+    score += sentiment_fgi_proxy_bonus
+
+    # 最終的なスコアを0.0から1.0の範囲にクリッピング
+    final_score = max(0.0, min(1.0, score))
+
+    # ATRに基づく動的リスク管理
+    last_atr = df['ATR'].iloc[-1] if not df['ATR'].empty and not np.isnan(df['ATR'].iloc[-1]) else None
+    
+    if last_atr is None or last_atr <= 0:
+        logging.warning(f"⚠️ {symbol} - {timeframe}: ATR値が無効です。シグナルをスキップします。")
+        return None
+
+    # SL幅 = ATR * 乗数
+    sl_distance = last_atr * ATR_MULTIPLIER_SL
+    
+    # 最低リスク幅 (MIN_RISK_PERCENT) を考慮
+    min_risk_distance = current_price * MIN_RISK_PERCENT
+    sl_distance = max(sl_distance, min_risk_distance)
+    
+    # TP幅 = SL幅 * RR_RATIO_TARGET (最小リスクリワード比率)
+    tp_distance = sl_distance * RR_RATIO_TARGET
+
+    # SL/TP価格の計算
+    if side == 'long':
+        stop_loss = current_price - sl_distance
+        take_profit = current_price + tp_distance
+    else: # side == 'short'
+        stop_loss = current_price + sl_distance
+        take_profit = current_price - tp_distance
+        
+    # 清算価格の推定
+    liquidation_price = calculate_liquidation_price(
+        entry_price=current_price, 
+        leverage=LEVERAGE, 
+        side=side, 
+        maintenance_margin_rate=MIN_MAINTENANCE_MARGIN_RATE
+    )
+
+    result = {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'side': side,
+        'score': final_score,
+        'current_price': current_price,
+        'entry_price': current_price, # 成行注文を想定
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
+        'liquidation_price': liquidation_price,
+        'risk_distance': sl_distance,
+        'reward_distance': tp_distance,
+        'rr_ratio': RR_RATIO_TARGET, # 設定RRR
+        'tech_data': tech_data,
+        'atr_value': last_atr,
+        'generated_at': time.time()
+    }
+    
+    return result
+
+
+async def analyze_single_symbol(symbol: str, macro_context: Dict) -> List[Dict]:
+    """
+    指定されたシンボルと全てのターゲットタイムフレームで分析を実行する。
+    """
+    signals = []
+    
+    for tf in TARGET_TIMEFRAMES:
+        limit = REQUIRED_OHLCV_LIMITS.get(tf, 500)
+        df = await fetch_ohlcv_with_retry(symbol, tf, limit=limit)
+        
+        if df is None or df.shape[0] < LONG_TERM_SMA_LENGTH + ATR_LENGTH:
+            logging.warning(f"⚠️ {symbol} - {tf}: 必要なデータ量が不足しています ({df.shape[0]}/{LONG_TERM_SMA_LENGTH + ATR_LENGTH})。スキップします。")
+            continue
+
+        current_price = df['close'].iloc[-1]
+        
+        # 💡 インジケータ計算
+        df_indicators = calculate_technical_indicators(df)
+        
+        if df_indicators.empty:
+            continue
+            
+        # ロング/ショート両方のスコアを計算
+        for side in ['long', 'short']:
+            score_data = calculate_trade_score(symbol, tf, df_indicators, side, macro_context)
+            
+            if score_data is None:
+                continue
+
+            # スコアが一定の閾値を超えた場合、またはデバッグ用に全てのスコアを収集
+            if score_data['score'] >= BASE_SCORE:
+                signals.append(score_data)
+                
+    return signals
+
+
+async def find_best_signals(macro_context: Dict) -> List[Dict]:
+    """
+    監視対象の全シンボルで分析を実行し、最も高いスコアを持つシグナルを見つける。
+    """
+    global CURRENT_MONITOR_SYMBOLS, LAST_ANALYSIS_SIGNALS
+    
+    all_signals: List[Dict] = []
+    
+    # 非同期タスクのリストを作成
+    analysis_tasks = [analyze_single_symbol(symbol, macro_context) for symbol in CURRENT_MONITOR_SYMBOLS]
+    
+    # 全ての分析タスクを並行して実行
+    results = await asyncio.gather(*analysis_tasks)
+    
+    # 結果を統合
+    for symbol_signals in results:
+        all_signals.extend(symbol_signals)
+        
+    # 最新の全分析シグナルをグローバル変数に保存 (定時通知用)
+    LAST_ANALYSIS_SIGNALS = all_signals
+
+    # スコアの降順でソート
+    sorted_signals = sorted(all_signals, key=lambda x: x.get('score', 0.0), reverse=True)
+    
+    if not sorted_signals:
+        return []
+
+    # 市場環境に応じた動的取引閾値を取得
+    current_threshold = get_current_threshold(macro_context)
+    
+    # 閾値を超えたシグナルを抽出
+    trade_ready_signals = [
+        s for s in sorted_signals 
+        if s['score'] >= current_threshold
+    ]
+    
+    if not trade_ready_signals:
+        logging.info(f"ℹ️ 最高のシグナルスコア {sorted_signals[0]['score']:.2f} が閾値 {current_threshold:.2f} に達しませんでした。")
+        return []
+        
+    # 銘柄ごとのクールダウンを考慮
+    final_best_signals = []
+    
+    for signal in trade_ready_signals:
+        symbol = signal['symbol']
+        current_time = time.time()
+        last_trade_time = LAST_SIGNAL_TIME.get(symbol, 0.0)
+        
+        # クールダウン期間をチェック
+        if current_time - last_trade_time < TRADE_SIGNAL_COOLDOWN:
+            elapsed_hours = (current_time - last_trade_time) / 3600
+            remaining_hours = (TRADE_SIGNAL_COOLDOWN / 3600) - elapsed_hours
+            logging.info(f"ℹ️ {symbol} はクールダウン期間中です (前回取引から {elapsed_hours:.1f}h 経過 / 残り {remaining_hours:.1f}h)。スキップします。")
+            continue
+            
+        final_best_signals.append(signal)
+
+    if not final_best_signals:
+        return []
+        
+    # クールダウンを考慮した後、スコア上位 N 件を返す
+    return final_best_signals[:TOP_SIGNAL_COUNT]
+
+
+# ====================================================================================
+# CORE TRADING LOGIC - EXECUTION
+# ====================================================================================
+
+# 💡 致命的エラー修正強化: 注文失敗エラー (Amount can not be less than zero) 対策
+async def execute_trade(signal: Dict) -> Dict:
+    """
+    シグナルに基づいて取引を実行し、SL/TP注文を設定する。
     """
     global EXCHANGE_CLIENT
     
+    symbol = signal['symbol']
+    side = signal['side']
+    entry_price = signal['entry_price']
+    stop_loss = signal['stop_loss']
+    take_profit = signal['take_profit']
+    
+    if TEST_MODE:
+        logging.warning(f"⚠️ TEST_MODE: {symbol} - {side.upper()} シグナルを検出しましたが、取引はスキップされます。")
+        return {
+            'status': 'test_mode', 
+            'error_message': 'Test mode is active.',
+            'filled_amount': FIXED_NOTIONAL_USDT / entry_price if entry_price > 0 else 0.0,
+            'filled_usdt': FIXED_NOTIONAL_USDT,
+            'entry_price': entry_price
+        }
+
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
-        return None
-        
-    try:
-        # MEXCの場合、シンボル形式の調整が必要な場合がある (例: BTC/USDT -> BTC_USDT)
-        # CCXTが自動的に変換してくれるはずだが、念のため market の情報を確認する
-        market = EXCHANGE_CLIENT.markets.get(symbol)
-        if not market:
-            logging.warning(f"⚠️ {symbol} の市場情報が見つかりません。")
-            return None
-            
-        ccxt_symbol = market['symbol'] # CCXTが内部で使用するシンボル名
-            
-        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(ccxt_symbol, timeframe, limit=limit)
-        
-        if not ohlcv:
-            logging.warning(f"⚠️ {symbol} ({timeframe}) のOHLCVデータが空でした。")
-            return None
-            
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.set_index('timestamp')
-        
-        # 必要な行数があるかチェック
-        if len(df) < limit:
-             logging.warning(f"⚠️ {symbol} ({timeframe}): 必要な {limit} 行に対して {len(df)} 行しか取得できませんでした。")
+        return {'status': 'error', 'error_message': 'CCXT Client not ready.'}
 
-        return df
+    # 1. 注文数量の計算 (Notional Value based on FIXED_NOTIONAL_USDT)
+    
+    # 最小取引量を取得 (ccxtのmarket情報から)
+    market = EXCHANGE_CLIENT.markets.get(symbol)
+    if not market:
+        return {'status': 'error', 'error_message': f'Market for {symbol} not found.'}
+
+    # ロットサイズ (契約サイズ) をUSDT建ての名目ロットから計算
+    if entry_price <= 0:
+        return {'status': 'error', 'error_message': 'Entry price is invalid.'}
+
+    base_amount = FIXED_NOTIONAL_USDT / entry_price
+    
+    # 契約サイズの丸め処理 (取引所の最小取引単位に合わせて調整)
+    # amount_to_trade: 最終的に注文する契約サイズ
+    amount_to_trade = EXCHANGE_CLIENT.amount_to_precision(symbol, base_amount)
+    
+    if float(amount_to_trade) <= 0:
+         return {'status': 'error', 'error_message': f'Calculated amount {base_amount} is too small or precision error. Final amount: {amount_to_trade}.'}
+
+
+    # 2. メインの成行注文の実行
+    try:
+        order_side = 'buy' if side == 'long' else 'sell'
         
-    except ccxt.NetworkError as e:
-        logging.warning(f"❌ {symbol} ({timeframe}) OHLCV取得失敗 - ネットワークエラー: {e}")
+        # 数量は絶対値で渡す必要がある
+        absolute_amount = float(amount_to_trade)
+
+        # 注文実行
+        order = await EXCHANGE_CLIENT.create_market_order(
+            symbol=symbol,
+            side=order_side,
+            amount=absolute_amount,
+            params={'leverage': LEVERAGE} # レバレッジを再度確認のためにパラメーターに含める
+        )
+
+        # 注文の結果を待つ (ccxtはMarket Orderの場合、すぐにFilledになることが多い)
+        # order.get('status') == 'closed' を確認
+        if order.get('status') not in ['closed', 'filled']:
+            logging.error(f"❌ {symbol} - {side.upper()}: 成行注文が完了しませんでした。Status: {order.get('status')}")
+            # 注文が残っている場合はキャンセル処理を考慮すべきだが、ここでは割愛
+            return {'status': 'error', 'error_message': f'Market order not filled. Status: {order.get("status")}'}
+            
+        filled_amount = float(order.get('filled', order.get('amount', 0.0)))
+        filled_price = float(order.get('average', entry_price)) # 平均約定価格
+        filled_usdt = filled_amount * filled_price
+        
+        # 3. SL/TP注文の実行
+        # SL/TPはOCOまたはPost-Only Stop/Limit注文として処理する
+        
+        stop_order_id = None
+        take_profit_order_id = None
+        
+        # ストップ注文 (STOP_MARKETを推奨)
+        stop_side = 'sell' if side == 'long' else 'buy'
+        stop_price = EXCHANGE_CLIENT.price_to_precision(symbol, stop_loss)
+        
+        try:
+            # トリガー価格 (stopPrice) を使用したストップマーケット注文
+            stop_order = await EXCHANGE_CLIENT.create_order(
+                symbol=symbol,
+                type='stop_market',
+                side=stop_side,
+                amount=filled_amount,
+                params={
+                    'stopPrice': stop_price,
+                    'closeOnTrigger': True # ポジション全決済を意図 (取引所による)
+                }
+            )
+            stop_order_id = stop_order.get('id')
+            logging.info(f"✅ {symbol}: SL注文 (stop_market) を {stop_price} に設定しました。ID: {stop_order_id}")
+        except Exception as e:
+            logging.error(f"❌ {symbol}: SL注文の設定に失敗しました: {e}")
+        
+        # TP注文 (LIMITまたはTAKE_PROFIT_MARKETを推奨)
+        take_profit_side = 'sell' if side == 'long' else 'buy'
+        take_profit_price = EXCHANGE_CLIENT.price_to_precision(symbol, take_profit)
+        
+        try:
+             # トリガー価格 (stopPrice) を使用したテイクプロフィットマーケット注文
+            tp_order = await EXCHANGE_CLIENT.create_order(
+                symbol=symbol,
+                type='take_profit_market',
+                side=take_profit_side,
+                amount=filled_amount,
+                params={
+                    'stopPrice': take_profit_price,
+                    'closeOnTrigger': True
+                }
+            )
+            take_profit_order_id = tp_order.get('id')
+            logging.info(f"✅ {symbol}: TP注文 (take_profit_market) を {take_profit_price} に設定しました。ID: {take_profit_order_id}")
+        except Exception as e:
+            logging.error(f"❌ {symbol}: TP注文の設定に失敗しました: {e}")
+            
+        
+        # 成功時の結果
+        return {
+            'status': 'ok',
+            'filled_amount': filled_amount,
+            'filled_usdt': filled_usdt,
+            'entry_price': filled_price,
+            'stop_loss_id': stop_order_id,
+            'take_profit_id': take_profit_order_id,
+        }
+
+    except ccxt.DDoSProtection as e:
+        logging.error(f"❌ DDoS保護エラー: 注文失敗。{e}")
+        return {'status': 'error', 'error_message': f'DDoS Protection: {e}'}
+    except ccxt.InsufficientFunds as e:
+        logging.error(f"❌ 証拠金不足エラー: 注文失敗。{e}")
+        return {'status': 'error', 'error_message': f'Insufficient Funds: {e}'}
+    except ccxt.InvalidOrder as e:
+        logging.error(f"❌ 無効な注文エラー: 注文失敗。{e}")
+        return {'status': 'error', 'error_message': f'Invalid Order: {e}'}
     except ccxt.ExchangeError as e:
-        logging.warning(f"❌ {symbol} ({timeframe}) OHLCV取得失敗 - 取引所エラー: {e}")
+        logging.error(f"❌ 取引所エラー: 注文失敗。{e}")
+        return {'status': 'error', 'error_message': f'Exchange Error: {e}'}
     except Exception as e:
-        logging.warning(f"❌ {symbol} ({timeframe}) OHLCV取得失敗 - 予期せぬエラー: {e}")
-        
-    return None
-
-async def fetch_macro_context() -> Dict:
-    """
-    Fear & Greed Index (FGI) などのマクロ環境データを取得し、スコアリング用のプロキシ値を計算する。
-    """
-    
-    fgi_proxy = 0.0
-    fgi_raw_value = 'N/A'
-    forex_bonus = 0.0
-    
-    # 1. Fear & Greed Index (FGI) の取得
-    try:
-        fgi_response = await asyncio.to_thread(requests.get, FGI_API_URL, timeout=5)
-        fgi_response.raise_for_status()
-        fgi_data = fgi_response.json()
-        
-        if fgi_data.get('data') and len(fgi_data['data']) > 0:
-            value = int(fgi_data['data'][0]['value']) # 0 (Extreme Fear) - 100 (Extreme Greed)
-            fgi_raw_value = f"{value} ({fgi_data['data'][0]['value_classification']})"
-            
-            # FGIを-1から1の範囲に正規化 (50が0, 0が-1, 100が1)
-            fgi_normalized = (value - 50) / 50.0 
-            
-            # FGIプロキシを-FGI_PROXY_BONUS_MAXから+FGI_PROXY_BONUS_MAXの範囲に制限する
-            # -1.0 * FGI_PROXY_BONUS_MAX <= fgi_proxy <= 1.0 * FGI_PROXY_BONUS_MAX
-            fgi_proxy = fgi_normalized * FGI_PROXY_BONUS_MAX
-            
-            logging.info(f"✅ FGI取得完了: {fgi_raw_value} -> FGIプロキシ: {fgi_proxy:+.4f}")
-
-    except Exception as e:
-        logging.warning(f"⚠️ FGI取得失敗: {e}。FGIプロキシは0.0に設定されます。")
-        
-    # 2. 為替レート (USD/JPYなど) の動きに基づくボーナス (今回は実装をスキップ)
-    # forex_bonus = 0.0 
-
-    return {
-        'fgi_proxy': fgi_proxy,
-        'fgi_raw_value': fgi_raw_value,
-        'forex_bonus': forex_bonus,
-    }
-
-# ====================================================================================
-# MAIN BOT LOGIC & SCHEDULERS
-# ====================================================================================
-
-async def analyze_and_trade():
-    """
-    監視対象の全銘柄に対してテクニカル分析を行い、シグナルを検出して取引を実行する。
-    """
-    global CURRENT_MONITOR_SYMBOLS, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, GLOBAL_MACRO_CONTEXT, ACCOUNT_EQUITY_USDT, LAST_SUCCESS_TIME
-    
-    logging.info("--- 🤖 分析・取引メインループ開始 ---")
-    start_time = time.time()
-    
-    # 1. 市場環境情報の更新
-    if not SKIP_MARKET_UPDATE:
-        new_macro_context = await fetch_macro_context()
-        GLOBAL_MACRO_CONTEXT.update(new_macro_context)
-        
-        # 出来高TOP銘柄のリストを更新
-        top_symbols = await fetch_top_volume_symbols()
-        if top_symbols:
-            CURRENT_MONITOR_SYMBOLS = top_symbols
-    
-    current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
-    
-    # 2. 口座ステータスの更新
-    account_status = await fetch_account_status()
-    if account_status.get('error'):
-        logging.critical("❌ 致命的エラー: 口座ステータス取得失敗。取引ループをスキップします。")
-        return # 取引を実行しない
-
-    
-    # 3. 全銘柄・全時間足で分析を実行
-    all_signals = []
-    
-    # 処理の進捗を確認しやすくするため、銘柄数をログに出力
-    total_symbols = len(CURRENT_MONITOR_SYMBOLS)
-    logging.info(f"📊 監視対象: {total_symbols} 銘柄。取引閾値: {current_threshold * 100:.0f}点。")
-
-    for i, symbol in enumerate(CURRENT_MONITOR_SYMBOLS):
-        
-        logging.info(f"➡️ 処理中: {symbol} ({i+1}/{total_symbols})")
-        
-        for timeframe in TARGET_TIMEFRAMES:
-            limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 500)
-            
-            # OHLCVデータを取得
-            df = await fetch_ohlcv_data(symbol, timeframe, limit)
-            
-            if df is None or len(df) < limit:
-                logging.warning(f"⚠️ {symbol} ({timeframe}): データ不足 ({len(df) if df is not None else 0}/{limit})。分析をスキップします。")
-                continue
-                
-            # テクニカル指標を計算
-            df = await calculate_technical_indicators(df, timeframe)
-            
-            # スコアリングを実行
-            signals = get_signal_score(df, symbol, timeframe, GLOBAL_MACRO_CONTEXT)
-            
-            if signals:
-                all_signals.extend(signals)
-                
-        # 銘柄ごとのAPIレートリミット対策
-        await asyncio.sleep(0.5) 
-
-    # 4. シグナル処理
-    LAST_ANALYSIS_SIGNALS = all_signals # 定時通知用に分析結果を保存
-
-    # スコアの高い順にソート
-    sorted_signals = sorted(all_signals, key=lambda x: x['score'], reverse=True)
-    
-    signals_to_trade: List[Dict] = []
-    
-    for signal in sorted_signals:
-        symbol = signal['symbol']
-        side = signal.get('side', 'long')
-        signal_id = f"{symbol}_{side}"
-        score = signal['score']
-        
-        # 既にポジションを持っている銘柄はスキップ
-        has_open_position = any(p['symbol'] == symbol for p in OPEN_POSITIONS)
-        
-        if has_open_position:
-            logging.info(f"ℹ️ {symbol} ({side}): 既にポジションがあるため取引をスキップします。")
-            continue
-            
-        # クールダウン期間の確認
-        if signal_id in LAST_SIGNAL_TIME and (time.time() - LAST_SIGNAL_TIME[signal_id]) < TRADE_SIGNAL_COOLDOWN:
-            elapsed = int(time.time() - LAST_SIGNAL_TIME[signal_id])
-            logging.info(f"ℹ️ {symbol} ({side}): クールダウン期間中 ({elapsed // 3600}h経過 / {TRADE_SIGNAL_COOLDOWN // 3600}h)。スキップします。")
-            continue
-            
-        # 閾値の確認
-        if score >= current_threshold:
-            signals_to_trade.append(signal)
-            
-        if len(signals_to_trade) >= TOP_SIGNAL_COUNT:
-            break
-            
-    # 5. 実際に取引を実行
-    for signal in signals_to_trade:
-        symbol = signal['symbol']
-        side = signal['side']
-        signal_id = f"{symbol}_{side}"
-        score = signal['score']
-        
-        logging.info(f"🔥 **取引シグナル検出**: {symbol} ({side}) スコア: {score:.4f}")
-
-        # 取引ロジックを実行し、ポジションサイズとSL/TPを設定
-        trade_result = await process_entry_signal(signal)
-        
-        # 取引結果に応じて通知とログを記録
-        if trade_result and trade_result.get('status') == 'ok':
-            # ログ/通知用のシグナル情報を更新
-            LAST_SIGNAL_TIME[signal_id] = time.time()
-            log_signal(signal, "取引シグナル", trade_result)
-            
-            message = format_telegram_message(signal, "取引シグナル", current_threshold, trade_result)
-            await send_telegram_notification(message)
-            
-        elif trade_result and trade_result.get('status') == 'error':
-             log_signal(signal, "取引失敗", trade_result)
-             error_message = format_telegram_message(signal, "取引失敗", current_threshold, trade_result)
-             await send_telegram_notification(error_message)
-
-        # レートリミット対策
-        await asyncio.sleep(2.0)
-        
-    
-    # 6. ループ完了と通知
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    logging.info(f"--- 🤖 分析・取引メインループ完了 --- 処理時間: {elapsed_time:.2f}秒。")
-    
-    # 初回起動時通知フラグの更新
-    global IS_FIRST_MAIN_LOOP_COMPLETED
-    if not IS_FIRST_MAIN_LOOP_COMPLETED:
-        # 初回起動メッセージを送信
-        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold)
-        await send_telegram_notification(startup_message)
-        IS_FIRST_MAIN_LOOP_COMPLETED = True
-        
-    LAST_SUCCESS_TIME = end_time
+        logging.error(f"❌ 注文実行中の予期せぬエラー: {e}", exc_info=True)
+        return {'status': 'error', 'error_message': f'Unexpected Error: {e}'}
 
 
 async def check_and_manage_open_positions():
     """
-    オープンポジションを巡回し、SL/TPのトリガーを確認する。
+    オープンポジションをチェックし、
+    1. SL/TPが設定されていない場合は設定する
+    2. 強制清算価格に近づいていないかチェックする (今回は清算価格通知のみ)
     """
     global OPEN_POSITIONS
     
     if not OPEN_POSITIONS:
-        logging.info("ℹ️ ポジション監視: オープンポジションはありません。")
         return
-
-    logging.info(f"🔄 ポジション監視開始: {len(OPEN_POSITIONS)} 件をチェック。")
+        
+    positions_to_close: List[Dict] = []
     
-    # 最新の価格情報を一括で取得
-    symbols_to_check = list(set(p['symbol'] for p in OPEN_POSITIONS))
+    # 最新の価格を取得するために、ポジションのある銘柄のティッカーをまとめて取得
+    symbols_to_fetch = [p['symbol'] for p in OPEN_POSITIONS]
+    current_prices: Dict[str, float] = {}
     
-    latest_prices = {}
-    try:
-        tickers = await EXCHANGE_CLIENT.fetch_tickers(symbols_to_check)
-        for symbol, ticker in tickers.items():
-            # CCXTのシンボル形式を標準化 (例: 'BTC/USDT')
-            market = EXCHANGE_CLIENT.markets.get(symbol)
-            if market:
-                latest_prices[market['symbol']] = ticker.get('last', ticker.get('close'))
-            
-    except Exception as e:
-        logging.error(f"❌ ポジション監視: 価格情報の一括取得に失敗: {e}。スキップします。", exc_info=True)
-        return
+    if EXCHANGE_CLIENT.has['fetchTickers']:
+        try:
+            tickers = await EXCHANGE_CLIENT.fetch_tickers(symbols_to_fetch)
+            for symbol, ticker in tickers.items():
+                if ticker and ticker.get('last') is not None:
+                    current_prices[symbol] = ticker['last']
+        except Exception as e:
+            logging.error(f"❌ ポジション管理のためのティッカー取得に失敗: {e}")
+            # エラーの場合は、処理を継続させるため、価格情報を空のままにする
+            pass
 
-
-    # ポジションのチェックと決済
-    positions_to_close: List[Tuple[Dict, float, str]] = [] # (position, exit_price, exit_type)
-
-    for position in OPEN_POSITIONS:
+    # 1. SL/TPチェックと設定、決済トリガーの確認
+    for position in OPEN_POSITIONS[:]: # リストをイテレート中に変更するために[:]を使用
         symbol = position['symbol']
         side = position['side']
-        sl = position['stop_loss']
-        tp = position['take_profit']
-        current_price = latest_prices.get(symbol)
+        entry_price = position['entry_price']
         
+        current_price = current_prices.get(symbol)
         if current_price is None:
-            logging.warning(f"⚠️ ポジション監視: {symbol} の最新価格が取得できませんでした。スキップします。")
+            # 価格が取得できない場合はスキップ
+            logging.warning(f"⚠️ {symbol}: 最新の価格を取得できませんでした。SL/TPチェックをスキップします。")
             continue
 
-        trigger = None
-        exit_price_candidate = current_price
+        # 1-1. SL/TPが設定されていない場合、再計算/設定を試みる (主にBOT再起動時対応)
+        if position['stop_loss'] == 0.0 or position['take_profit'] == 0.0:
+            logging.warning(f"⚠️ {symbol} - {side.upper()}: SL/TP情報がポジションオブジェクトに不足しています。OHLCVを取得してSL/TPを再計算/設定を試みます。")
+            
+            # OHLCVを取得
+            df_ohlcv = await fetch_ohlcv_with_retry(symbol, '1h', limit=500)
+            if df_ohlcv is None:
+                continue
 
+            df_indicators = calculate_technical_indicators(df_ohlcv)
+            if df_indicators.empty:
+                continue
+
+            # 💡 SL/TP計算を、スコア計算関数から流用して実行
+            temp_signal = calculate_trade_score(symbol, '1h', df_indicators, side, GLOBAL_MACRO_CONTEXT)
+            
+            if temp_signal is None:
+                logging.warning(f"⚠️ {symbol}: SL/TPの再計算に失敗しました。スキップします。")
+                continue
+
+            recalculated_sl = temp_signal['stop_loss']
+            recalculated_tp = temp_signal['take_profit']
+            
+            # ポジションを更新
+            position['stop_loss'] = recalculated_sl
+            position['take_profit'] = recalculated_tp
+            
+            # 💡 SL/TP注文を再設定
+            await _re_set_sl_tp_orders(position, recalculated_sl, recalculated_tp)
+            
+            logging.info(f"✅ {symbol}: SL/TPを再設定しました (SL: {format_price(recalculated_sl)} / TP: {format_price(recalculated_tp)})")
+            
+        
+        # 1-2. SL/TPトリガーチェック (ローカルチェック - 取引所のSL/TP注文が優先)
+        trigger_type = None
+        
         if side == 'long':
-            # ロングの場合: 価格がSL以下になれば損切り (SL)
-            if current_price <= sl:
-                trigger = 'SL_HIT'
-                exit_price_candidate = sl # SL価格で決済とする
-            # ロングの場合: 価格がTP以上になれば利確 (TP)
-            elif current_price >= tp:
-                trigger = 'TP_HIT'
-                exit_price_candidate = tp # TP価格で決済とする
-        
-        elif side == 'short':
-            # ショートの場合: 価格がSL以上になれば損切り (SL)
-            if current_price >= sl:
-                trigger = 'SL_HIT'
-                exit_price_candidate = sl # SL価格で決済とする
-            # ショートの場合: 価格がTP以下になれば利確 (TP)
-            elif current_price <= tp:
-                trigger = 'TP_HIT'
-                exit_price_candidate = tp # TP価格で決済とする
+            # ロングの損切り: 現在価格がSL以下になった
+            if current_price <= position['stop_loss']:
+                trigger_type = 'Stop_Loss'
+            # ロングの利確: 現在価格がTP以上になった
+            elif current_price >= position['take_profit']:
+                trigger_type = 'Take_Profit'
                 
-        # 🚨 清算価格チェック (必須)
-        liquidation_price = position.get('liquidation_price', 0.0)
-        if liquidation_price > 0:
-            if side == 'long' and current_price <= liquidation_price * 1.05: # 5%手前で警告/緊急決済
-                 logging.critical(f"🚨 緊急警告: {symbol} ({side}) が清算価格 {format_price(liquidation_price)} に接近中 ({format_price(current_price)})！")
-                 # ここでは SL/TP管理に任せるが、緊急なら SL_HIT と同じ処理をトリガーすることも可能
-            
-        if trigger:
-            positions_to_close.append((position, exit_price_candidate, trigger))
-            logging.info(f"🔔 決済トリガー: {symbol} ({side}) で {trigger} が検出されました。Current: {format_price(current_price)}.")
-            
-    
-    # 検出されたポジションを順番に決済
-    for position, exit_price, exit_type in positions_to_close:
+        elif side == 'short':
+            # ショートの損切り: 現在価格がSL以上になった
+            if current_price >= position['stop_loss']:
+                trigger_type = 'Stop_Loss'
+            # ショートの利確: 現在価格がTP以下になった
+            elif current_price <= position['take_profit']:
+                trigger_type = 'Take_Profit'
+                
+        if trigger_type:
+            # 決済トリガーを検出 - ポジションのクローズを実行
+            positions_to_close.append({
+                'position': position,
+                'exit_type': trigger_type,
+                'exit_price': current_price
+            })
+
+    # 2. 決済が必要なポジションを処理
+    for close_data in positions_to_close:
+        position = close_data['position']
+        exit_type = close_data['exit_type']
+        exit_price = close_data['exit_price']
         
-        # 決済処理を実行
-        trade_result = await close_position(position, exit_price, exit_type)
+        # クローズ注文の実行 (Market Order)
+        trade_result = await execute_close_position(position, exit_price, exit_type)
         
-        # 決済結果を通知・ログに記録
-        if trade_result.get('status') == 'ok':
-            # ログ/通知用に、ポジション情報に決済情報を追加
-            position['exit_price'] = trade_result['exit_price']
-            position['pnl_usdt'] = trade_result['pnl_usdt']
-            position['pnl_rate'] = trade_result['pnl_rate']
-            position['exit_type'] = exit_type
+        # ログと通知
+        if trade_result['status'] == 'ok':
+            # 決済成功後、ポジションリストから削除
+            OPEN_POSITIONS.remove(position)
             
-            log_signal(position, "ポジション決済", trade_result)
+            # 通知のためのデータ整形
+            notification_data = position.copy()
+            notification_data['trade_result'] = trade_result
             
-            message = format_telegram_message(position, "ポジション決済", get_current_threshold(GLOBAL_MACRO_CONTEXT), trade_result, exit_type)
+            # PnL計算
+            pnl_usdt, pnl_rate = calculate_pnl(
+                entry_price=position['entry_price'], 
+                exit_price=exit_price, 
+                contracts=position['contracts'], 
+                side=position['side'], 
+                leverage=position['leverage']
+            )
+            
+            trade_result['pnl_usdt'] = pnl_usdt
+            trade_result['pnl_rate'] = pnl_rate
+            trade_result['entry_price'] = position['entry_price']
+            trade_result['exit_price'] = exit_price
+            trade_result['contracts'] = position['contracts']
+            trade_result['exit_type'] = exit_type
+
+            current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+
+            # ログ記録
+            log_signal(notification_data, "ポジション決済", trade_result)
+            
+            # Telegram通知
+            message = format_telegram_message(notification_data, "ポジション決済", current_threshold, trade_result, exit_type)
             await send_telegram_notification(message)
-            
         else:
-            logging.error(f"❌ 決済処理失敗: {position['symbol']} ({exit_type}) - エラー: {trade_result.get('error_message', '不明')}")
-            error_message = format_telegram_message(position, "ポジション決済失敗", get_current_threshold(GLOBAL_MACRO_CONTEXT), trade_result, exit_type)
-            await send_telegram_notification(error_message)
+            logging.error(f"❌ {symbol}: ポジション決済に失敗しました: {trade_result['error_message']}")
 
-        # レートリミット対策
-        await asyncio.sleep(1.0) 
+
+async def execute_close_position(position: Dict, exit_price: float, exit_type: str) -> Dict:
+    """
+    ポジションをマーケット注文でクローズする。
+    """
+    global EXCHANGE_CLIENT
+    
+    symbol = position['symbol']
+    side = position['side']
+    contracts = position['contracts']
+    
+    if TEST_MODE:
+        logging.warning(f"⚠️ TEST_MODE: {symbol} - {side.upper()} ポジションの決済をスキップします。Exit Type: {exit_type}")
+        return {
+            'status': 'test_mode', 
+            'error_message': 'Test mode is active.',
+            'filled_amount': abs(contracts),
+            'exit_price': exit_price
+        }
         
-    logging.info(f"✅ ポジション監視完了。現在のオープンポジション数: {len(OPEN_POSITIONS)} 件。")
+    if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
+        return {'status': 'error', 'error_message': 'CCXT Client not ready.'}
+        
+    # 1. 既存のSL/TP注文を全てキャンセル
+    try:
+        # ccxtのcancel_all_ordersを試みる
+        cancel_result = await EXCHANGE_CLIENT.cancel_all_orders(symbol)
+        logging.info(f"✅ {symbol}: 既存のSL/TPを含む全ての注文をキャンセルしました。")
+    except Exception as e:
+        logging.warning(f"⚠️ {symbol}: 既存注文のキャンセル中にエラーが発生しました: {e}")
+        
+    
+    # 2. ポジションクローズの成行注文
+    try:
+        order_side = 'sell' if side == 'long' else 'buy'
+        # 数量は絶対値で渡す
+        absolute_amount = abs(contracts)
+        
+        # 契約サイズの丸め処理
+        amount_to_close = EXCHANGE_CLIENT.amount_to_precision(symbol, absolute_amount)
 
+        # 注文実行
+        order = await EXCHANGE_CLIENT.create_market_order(
+            symbol=symbol,
+            side=order_side,
+            amount=float(amount_to_close),
+            params={'leverage': LEVERAGE}
+        )
+        
+        if order.get('status') not in ['closed', 'filled']:
+            return {'status': 'error', 'error_message': f'Close market order not filled. Status: {order.get("status")}'}
+            
+        filled_amount = float(order.get('filled', order.get('amount', 0.0)))
+        filled_price = float(order.get('average', exit_price))
+
+        return {
+            'status': 'ok',
+            'filled_amount': filled_amount,
+            'exit_price': filled_price,
+        }
+
+    except ccxt.DDoSProtection as e:
+        logging.error(f"❌ DDoS保護エラー: 決済失敗。{e}")
+        return {'status': 'error', 'error_message': f'DDoS Protection: {e}'}
+    except ccxt.ExchangeError as e:
+        logging.error(f"❌ 取引所エラー: 決済失敗。{e}")
+        return {'status': 'error', 'error_message': f'Exchange Error: {e}'}
+    except Exception as e:
+        logging.error(f"❌ 決済実行中の予期せぬエラー: {e}", exc_info=True)
+        return {'status': 'error', 'error_message': f'Unexpected Error: {e}'}
+
+
+async def _re_set_sl_tp_orders(position: Dict, stop_loss: float, take_profit: float):
+    """
+    ポジション情報に基づいてSL/TP注文を再設定するヘルパー関数。
+    """
+    global EXCHANGE_CLIENT
+    
+    symbol = position['symbol']
+    side = position['side']
+    filled_amount = abs(position['contracts'])
+    
+    if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
+        return
+        
+    try:
+        # 既存の注文をキャンセル (特定のSL/TP注文IDがあればそれを使うべきだが、ここでは全キャンセルを試みる)
+        await EXCHANGE_CLIENT.cancel_all_orders(symbol)
+        logging.info(f"✅ {symbol}: SL/TP再設定のため、既存注文をキャンセルしました。")
+    except Exception:
+        logging.warning(f"⚠️ {symbol}: 既存注文のキャンセル中にエラーが発生しましたが続行します。")
+        
+    
+    # ストップ注文 (STOP_MARKETを推奨)
+    stop_side = 'sell' if side == 'long' else 'buy'
+    stop_price = EXCHANGE_CLIENT.price_to_precision(symbol, stop_loss)
+    
+    try:
+        await EXCHANGE_CLIENT.create_order(
+            symbol=symbol,
+            type='stop_market',
+            side=stop_side,
+            amount=filled_amount,
+            params={
+                'stopPrice': stop_price,
+                'closeOnTrigger': True
+            }
+        )
+        logging.info(f"✅ {symbol}: SL注文を {stop_price} に再設定しました。")
+    except Exception as e:
+        logging.error(f"❌ {symbol}: SL注文の再設定に失敗しました: {e}")
+    
+    # TP注文 (TAKE_PROFIT_MARKETを推奨)
+    take_profit_side = 'sell' if side == 'long' else 'buy'
+    take_profit_price = EXCHANGE_CLIENT.price_to_precision(symbol, take_profit)
+    
+    try:
+        await EXCHANGE_CLIENT.create_order(
+            symbol=symbol,
+            type='take_profit_market',
+            side=take_profit_side,
+            amount=filled_amount,
+            params={
+                'stopPrice': take_profit_price,
+                'closeOnTrigger': True
+            }
+        )
+        logging.info(f"✅ {symbol}: TP注文を {take_profit_price} に再設定しました。")
+    except Exception as e:
+        logging.error(f"❌ {symbol}: TP注文の再設定に失敗しました: {e}")
+
+def calculate_pnl(entry_price: float, exit_price: float, contracts: float, side: str, leverage: int) -> Tuple[float, float]:
+    """
+    決済結果のPnL (USDT) とリターン率 (%) を計算する。
+    """
+    if entry_price <= 0 or abs(contracts) <= 0:
+        return 0.0, 0.0
+        
+    # PnL (USDT) の計算
+    if side == 'long':
+        pnl_usdt = (exit_price - entry_price) * contracts
+    else: # short
+        pnl_usdt = (entry_price - exit_price) * abs(contracts) # contractsはマイナス値の可能性もあるためabsを使用
+
+    # 初期証拠金 (ポジションの名目価値 / レバレッジ)
+    notional_value = entry_price * abs(contracts)
+    initial_margin = notional_value / leverage
+    
+    if initial_margin <= 0:
+        pnl_rate = 0.0
+    else:
+        # リターン率 (証拠金に対するPnLの割合)
+        pnl_rate = pnl_usdt / initial_margin
+        
+    return pnl_usdt, pnl_rate
+
+
+# ====================================================================================
+# SCHEDULERS
+# ====================================================================================
 
 async def main_bot_scheduler():
     """
-    BOTのメインとなる無限ループスケジューラ。
+    メインのBOT実行スケジューラ
     """
-    global LOOP_INTERVAL, IS_CLIENT_READY
+    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT
     
-    logging.info("⭐ メインBOTスケジューラ起動。")
-    
-    # 1. CCXTクライアントの初期化 (BOT起動時に一度だけ)
+    logging.info("🤖 メインBOTスケジューラを開始します。")
+
+    # 1. CCXTクライアントの初期化を試みる
     if not await initialize_exchange_client():
-        # クライアント初期化に失敗した場合、続行不可
-        logging.critical("❌ 致命的エラー: CCXTクライアントの初期化に失敗しました。BOTを停止します。")
+        # 致命的なエラー: 初期化に失敗した場合は取引を停止し、通知して終了
+        await send_telegram_notification(f"🚨 **Apex BOT 起動失敗** 致命的エラー\nCCXTクライアントの初期化に失敗しました。BOTを終了します。")
+        logging.critical("❌ BOTのメインループを停止します。")
         return 
-        
-    
-    # 2. 初回起動時のマクロ情報/口座ステータスを取得し、起動メッセージを送信
-    initial_macro_context = await fetch_macro_context()
-    GLOBAL_MACRO_CONTEXT.update(initial_macro_context)
-    
-    initial_account_status = await fetch_account_status()
-    # (初回起動メッセージは analyze_and_trade の中で行う)
-    
-    
-    # 3. メインループ
+
+    # 2. 初期セットアップループ
     while True:
         try:
-            # 3-1. メインの分析と取引実行
-            await analyze_and_trade()
+            # マクロコンテキストの更新
+            fgi_context = await fetch_fear_and_greed_index()
+            GLOBAL_MACRO_CONTEXT.update(fgi_context)
             
-            # 3-2. 定時報告 (取引閾値未満の最高スコア)
-            await notify_highest_analysis_score()
+            # 口座ステータスの取得とポジション情報の更新
+            account_status = await fetch_account_status()
             
-            # 3-3. WebShareデータの送信 (1時間に1回程度)
-            global LAST_WEBSHARE_UPLOAD_TIME, WEBSHARE_UPLOAD_INTERVAL
-            if time.time() - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
-                
-                # WebShare用のデータを作成
-                webshare_data = {
-                    'timestamp_jst': datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
-                    'bot_version': BOT_VERSION,
-                    'account_equity_usdt': ACCOUNT_EQUITY_USDT,
-                    'global_macro_context': GLOBAL_MACRO_CONTEXT,
-                    'open_positions_count': len(OPEN_POSITIONS),
-                    'analysis_signals_count': len(LAST_ANALYSIS_SIGNALS),
-                    'top_signal': LAST_ANALYSIS_SIGNALS[0] if LAST_ANALYSIS_SIGNALS else None,
-                }
-                await send_webshare_update(webshare_data)
-                LAST_WEBSHARE_UPLOAD_TIME = time.time()
-            
-            # 3-4. 次のループまで待機
-            await asyncio.sleep(LOOP_INTERVAL)
+            # 出来高TOP銘柄の更新
+            CURRENT_MONITOR_SYMBOLS = await fetch_top_volume_symbols()
+
+            # 初期メッセージの通知とログ
+            current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+            startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold)
+            await send_telegram_notification(startup_message)
+
+            IS_FIRST_MAIN_LOOP_COMPLETED = True
+            logging.info("✅ BOT初期セットアップが完了しました。メイン分析ループに移行します。")
+            break # セットアップが完了したらメインループへ
             
         except Exception as e:
-            logging.critical(f"❌ メインBOTスケジューラで予期せぬ致命的なエラーが発生しました: {e}", exc_info=True)
-            # 致命的エラーの場合は、Telegram通知を行い、クライアントの再初期化を試みる
-            await send_telegram_notification(f"🚨 **致命的エラー**\nメインループで予期せぬエラーが発生しました: <code>{e}</code>\nクライアントの再初期化を試みます。")
+            logging.error(f"❌ BOT初期セットアップ中にエラーが発生しました: {e}。5秒後にリトライします。", exc_info=True)
+            await asyncio.sleep(5)
             
-            # クライアント再初期化
-            await asyncio.sleep(60) # 1分待機
-            if not await initialize_exchange_client():
-                logging.critical("❌ クライアント再初期化にも失敗しました。BOTを停止します。")
-                return # 続行不可
-                
-            logging.info("✅ クライアントの再初期化に成功しました。メインループを再開します。")
-            await asyncio.sleep(LOOP_INTERVAL)
+    # 3. メイン分析・取引ループ
+    while IS_CLIENT_READY: # クライアントが使用可能であればループを継続
+        try:
+            start_time = time.time()
+            
+            # a. マクロコンテキストの更新 (毎ループ)
+            fgi_context = await fetch_fear_and_greed_index()
+            GLOBAL_MACRO_CONTEXT.update(fgi_context)
+            
+            # b. 口座ステータスとポジションの更新 (毎ループ)
+            account_status = await fetch_account_status()
+            
+            # c. 取引シグナルを検索
+            best_signals = await find_best_signals(GLOBAL_MACRO_CONTEXT)
+            
+            current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+            
+            if best_signals:
+                for signal in best_signals:
+                    symbol = signal['symbol']
+                    
+                    # 既にポジションがある銘柄はスキップ
+                    if any(p['symbol'] == symbol for p in OPEN_POSITIONS):
+                        logging.info(f"ℹ️ {symbol}: 既にポジションがあるため、新規シグナルをスキップします。")
+                        continue
+                        
+                    # 取引を実行
+                    trade_result = await execute_trade(signal)
+                    
+                    # 実行結果をシグナルに統合し、通知とログを記録
+                    signal['trade_result'] = trade_result
+                    
+                    message = format_telegram_message(signal, "取引シグナル", current_threshold, trade_result)
+                    
+                    if trade_result['status'] in ['ok', 'test_mode']:
+                        # 成功した場合、最終取引時間を更新し、新しいポジションをOPEN_POSITIONSに追加
+                        LAST_SIGNAL_TIME[symbol] = time.time()
+                        LAST_SUCCESS_TIME = time.time()
+                        
+                        if trade_result['status'] == 'ok':
+                            # 実行した取引の詳細をポジションオブジェクトとして追加
+                            new_position = {
+                                'symbol': symbol,
+                                'side': signal['side'],
+                                'contracts': trade_result['filled_amount'] if signal['side'] == 'long' else -trade_result['filled_amount'],
+                                'entry_price': trade_result['entry_price'],
+                                'filled_usdt': trade_result['filled_usdt'],
+                                'liquidation_price': signal['liquidation_price'],
+                                'stop_loss': signal['stop_loss'],
+                                'take_profit': signal['take_profit'],
+                                'leverage': LEVERAGE,
+                                'raw_info': {},
+                                'id': str(uuid.uuid4())
+                            }
+                            OPEN_POSITIONS.append(new_position)
+                            
+                        log_signal(signal, "取引成功", trade_result)
+                    else:
+                        log_signal(signal, "取引失敗", trade_result)
+                        
+                    await send_telegram_notification(message)
+                    
+                    # 💡 レートリミット対策として、取引実行後は少し待機
+                    await asyncio.sleep(LEVERAGE_SETTING_DELAY * 2) 
+
+            else:
+                logging.info("ℹ️ 今回の分析で、取引閾値を超えるシグナルは見つかりませんでした。")
+
+            # d. 分析結果の定期通知 (取引シグナルが出なかった場合に実行)
+            await notify_highest_analysis_score()
+            
+            # e. WebShareへのデータアップロード (定期実行)
+            await check_and_send_webshare_update(account_status)
+            
+            # f. ループ終了処理と待機
+            elapsed_time = time.time() - start_time
+            sleep_duration = max(0.0, LOOP_INTERVAL - elapsed_time)
+            logging.info(f"✅ メイン分析ループ完了。処理時間: {elapsed_time:.2f}秒。{sleep_duration:.0f}秒待機します。")
+            await asyncio.sleep(sleep_duration)
+            
+        except Exception as e:
+            logging.error(f"❌ メインBOTループでエラーが発生しました: {e}", exc_info=True)
+            # 致命的なエラーの可能性もあるため、クライアントを再初期化してリトライを試みる
+            await initialize_exchange_client()
+            await asyncio.sleep(MONITOR_INTERVAL) # 短いインターバルでリトライ
+
+async def check_and_send_webshare_update(account_status: Dict):
+    """WebShareの更新間隔をチェックし、必要であればデータを送信する。"""
+    global LAST_WEBSHARE_UPLOAD_TIME, WEBSHARE_UPLOAD_INTERVAL
+    
+    current_time = time.time()
+    if current_time - LAST_WEBSHARE_UPLOAD_TIME < WEBSHARE_UPLOAD_INTERVAL:
+        return
+        
+    try:
+        data_for_webshare = {
+            'timestamp_jst': datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
+            'bot_version': BOT_VERSION,
+            'exchange': CCXT_CLIENT_NAME.upper(),
+            'equity_usdt': account_status.get('total_usdt_balance', 0.0),
+            'open_positions_count': len(OPEN_POSITIONS),
+            'open_positions': OPEN_POSITIONS,
+            'macro_context': GLOBAL_MACRO_CONTEXT,
+            'last_success_time_jst': datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y-%m-%d %H:%M:%S") if LAST_SUCCESS_TIME > 0 else 'N/A',
+            'last_signals': LAST_ANALYSIS_SIGNALS[:5], # 直近のトップシグナルを送信
+        }
+        
+        await send_webshare_update(data_for_webshare)
+        LAST_WEBSHARE_UPLOAD_TIME = current_time
+        
+    except Exception as e:
+        logging.error(f"❌ WebShareデータ準備/送信中にエラーが発生しました: {e}", exc_info=True)
 
 
 async def position_monitor_scheduler():
     """
-    ポジションのSL/TPトリガーを監視するためのスケジューラ (メインループとは独立して動く)。
+    ポジションのSL/TPチェックと決済処理をメインループとは独立して監視するスケジューラ。
     """
-    global MONITOR_INTERVAL, IS_CLIENT_READY
+    logging.info("🕵️ ポジション監視スケジューラを開始します。")
     
-    logging.info("⭐ ポジション監視スケジューラ起動。")
-    
-    while not IS_CLIENT_READY:
-        logging.info("ℹ️ クライアント準備待ち...")
-        await asyncio.sleep(MONITOR_INTERVAL)
-
+    # メインループの初期化完了を待つ
+    while not IS_FIRST_MAIN_LOOP_COMPLETED:
+        await asyncio.sleep(1)
+        
     while True:
         try:
             # ポジションのSL/TPチェックと決済
@@ -1999,10 +2115,20 @@ async def default_exception_handler(request, exc):
     """捕捉されなかった例外を処理し、ログに記録する"""
     
     if "Unclosed" not in str(exc):
-        logging.error(f"❌ 未処理の致命的なエラーが発生しました: {exc}")
-        # Telegram通知はループ内で実行されるため、ここでは省略
+        logging.error(f"🌐 FastAPIで捕捉されなかった例外が発生しました: {exc}", exc_info=True)
         
     return JSONResponse(
         status_code=500,
-        content={"message": "Internal Server Error", "detail": str(exc)},
+        content={"message": f"Internal Server Error: {exc}"},
+    )
+
+
+if __name__ == "__main__":
+    # uvicornでFastAPIアプリケーションを起動
+    uvicorn.run(
+        "main_render__29:app", 
+        host="0.0.0.0", 
+        port=8000, 
+        log_level="info", 
+        reload=False
     )
