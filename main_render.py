@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.41 - Future Trading / 30x Leverage 
-# (Feature: ATR_14 KeyError の修正, 高度分析 ADX/ADL/RSI過熱 統合)
+# Apex BOT v20.0.42 - Future Trading / 30x Leverage 
+# (Feature: ATR_14 KeyError の修正 - ATRデータ不足時の安全なスキップ処理を追加)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.41"            # 💡 BOTバージョンを更新 (ATR_14 KeyError Fix)
+BOT_VERSION = "v20.0.42"            # 💡 BOTバージョンを更新 (ATR_14 KeyError Fix - 安全チェック追加)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -159,9 +159,6 @@ OBV_MOMENTUM_BONUS = 0.04
 # ====================================================================================
 # UTILITIES & FORMATTING 
 # ====================================================================================
-
-# ... (format_usdt, format_price, calculate_liquidation_price, get_estimated_win_rate, get_current_threshold, format_startup_message, send_telegram_notification, _to_json_compatible, log_signal, send_webshare_update は省略せずにそのまま) ...
-# ... (initialize_exchange_client, fetch_account_status, fetch_open_positions も省略せずにそのまま) ...
 
 def format_usdt(amount: float) -> str:
     """USDT金額を整形する"""
@@ -832,7 +829,7 @@ async def fetch_open_positions() -> List[Dict]:
     return []
 
 # ====================================================================================
-# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.41 INTEGRATION)
+# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.42 INTEGRATION)
 # ====================================================================================
 
 # ------------------------------------------------
@@ -1050,7 +1047,7 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         df.ta.ad(append=True) # A/Dライン
         df.ta.adx(append=True) # ADX/DMI
         
-        # 💥 修正点: 欠落していた ATR の計算を追加
+        # 💥 ATR の計算を追加 (KeyError対策として計算自体は残す)
         df.ta.atr(length=ATR_LENGTH, append=True) # ATR_14を追加
         
         # データが NaN を含む行を削除
@@ -1078,6 +1075,15 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
             
         # 4. 🚀 高度なテクニカル分析とスコアリングの実行
         final_signals = []
+        
+        # 💥 修正点: ATR列の存在チェックを最初に行う
+        atr_column_name = f'ATR_{ATR_LENGTH}'
+        if atr_column_name not in df.columns:
+            logging.warning(f"⚠️ {symbol} - {timeframe} の分析をスキップ: ATRデータ '{atr_column_name}' の計算に必要なデータが不足しています。")
+            return [] # ATRがない場合、リスク計算ができないため、この銘柄の分析全体をスキップ
+            
+        last_row = df.iloc[-1]
+        
         for signal in signals:
             
             # 4-1. 💡 高度なテクニカル分析を実行し、tech_dataに加点/減点要素を書き込む
@@ -1087,8 +1093,8 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
             final_score = calculate_signal_score(signal)
             
             # 4-3. リスク/リワードの計算 (ATRを使用して動的に計算)
-            last_row = df.iloc[-1]
-            atr = last_row[f'ATR_{ATR_LENGTH}'] # 修正済み: KeyErrorの発生源だった行
+            # ATRの存在は既にチェック済み
+            atr = last_row[atr_column_name] 
             entry_price = signal['entry_price']
             
             # ATRベースのリスク幅
@@ -1122,18 +1128,13 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         return final_signals
 
     except Exception as e:
-        # エラーログにATR_14以外のKeyErrorなど、他の致命的なエラーの可能性を追記
-        if 'ATR' not in str(e) and 'KeyError' in str(e):
-             logging.error(f"❌ {symbol} - {timeframe} の分析中に致命的なKeyError: {e}", exc_info=True)
-        else:
-            logging.error(f"❌ {symbol} - {timeframe} の分析中にエラー: {e}", exc_info=True)
+        # ATR KeyError以外の予期せぬエラーも捕捉
+        logging.error(f"❌ {symbol} - {timeframe} の分析中にエラー: {e}", exc_info=True)
         return []
 
 # ====================================================================================
 # EXCHANGE AND MAIN BOT LOOP
 # ====================================================================================
-
-# ... (main_bot_loop, fetch_fgi_score, position_monitor_loop, position_monitor_scheduler, main_bot_scheduler, FastAPI関連は省略) ...
 
 async def main_bot_loop():
     """メインの取引判断と実行ループ"""
