@@ -1,15 +1,13 @@
 # ====================================================================================
-# Apex BOT v20.0.45 - Future Trading / 30x Leverage 
-# (Feature: v20.0.44機能 + 致命的バグ修正)
+# Apex BOT v20.0.46 - Future Trading / 30x Leverage 
+# (Feature: v20.0.45機能 + 毎ループ最高スコアのログ出力)
 # 
 # 🚨 致命的エラー修正強化: 
 # 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
 # 2. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 
 # 3. 注文失敗エラー (Amount can not be less than zero) 対策
-# 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決 (v20.0.42で対応済み)
-# 5. 💡 新規: ダミーロジックを実践的スコアリングロジックに置換 (v20.0.43)
-# 6. 💡 新規: ADX/StochRSIによるスコア判別能力強化 (v20.0.44)
-# 7. 💡 修正: main_bot_scheduler内のLAST_WEBSHARE_UPLOAD_TIMEに関するUnboundLocalErrorを修正 (v20.0.45)
+# 4. 💡 修正: main_bot_scheduler内のLAST_WEBSHARE_UPLOAD_TIMEに関するUnboundLocalErrorを修正 (v20.0.45)
+# 5. 💡 新規: 毎分析ループで最高スコア銘柄の情報をログ出力 (v20.0.46)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -67,7 +65,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.45"            # 💡 BOTバージョンを v20.0.45 に更新 
+BOT_VERSION = "v20.0.46"            # 💡 BOTバージョンを v20.0.46 に更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -107,7 +105,7 @@ LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
 LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
 LAST_ANALYSIS_ONLY_NOTIFICATION_TIME: float = 0.0 
-LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 # 💡 グローバル変数の初期化を明示
+LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 
 GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0}
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False 
 OPEN_POSITIONS: List[Dict] = [] 
@@ -146,9 +144,9 @@ RR_RATIO_TARGET = 1.5               # 基本的なリスクリワード比率 (1
 # 市場環境に応じた動的閾値調整のための定数
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.85       
-SIGNAL_THRESHOLD_NORMAL = 0.80      
-SIGNAL_THRESHOLD_ACTIVE = 0.75      
+SIGNAL_THRESHOLD_SLUMP = 0.90       
+SIGNAL_THRESHOLD_NORMAL = 0.85      
+SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
 RSI_DIVERGENCE_BONUS = 0.10         
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 # BB幅が価格の1%を超えるとペナルティ
@@ -571,7 +569,7 @@ def log_signal(data: Dict, log_type: str, trade_result: Optional[Dict] = None) -
     except Exception as e:
         logging.error(f"❌ ログ書き込みエラー: {e}", exc_info=True)
 
-# 🆕 機能追加: 取引閾値未満の最高スコアを定期通知
+# 🆕 機能追加: 取引閾値未満の最高スコアを定期通知 (既存の機能)
 async def notify_highest_analysis_score():
     """
     分析の結果、取引閾値に満たない最高スコア銘柄を1時間ごとに通知する。
@@ -956,6 +954,7 @@ def get_trend_strength_score(series: pd.Series, periods: int = 5) -> float:
         x = np.arange(periods)
         
         # 線形回帰 (np.polyfit) を使用して傾きを計算
+        # 💡 np.polyfitの戻り値が1つの場合があるため、deg=1を使用
         p = np.polyfit(x, recent_data, deg=1)
         slope = p[0]
         
@@ -1754,7 +1753,6 @@ async def main_bot_scheduler():
     """
     メインの分析・取引スケジューラ。
     """
-    # 💡 修正: LAST_WEBSHARE_UPLOAD_TIME を global 宣言に追加
     global CURRENT_MONITOR_SYMBOLS, IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_SIGNALS, \
            LAST_SUCCESS_TIME, ACCOUNT_EQUITY_USDT, LAST_HOURLY_NOTIFICATION_TIME, \
            LAST_ANALYSIS_ONLY_NOTIFICATION_TIME, LAST_WEBSHARE_UPLOAD_TIME
@@ -1803,6 +1801,18 @@ async def main_bot_scheduler():
             all_signals = await check_for_signals(CURRENT_MONITOR_SYMBOLS, macro_context)
             LAST_ANALYSIS_SIGNALS = all_signals # 定期通知のために保存
             
+            # 🆕 ユーザー要望: 毎ループで最高スコア銘柄をログに出力
+            if LAST_ANALYSIS_SIGNALS:
+                sorted_signals = sorted(LAST_ANALYSIS_SIGNALS, key=lambda x: x.get('score', 0.0), reverse=True)
+                best_signal = sorted_signals[0]
+                best_score = best_signal.get('score', 0.0)
+                symbol = best_signal.get('symbol', 'N/A')
+                side = best_signal.get('side', 'N/A')
+                timeframe = best_signal.get('timeframe', 'N/A')
+                
+                # 💡 毎ループ実行時に、最高スコアをINFOログに出力
+                logging.info(f"📊 ループ最高スコア: {symbol} ({side} / {timeframe}) Score: {best_score * 100:.2f} / 100 (閾値: {current_threshold * 100:.2f}点)")
+            
             # --- 取引判断フェーズ ---
             
             # 最適な取引シグナルを選定
@@ -1825,7 +1835,6 @@ async def main_bot_scheduler():
             await notify_highest_analysis_score() 
 
             # --- WebShareアップロード ---
-            # 💡 修正: global宣言されたため、変数参照が可能に
             if current_time - LAST_WEBSHARE_UPLOAD_TIME > WEBSHARE_UPLOAD_INTERVAL:
                  webshare_data = {
                     'timestamp_jst': datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S"),
