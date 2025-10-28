@@ -1,6 +1,6 @@
 # ====================================================================================
-# Apex BOT v20.0.42 - Future Trading / 30x Leverage 
-# (Feature: ATR_14 KeyError の修正 - ATRデータ不足時の安全なスキップ処理を追加)
+# Apex BOT v20.0.43 - Future Trading / 30x Leverage 
+# (Feature: ATR_14 KeyError の修正 / OHLCV取得本数を1000から250に最適化)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.42"            # 💡 BOTバージョンを更新 (ATR_14 KeyError Fix - 安全チェック追加)
+BOT_VERSION = "v20.0.43"            # 💡 BOTバージョンを更新 (OHLCV取得本数を250に最適化)
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -116,7 +116,8 @@ IS_CLIENT_READY: bool = False
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 12 
 SIGNAL_THRESHOLD = 0.65             
 TOP_SIGNAL_COUNT = 1                
-REQUIRED_OHLCV_LIMITS = {'1m': 1000, '5m': 1000, '15m': 1000, '1h': 1000, '4h': 1000} 
+# 💥 修正: 取得するOHLCVの期間を1000から250に減らす (新規銘柄のATRエラー対策)
+REQUIRED_OHLCV_LIMITS = {'1m': 250, '5m': 250, '15m': 250, '1h': 250, '4h': 250} 
 
 # テクニカル分析定数 
 TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
@@ -829,7 +830,7 @@ async def fetch_open_positions() -> List[Dict]:
     return []
 
 # ====================================================================================
-# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.42 INTEGRATION)
+# CORE LOGIC: TECHNICAL ANALYSIS & SCORING (NEW V20.0.43 INTEGRATION)
 # ====================================================================================
 
 # ------------------------------------------------
@@ -904,20 +905,28 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
     # 1. 既存の分析項目
     
     # Long Term Reversal (長期トレンド: SMA200との比較)
-    long_term_sma = last_row[f'SMA_{LONG_TERM_SMA_LENGTH}']
+    # 200SMA計算に必要なデータが揃っているか確認
+    if f'SMA_{LONG_TERM_SMA_LENGTH}' not in df.columns:
+        # SMA200が計算できていない場合は、トレンド要因を中立（0.0）とする
+        long_term_sma = current_close
+        logging.warning(f"SMA_{LONG_TERM_SMA_LENGTH} が計算されていません。トレンド要因をスキップします。")
+    else:
+        long_term_sma = last_row[f'SMA_{LONG_TERM_SMA_LENGTH}']
+        
     tech_data['long_term_reversal_penalty_value'] = 0.0
     
-    if signal_type == 'long' and current_close > long_term_sma:
-        tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY 
-    elif signal_type == 'short' and current_close < long_term_sma:
-        tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY 
-    elif signal_type == 'long' and current_close < long_term_sma:
-        tech_data['long_term_reversal_penalty_value'] = -LONG_TERM_REVERSAL_PENALTY 
-    elif signal_type == 'short' and current_close > long_term_sma:
-        tech_data['long_term_reversal_penalty_value'] = -LONG_TERM_REVERSAL_PENALTY 
+    if long_term_sma != current_close: # スキップの場合を除外
+        if signal_type == 'long' and current_close > long_term_sma:
+            tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY 
+        elif signal_type == 'short' and current_close < long_term_sma:
+            tech_data['long_term_reversal_penalty_value'] = LONG_TERM_REVERSAL_PENALTY 
+        elif signal_type == 'long' and current_close < long_term_sma:
+            tech_data['long_term_reversal_penalty_value'] = -LONG_TERM_REVERSAL_PENALTY 
+        elif signal_type == 'short' and current_close > long_term_sma:
+            tech_data['long_term_reversal_penalty_value'] = -LONG_TERM_REVERSAL_PENALTY 
         
     # MACDモメンタム (MACDヒストグラムの方向性)
-    macd_h = last_row['MACDh_12_26_9']
+    macd_h = last_row.get('MACDh_12_26_9', 0.0)
     tech_data['macd_penalty_value'] = 0.0
     
     if signal_type == 'long' and macd_h > 0:
@@ -930,13 +939,12 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
         tech_data['macd_penalty_value'] = -MACD_CROSS_PENALTY 
         
     # 構造的優位性 (SMA50との比較による簡略化)
-    # SMA_50の有無をチェック
     if 'SMA_50' in df.columns:
         sma_50 = last_row['SMA_50']
         tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS if (signal_type == 'long' and current_close > sma_50) or (signal_type == 'short' and current_close < sma_50) else 0.0
     else:
-        # SMA_50が存在しない場合は、SMA200を一時的に使用 
-        tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS if (signal_type == 'long' and current_close > long_term_sma) or (signal_type == 'short' and current_close < long_term_sma) else 0.0
+        # SMA_50が存在しない場合は、長期トレンドを使用（既に中立化されている場合は0.0）
+        tech_data['structural_pivot_bonus'] = STRUCTURAL_PIVOT_BONUS if tech_data['long_term_reversal_penalty_value'] > 0 else 0.0
 
 
     # 流動性ボーナス (暫定的にTOP銘柄の有無で判断)
@@ -954,16 +962,15 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
         tech_data['sentiment_fgi_proxy_bonus'] = fgi_proxy 
     
     # ダミー/既存の要素 (出来高、ダイバージェンス、ボラティリティペナルティ)
-    # これらは複雑なロジックが必要だが、既存コードの定数を生かすため、一旦ランダムで実装
     tech_data['rsi_divergence_bonus_value'] = RSI_DIVERGENCE_BONUS if random.random() < 0.3 else 0.0
     tech_data['obv_momentum_bonus_value'] = OBV_MOMENTUM_BONUS if random.random() < 0.5 else 0.0
-    # BBandsの%Bが極端な値 (例: 1.05超え、-0.05未満) の場合にペナルティとする
+    
+    # ボラティリティペナルティ (BBandsの%Bを使用)
+    tech_data['volatility_penalty_value'] = 0.0
     if 'BBP_5_2.0' in last_row:
         bbp = last_row['BBP_5_2.0']
         if bbp > 1.05 or bbp < -0.05:
             tech_data['volatility_penalty_value'] = -VOLATILITY_BB_PENALTY_THRESHOLD 
-        else:
-            tech_data['volatility_penalty_value'] = 0.0
     else:
         tech_data['volatility_penalty_value'] = -VOLATILITY_BB_PENALTY_THRESHOLD if random.random() < 0.2 else 0.0
         
@@ -972,7 +979,7 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
     # 2. 💎 新規追加: 高度分析要素の計算
     
     # RSI過熱反転ペナルティの計算
-    rsi = last_row['RSI_14']
+    rsi = last_row.get('RSI_14', 50.0)
     tech_data['rsi_overbought_penalty_value'] = 0.0
     
     if signal_type == 'long' and rsi > RSI_OVERBOUGHT_THRESHOLD: 
@@ -983,24 +990,23 @@ def calculate_advanced_analysis(df: pd.DataFrame, signal: Dict[str, Any], signal
 
     # A/Dライン蓄積ボーナスの計算
     adl_diff = 0
+    tech_data['adl_accumulation_bonus'] = 0.0
     if 'AD' in df.columns and len(df) >= 14:
         # 直近14期間のA/Dラインの変化
         adl_diff = last_row['AD'] - df['AD'].iloc[-14] 
         
-    tech_data['adl_accumulation_bonus'] = 0.0
-    
-    if signal_type == 'long' and adl_diff > 0:
-        tech_data['adl_accumulation_bonus'] = ADL_ACCUMULATION_BONUS 
-            
-    elif signal_type == 'short' and adl_diff < 0:
-        tech_data['adl_accumulation_bonus'] = ADL_ACCUMULATION_BONUS 
+        if signal_type == 'long' and adl_diff > 0:
+            tech_data['adl_accumulation_bonus'] = ADL_ACCUMULATION_BONUS 
+                
+        elif signal_type == 'short' and adl_diff < 0:
+            tech_data['adl_accumulation_bonus'] = ADL_ACCUMULATION_BONUS 
 
     # ADXトレンド強度ボーナスの計算
     tech_data['adx_trend_strength_bonus'] = 0.0
     if 'ADX_14' in df.columns:
         adx = last_row['ADX_14']
-        dmi_plus = last_row['DMP_14']
-        dmi_minus = last_row['DMN_14']
+        dmi_plus = last_row.get('DMP_14', 0.0)
+        dmi_minus = last_row.get('DMN_14', 0.0)
 
         if adx > ADX_STRENGTH_THRESHOLD: # ADX > 25 (トレンドが強い)
             if signal_type == 'long' and dmi_plus > dmi_minus:
@@ -1018,17 +1024,19 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
     OHLCVデータを取得し、テクニカル分析を行い、シグナルスコアを計算する。
     """
     
-    # 既存のコードは250期間を取得していますが、ここでは REQUIRED_OHLCV_LIMITS を使用
-    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 1000)
+    # 💥 修正: 設定されたOHLCVの最大取得期間を使用
+    limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 250)
     
     try:
         # 1. データの取得
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, limit=limit) 
         
-        # 200SMA計算に必要なデータが揃っているか確認
-        if len(ohlcv) < LONG_TERM_SMA_LENGTH:
-            logging.warning(f"データ不足: {symbol} - {timeframe} ({len(ohlcv)}/{LONG_TERM_SMA_LENGTH}期間未満)")
-            return []
+        # ATR/SMA計算に必要な期間（例: 200期間）のチェック
+        # LONG_TERM_SMA_LENGTH (200) よりもデータ本数が少ない場合は、分析続行に不十分と見なす
+        if len(ohlcv) < LONG_TERM_SMA_LENGTH + ATR_LENGTH: # 200+14=214本が必要
+            # ATRエラーの原因がデータ不足であることを警告
+            logging.warning(f"データ不足: {symbol} - {timeframe} ({len(ohlcv)}/{LONG_TERM_SMA_LENGTH+ATR_LENGTH}期間未満)。ATR_14が計算できない可能性があります。")
+            # ただし、ATRのチェックは後で行うため、ここでは続行
             
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -1047,16 +1055,17 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         df.ta.ad(append=True) # A/Dライン
         df.ta.adx(append=True) # ADX/DMI
         
-        # 💥 ATR の計算を追加 (KeyError対策として計算自体は残す)
+        # 💥 ATR の計算を追加 
         df.ta.atr(length=ATR_LENGTH, append=True) # ATR_14を追加
         
-        # データが NaN を含む行を削除
+        # データが NaN を含む行を削除 (テクニカル指標の計算に必要なデータが揃うまで待つ)
         df = df.dropna()
         if df.empty or len(df) < 5:
             logging.warning(f"{symbol} のテクニカル指標計算後、データが不足しました。")
             return []
             
         # 3. シグナル判定 (最後のMACDクロス方向をシグナルとする)
+        # dropona()によってMACDカラムが存在することが前提となる
         last_macd_h = df['MACDh_12_26_9'].iloc[-1]
         prev_macd_h = df['MACDh_12_26_9'].iloc[-2]
         
@@ -1076,7 +1085,7 @@ async def fetch_and_analyze(exchange: ccxt_async.Exchange, symbol: str, timefram
         # 4. 🚀 高度なテクニカル分析とスコアリングの実行
         final_signals = []
         
-        # 💥 修正点: ATR列の存在チェックを最初に行う
+        # 💥 修正点: ATR列の存在チェック (KeyError対策 v20.0.42で追加済み)
         atr_column_name = f'ATR_{ATR_LENGTH}'
         if atr_column_name not in df.columns:
             logging.warning(f"⚠️ {symbol} - {timeframe} の分析をスキップ: ATRデータ '{atr_column_name}' の計算に必要なデータが不足しています。")
@@ -1309,7 +1318,7 @@ async def main_bot_scheduler():
             LAST_SUCCESS_TIME = time.time()
         except Exception as e:
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
-            await send_telegram_notification(f"🚨 **致命的なエラー**\\nメインループでエラーが発生しました: <code>{e}</code>")
+            await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: <code>{e}</code>")
 
         # 待機時間を LOOP_INTERVAL (60秒) に基づいて計算
         # 実行にかかった時間を差し引く
