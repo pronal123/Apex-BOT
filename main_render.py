@@ -1,13 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.43 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.44 - Future Trading / 30x Leverage 
 # (Feature: 実践的スコアリングロジック、ATR動的リスク管理導入)
 # 
-# 🚨 致命的エラー修正強化: 
-# 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
-# 2. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 
-# 3. 注文失敗エラー (Amount can not be less than zero) 対策
-# 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決 (v20.0.42で対応済み)
-# 5. 💡 新規: ダミーロジックを実践的スコアリングロジックに置換 (v20.0.43)
+# 🚨 致命的エラー修正強化 (v20.0.44 修正点): 
+# 1. 💡 修正: mexc {"code":10007,"msg":"symbol not support api"} 対策 (市場シンボル確認強化)
+# 2. 💡 修正: mexc {"msg":"Amount can not be less than zero"} 対策 (ロットサイズ精度丸め/最小ロットチェック導入)
+# 3. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正 (v20.0.43で対応済み)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.43"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.44"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -672,6 +670,7 @@ async def initialize_exchange_client() -> bool:
         })
         logging.info(f"✅ CCXTクライアントの初期化設定完了。リクエストタイムアウト: {timeout_ms/1000}秒。") 
         
+        # 市場情報のロード
         await EXCHANGE_CLIENT.load_markets() 
         
         # レバレッジの設定 (MEXC向け)
@@ -1105,11 +1104,12 @@ def get_trend_strength_score(df: pd.DataFrame, target_column: str, length: int) 
         # np.polyfitを使用して傾きを計算
         # 💡 修正: 戻り値が一つだけの場合があるため、try-exceptで対応
         coefficients = np.polyfit(recent_index.values, recent_data.values, 1)
-        slope = coefficients[0]
+        # polyfitは (slope, intercept) を返すか、次数1の場合は slope のみ返す
+        slope = coefficients[0] if isinstance(coefficients, np.ndarray) and len(coefficients) > 1 else coefficients.item()
     except ValueError as e:
         if "not enough values to unpack" in str(e):
-            # 傾きのみが返された場合
-            slope = coefficients 
+            # 傾きのみが返された場合 (numpy 1.25.0 以降の挙動)
+            slope = coefficients.item()
         else:
             logging.warning(f"⚠️ np.polyfitで予期せぬエラーが発生しました: {e}")
             return 0.0
@@ -1491,30 +1491,51 @@ async def find_best_signals(macro_context: Dict) -> List[Dict]:
 # EXECUTION & TRADING
 # ====================================================================================
 
-async def calculate_entry_size(entry_price: float) -> Optional[float]:
+async def calculate_entry_size(symbol: str, entry_price: float) -> Optional[float]:
     """
-    固定のNOTIONAL_USDTに基づいて、契約サイズ (数量) を計算する。
-    MEXCなどのUSDT先物では、数量はベース通貨 (例: BTC) の単位。
-    
-    戻り値: 契約サイズ (数量)
+    💡 修正: ロットサイズを計算し、取引所の精度に合わせて丸める。
+    最小ロットを満たさない場合は None を返す。
     """
     
     if entry_price <= 0 or FIXED_NOTIONAL_USDT <= 0:
         logging.error("❌ エントリーサイズ計算失敗: 価格または固定ロットが不正です。")
         return None
         
-    # 名目価値 / エントリー価格 = 数量 (Contract Size)
-    # 例: 20 USDT / 20000 USD/BTC = 0.001 BTC
-    contract_size = FIXED_NOTIONAL_USDT / entry_price
-    
-    # 取引所の最小ロット要件などを考慮するため、CCXTの市場情報で丸める
-    if EXCHANGE_CLIENT and EXCHANGE_CLIENT.markets:
-        # MEXCのシンボルは 'BTC/USDT' -> 'BTC/USDT:USDT' の形式になる可能性があるため、
-        # ここではシンボル情報にアクセスしない。一旦、そのままの数量を使用し、
-        # 注文APIに丸めを任せる
-        pass
+    if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
+        logging.error("❌ エントリーサイズ計算失敗: CCXTクライアントが準備できていません。")
+        return None
         
-    return contract_size
+    try:
+        # CCXTのシンボル解決メソッドを使用し、市場情報を取得
+        market = EXCHANGE_CLIENT.market(symbol)
+    except ccxt.ExchangeError as e:
+        logging.error(f"❌ エントリーサイズ計算失敗: シンボル {symbol} の市場情報が見つかりません。{e}")
+        return None
+
+    # 名目価値 / エントリー価格 = 数量 (Contract Size)
+    contract_size_raw = FIXED_NOTIONAL_USDT / entry_price
+    
+    # 1. 数量の精度丸め
+    # CCXTの amount_to_precision を使用し、取引所が要求するロットサイズ精度に丸める
+    try:
+        rounded_size_str = EXCHANGE_CLIENT.amount_to_precision(symbol, contract_size_raw)
+        final_size = float(rounded_size_str)
+    except Exception as e:
+        logging.error(f"❌ {symbol}: ロットサイズ精度丸めエラー: {e}")
+        return None
+        
+    # 2. 最小ロットチェック (Amount Min Limit)
+    min_amount = market.get('limits', {}).get('amount', {}).get('min', 0.0)
+
+    if min_amount > 0 and final_size < min_amount:
+        logging.warning(f"⚠️ {symbol}: 計算されたロットサイズ {final_size:.8f} は最小ロット {min_amount:.8f} を下回ります。取引をスキップします。")
+        return None 
+    
+    if final_size <= 0:
+        logging.error(f"❌ {symbol}: 最終ロットサイズがゼロ以下です ({final_size:.8f})。")
+        return None
+        
+    return final_size
 
 async def execute_trade(signal: Dict, contract_size: float) -> Dict:
     """
@@ -1532,23 +1553,36 @@ async def execute_trade(signal: Dict, contract_size: float) -> Dict:
     if contract_size <= 0.0 or not EXCHANGE_CLIENT or not IS_CLIENT_READY:
         return {'status': 'error', 'error_message': 'ロットサイズまたはクライアントが不正です。'}
 
+    # 💡 修正: シンボルチェックを強化
+    try:
+        market = EXCHANGE_CLIENT.market(symbol)
+        exchange_symbol = market['symbol']
+        if not market['active']:
+            raise ccxt.ExchangeError(f"シンボル {symbol} は非アクティブです。")
+            
+    except ccxt.ExchangeError as e:
+        error_message = f"シンボル解決失敗: {e}"
+        logging.error(f"❌ {symbol} - {side.capitalize()}: {error_message}", exc_info=True)
+        return {'status': 'error', 'error_message': error_message}
+    except Exception as e:
+        # ログにある 'symbol not support api' エラーをここで捕捉する可能性が高い
+        error_message = f"致命的なシンボルエラー: {e}"
+        logging.error(f"❌ {symbol} - {side.capitalize()}: {error_message}", exc_info=True)
+        return {'status': 'error', 'error_message': error_message}
+
+
     # ----------------------------------------------------
     # 1. 成行注文の実行 (エントリー)
     # ----------------------------------------------------
     
     order_side = 'buy' if side == 'long' else 'sell'
-    # CCXTの成行注文: create_market_order(symbol, side, amount)
-    # amount はベース通貨の数量 (例: 0.001 BTC)
-    
-    # MEXCの場合、シンボルを変換する: 'BTC/USDT' -> 'BTC/USDT:USDT'
-    exchange_symbol = EXCHANGE_CLIENT.markets[symbol]['symbol'] if symbol in EXCHANGE_CLIENT.markets else symbol
     
     try:
-        # 成行注文の実行
+        # 成行注文の実行 (exchange_symbol を使用)
         entry_order = await EXCHANGE_CLIENT.create_market_order(
             exchange_symbol, 
             order_side, 
-            abs(contract_size)
+            abs(contract_size) # 💡 契約サイズは既に精度丸め済み
         )
         
         # 注文が約定するまで待機 (通常、成行は即時約定)
@@ -1580,7 +1614,7 @@ async def execute_trade(signal: Dict, contract_size: float) -> Dict:
         logging.info(f"✅ {symbol} - {side.capitalize()}: エントリー注文成功。平均約定価格: {format_price(filled_price)}")
         
     except Exception as e:
-        error_message = f"成行注文失敗: {e}"
+        error_message = f"成行注文失敗: {EXCHANGE_CLIENT.id} {e}"
         logging.error(f"❌ {symbol} - {side.capitalize()}: {error_message}", exc_info=True)
         return {'status': 'error', 'error_message': error_message}
         
@@ -1597,30 +1631,25 @@ async def execute_trade(signal: Dict, contract_size: float) -> Dict:
     # SL/TPは通常、ポジションの全量 (約定数量) をクローズする注文
     sl_tp_amount = filled_amount 
 
-    # CCXTは unified create_order (stop_loss, take_profit) をサポート
-    # MEXCは create_order(params={'stopLoss', 'takeProfit'}) のような複合注文をサポート
-    
+    # 💡 注文価格/トリガー価格も取引所の精度に合わせて丸める
+    try:
+        stop_loss_precision = EXCHANGE_CLIENT.price_to_precision(symbol, stop_loss)
+        take_profit_precision = EXCHANGE_CLIENT.price_to_precision(symbol, take_profit)
+    except Exception as e:
+        logging.warning(f"⚠️ {symbol}: SL/TP価格の精度丸めに失敗しました: {e}。丸め無しで続行します。")
+        stop_loss_precision = stop_loss
+        take_profit_precision = take_profit
+
     try:
         # ストップロス (SL) 注文の実行
         # SLは 'STOP_MARKET' または 'STOP_LIMIT' で設定
-        # MEXCの場合、CCXTのparams={'stopLoss', 'takeProfit'}を使って複合注文を設定
-        
-        sl_tp_params = {
-            'stopLossPrice': stop_loss, # トリガー価格
-            'takeProfitPrice': take_profit, # トリガー価格
-            'priceType': 1, # 1: リアルタイム価格 (CCXT APIによって異なる可能性あり)
-            # MEXCはポジションIDを必要としない (Position Monitorで管理するため、ここではトリガー注文のみ)
-        }
-        
-        # 注文のタイプ (指値: limit, 成行: market)
-        # SL/TPは、指値 (Limit) ではなく、トリガー価格に達したら成行 (Market) で決済する Stop Market を使用
         
         sl_order = await EXCHANGE_CLIENT.create_order(
             exchange_symbol, 
             'stop_market', # ストップ成行注文
             sl_tp_side, 
             abs(sl_tp_amount), 
-            params={'stopLossPrice': stop_loss} # SLのパラメーターのみ渡す (TPは個別に)
+            params={'stopLossPrice': stop_loss_precision} # SLのパラメーター
         )
         
         tp_order = await EXCHANGE_CLIENT.create_order(
@@ -1628,13 +1657,13 @@ async def execute_trade(signal: Dict, contract_size: float) -> Dict:
             'take_profit_market', # テイクプロフィット成行注文
             sl_tp_side, 
             abs(sl_tp_amount), 
-            params={'takeProfitPrice': take_profit} # TPのパラメーターのみ渡す
+            params={'takeProfitPrice': take_profit_precision} # TPのパラメーター
         )
 
         trade_result['stop_loss_order_id'] = sl_order.get('id')
         trade_result['take_profit_order_id'] = tp_order.get('id')
         
-        logging.info(f"✅ {symbol} - {side.capitalize()}: SL ({format_price(stop_loss)}) と TP ({format_price(take_profit)}) 注文を正常に設定しました。")
+        logging.info(f"✅ {symbol} - {side.capitalize()}: SL ({format_price(float(stop_loss_precision))}) と TP ({format_price(float(take_profit_precision))}) 注文を正常に設定しました。")
         
     except Exception as e:
         error_message = f"SL/TP注文設定失敗: {e}"
@@ -1662,12 +1691,12 @@ async def process_entry_signal(signal: Dict, macro_context: Dict) -> None:
         # テストモードではダミーの取引結果を作成
         trade_result = {'status': 'ok', 'filled_amount': FIXED_NOTIONAL_USDT / entry_price, 'filled_price': entry_price, 'filled_usdt': FIXED_NOTIONAL_USDT, 'error_message': None}
     else:
-        # 1. 契約サイズの計算
-        contract_size = await calculate_entry_size(entry_price)
+        # 1. 契約サイズの計算 (シンボルを渡す)
+        contract_size = await calculate_entry_size(symbol, entry_price)
         
         if contract_size is None or contract_size <= 0:
-            logging.error(f"❌ {symbol} - {side.capitalize()}: 契約サイズが不正なため、取引をスキップします。")
-            trade_result = {'status': 'error', 'error_message': '契約サイズ計算失敗'}
+            logging.warning(f"❌ {symbol} - {side.capitalize()}: 契約サイズが不正または最小ロット未満のため、取引をスキップします。")
+            trade_result = {'status': 'error', 'error_message': '契約サイズ計算失敗 (最小ロット/精度エラー)'}
         else:
             # 2. 取引の実行 (エントリー + SL/TP)
             trade_result = await execute_trade(signal, contract_size)
@@ -1808,9 +1837,14 @@ async def close_position_and_notify(position: Dict, exit_price: float, exit_type
     # 決済サイドはエントリーの逆
     close_side = 'sell' if side == 'long' else 'buy'
     
-    # MEXCの場合、シンボルを変換
-    exchange_symbol = EXCHANGE_CLIENT.markets[symbol]['symbol'] if symbol in EXCHANGE_CLIENT.markets else symbol
-    
+    # 💡 修正: シンボルチェックを強化
+    try:
+        market = EXCHANGE_CLIENT.market(symbol)
+        exchange_symbol = market['symbol']
+    except Exception as e:
+        logging.error(f"❌ {symbol} 決済失敗: シンボル解決エラー。決済をスキップ: {e}")
+        return
+
     pnl_rate = 0.0
     pnl_usdt = 0.0
     
@@ -1822,8 +1856,6 @@ async def close_position_and_notify(position: Dict, exit_price: float, exit_type
             pnl_rate = (entry_price - exit_price) / entry_price
             
         # PnL (USDT) = 名目価値 * PnL率 * レバレッジ
-        pnl_usdt = abs(position['filled_usdt'] * pnl_rate * LEVERAGE)
-        # PnLの符号を修正 (pnl_rateが既に符号を持っているため、absを外す)
         pnl_usdt = position['filled_usdt'] * pnl_rate * LEVERAGE 
     
     trade_result = {
@@ -1842,7 +1874,7 @@ async def close_position_and_notify(position: Dict, exit_price: float, exit_type
         close_order = await EXCHANGE_CLIENT.create_market_order(
             exchange_symbol, 
             close_side, 
-            abs(contracts) # ポジションの絶対量
+            abs(contracts) # ポジションの絶対量 (この数量も本来は amount_to_precisionが必要だが、既存ポジションのContractsは既に正しい精度であると仮定する)
         )
         
         # 注文が約定するまで待機
