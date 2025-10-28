@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v20.0.39 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.40 - Future Trading / 30x Leverage 
 # (Feature: 固定取引ロット 20 USDT, UptimeRobot HEADメソッド対応)
 # ====================================================================================
 
@@ -59,7 +59,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
-BOT_VERSION = "v20.0.39"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.40"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" # 💡 FGI API URL
 
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -317,7 +317,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     risk_width = abs(entry_price - stop_loss)
     reward_width = abs(take_profit - entry_price)
 
-    # 💡 【修正点1】 sl_ratioの計算 (未定義エラーの解消)
+    # sl_ratioの計算 (未定義エラーの解消)
     sl_ratio = 0.0
     if entry_price > 0:
         sl_ratio = risk_width / entry_price # SL幅の対エントリー価格比率
@@ -343,7 +343,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
                 filled_amount = 0.0
                 
             filled_usdt_notional = trade_result.get('filled_usdt', FIXED_NOTIONAL_USDT) 
-            # 💡 【修正点1】 risk_usdt の計算を修正
+            # risk_usdt の計算を修正
             risk_usdt = abs(filled_usdt_notional) * sl_ratio # 名目ロット * SL比率
             
             trade_section = (
@@ -686,7 +686,7 @@ async def fetch_account_status() -> Dict:
     try:
         balance = None
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 💡 【修正点2】 ログメッセージの末尾の省略記号を削除し、行を完了させる
+            # ログメッセージの末尾の省略記号を削除し、行を完了させる
             logging.info("ℹ️ MEXC: fetch_balance(type='swap') を使用して口座情報を取得します。") 
             balance = await EXCHANGE_CLIENT.fetch_balance(params={'defaultType': 'swap'})
         else:
@@ -1077,11 +1077,6 @@ def generate_signal(symbol: str, timeframe: str, side: str, entry_price: float, 
     min_risk_width = entry_price * MIN_RISK_PERCENT
     risk_width = max(risk_width, min_risk_width)
     
-    # リスクリワード比率の決定 (スコアに応じて動的に調整)
-    # スコアが高いほど、RRRを若干大きく取る (最大3.0, 最小2.0)
-    # RRR_base = 1.0 + (score - BASE_SCORE) * (2.0 / (1.0 - BASE_SCORE)) 
-    # RRR_ratio = max(1.5, min(3.0, RRR_base))
-    
     # シンプルに固定のRRRを使用
     RRR_ratio = 2.0 
     
@@ -1393,17 +1388,14 @@ async def close_position(position: Dict, exit_type: str) -> Dict:
 async def main_bot_loop():
     """
     メインの分析・取引ロジック。定期的に実行される。
+    
+    ⚠️ 注意: main_bot_schedulerでIS_CLIENT_READYがTrueであることを前提としています。
     """
     global CURRENT_MONITOR_SYMBOLS, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, OPEN_POSITIONS
 
     logging.info(f"--- メインボットループ実行開始 (JST: {datetime.now(JST).strftime('%H:%M:%S')}) ---")
 
-    # 1. CCXTクライアントの初期化/再確認
-    if not IS_CLIENT_READY:
-        if not await initialize_exchange_client():
-            logging.critical("❌ クライアント初期化失敗。次のループまでスキップします。")
-            await send_telegram_notification(f"🚨 **致命的なエラー**\nCCXTクライアントの初期化に失敗しました。BOTは機能していません。")
-            return
+    # 1. CCXTクライアントの初期化/再確認 (💡 schedulerに移譲したため、ここではスキップ)
 
     # 2. 口座ステータスの取得
     account_status = await fetch_account_status()
@@ -1689,11 +1681,24 @@ async def main_bot_scheduler():
     
     while True:
         
+        # 💡 【修正点】 CCXTクライアントが未初期化の場合、初期化を再試行するロジックをここに移動
         if not IS_CLIENT_READY:
-            # クライアント初期化が失敗している場合、長めに待機
-            logging.info("ℹ️ CCXTクライアントが未初期化のため、5秒待機します。")
-            await asyncio.sleep(5)
-            continue
+            logging.info("ℹ️ CCXTクライアントが未初期化です。初期化を試行します...")
+            
+            # 初期化を試行し、失敗した場合はログを出力して待機
+            if not await initialize_exchange_client():
+                logging.critical("❌ クライアント再初期化に失敗。5秒待機後に再試行します。")
+                
+                # エラーがAPIキー/シークレット欠如による場合は通知
+                if not API_KEY or not SECRET_KEY:
+                     await send_telegram_notification(f"🚨 **致命的なエラー**\nCCXTクライアントの初期化に失敗しました: <code>APIキーまたはSECRET_KEYが不足しています。</code>")
+                     
+                await asyncio.sleep(5)
+                continue
+            else:
+                # 成功したらログを出力
+                logging.info("✅ クライアント初期化に成功しました。メインループに進みます。")
+
 
         current_time = time.time()
         
@@ -1705,7 +1710,6 @@ async def main_bot_scheduler():
             await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: <code>{e}</code>")
 
         # 待機時間を LOOP_INTERVAL (60秒) に基づいて計算
-        # 成功した時間から次の実行までの間隔を計算
         wait_time = max(1, LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME)) 
         logging.info(f"次のメインループまで {wait_time:.1f} 秒待機します。")
         await asyncio.sleep(wait_time)
@@ -1752,8 +1756,5 @@ async def default_exception_handler(request: Request, exc: Exception):
 
 
 if __name__ == "__main__":
-    # uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None) # logging.basicConfigを使用するためlog_config=None
-    # 開発環境で実行する場合は以下の行を使用
-    # uvicorn.run("main_render:app", host="0.0.0.0", port=8000, reload=True) 
-    # 💡 実行時のファイル名に合わせて修正
+    # 💡 実行時のファイル名に合わせて修正 (仮に 'main_render_24' とします)
     uvicorn.run("main_render__24:app", host="0.0.0.0", port=8000, log_config=None)
