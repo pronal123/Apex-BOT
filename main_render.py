@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v20.0.43 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.44 - Future Trading / 30x Leverage 
 # (Feature: 実践的スコアリングロジック、ATR動的リスク管理導入)
 # 
 # 🚨 致命的エラー修正強化: 
-# 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
-# 2. ✅ 修正済み: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 
-# 3. 注文失敗エラー (Amount can not be less than zero) 対策
-# 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決 (v20.0.42で対応済み)
-# 5. ✅ 修正済み: KeyError: 'BBB_20_2.0' (BBands計算追加とカラム名フォールバック)
+# 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正 (v20.0.43)
+# 2. ✅ 修正済み: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 (v20.0.43) 
+# 3. ✅ 修正済み: KeyError: 'BBB_20_2.0' (BBands計算追加とカラム名フォールバック) (v20.0.43)
+# 4. 💡 修正: **KeyError: 'ATR_14' 対策** (ATR値の安全な取得ロジックを追加) (v20.0.44)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +64,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.43"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.44"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -349,7 +348,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
                 filled_amount = 0.0
                 
             filled_usdt_notional = trade_result.get('filled_usdt', FIXED_NOTIONAL_USDT) 
-            # 💡 修正: リスク額はSL比率とレバレッジで計算
+            # 💡 修正: リスク額はSL比率と名目価値で計算
             risk_usdt = abs(filled_usdt_notional * sl_ratio * LEVERAGE) 
             
             trade_section = (
@@ -913,7 +912,7 @@ async def fetch_available_symbols(limit: int = TOP_SYMBOL_LIMIT) -> List[str]:
     try:
         tickers = await EXCHANGE_CLIENT.fetch_tickers()
 
-        # 【修正1】tickers が None の場合に処理を中断し、エラーを避ける
+        # tickers が None の場合に処理を中断し、エラーを避ける (CCXT内部のエラーが発生する可能性もあるが、ここでは外部の防御)
         if tickers is None: 
             logging.error("❌ 監視シンボルリスト取得中にエラー: fetch_tickers() が None を返しました。既存のシンボルリストを使用します。")
             return CURRENT_MONITOR_SYMBOLS
@@ -940,7 +939,7 @@ async def fetch_available_symbols(limit: int = TOP_SYMBOL_LIMIT) -> List[str]:
         return CURRENT_MONITOR_SYMBOLS
         
     except Exception as e:
-        # 元のログのエラーメッセージを含める
+        # ここで 'AttributeError: 'NoneType' object has no attribute 'keys'' が捕捉される
         logging.error(f"❌ 監視シンボルリスト取得中に予期せぬエラー: '{e}'。既存リストを使用します。", exc_info=True)
         return CURRENT_MONITOR_SYMBOLS
         
@@ -1186,7 +1185,7 @@ def analyze_ohlcv(symbol: str, timeframe: str, ohlcv_data: Optional[pd.DataFrame
         df.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
         df.ta.obv(append=True)
         
-        # 【修正2-c】Bollinger Bandsの計算を追加
+        # Bollinger Bandsの計算
         df.ta.bbands(length=20, std=2.0, append=True) 
         
         # ATRの計算 (リスク管理に必須)
@@ -1216,11 +1215,10 @@ def calculate_signal_score(symbol: str, df_ta: pd.DataFrame, side: str, global_m
     last = df_ta.iloc[-1]
     current_price = last['Close']
     
-    # NaNが含まれる場合はスコアリングできない
-    if last.isnull().any():
-        # NaNの数に応じて、スコアを調整するなど工夫が必要だが、ここではシンプルにスキップ
-        logging.warning(f"⚠️ {symbol} - 最新バーにNaNが含まれているためスコアリングをスキップします。")
-        return 0.0, {'error': 'Latest bar contains NaN values'}
+    # NaNが含まれる場合はスコアリングできない (ATR値取得時にNaNチェックを追加するため、ここではスキップ)
+    if last.isnull().all():
+        logging.warning(f"⚠️ {symbol} - 最新バーがすべてNaNのためスコアリングをスキップします。")
+        return 0.0, {'error': 'Latest bar contains all NaN values'}
         
     score = BASE_SCORE # ベーススコア (構造的優位性)
     tech_data = {'structural_pivot_bonus': STRUCTURAL_PIVOT_BONUS}
@@ -1257,7 +1255,7 @@ def calculate_signal_score(symbol: str, df_ta: pd.DataFrame, side: str, global_m
     # 5. ボラティリティペナルティ (BB Width)
     # ------------------------------------------
     
-    # 【修正2-a/b】カラム名が存在するかを確認し、代替名 (BBW) も試す
+    # カラム名が存在するかを確認し、代替名 (BBW) も試す
     bb_width_col_candidates = ['BBB_20_2.0', 'BBW_20_2.0'] # BBB (旧) / BBW (新)
     bb_width_ratio = 0.0
     bb_width_col = None
@@ -1326,13 +1324,27 @@ def calculate_signal_score(symbol: str, df_ta: pd.DataFrame, side: str, global_m
     tech_data['sentiment_fgi_proxy_bonus'] = sentiment_bonus
     
     # ------------------------------------------
-    # 8. 最終スコアの調整
+    # 8. 最終スコアと必須データの調整 (ATR値の安全な取得を含む)
     # ------------------------------------------
     final_score = max(0.0, min(1.0, score))
     
     # 必須データの追加
     tech_data['last_price'] = current_price
-    tech_data[f'ATR_{ATR_LENGTH}'] = last[f'ATR_{ATR_LENGTH}']
+    
+    # 💡 修正: ATR値の安全な取得
+    atr_col = f'ATR_{ATR_LENGTH}'
+    atr_value = 0.0
+    if atr_col in last.index:
+        atr_value = last[atr_col]
+        # NaNチェック
+        if pd.isna(atr_value):
+            atr_value = 0.0
+            logging.warning(f"⚠️ {symbol} - Calculated ATR is NaN. Using 0.0.")
+    else:
+        # ATRカラムが存在しない場合の警告 (KeyError対策)
+        logging.warning(f"⚠️ {symbol} - ATR column '{atr_col}' not found in the latest data. ATR value set to 0.0.")
+        
+    tech_data[atr_col] = atr_value
     
     return final_score, tech_data
 
@@ -1419,7 +1431,11 @@ async def process_entry_signal(signal: Dict) -> Optional[Dict]:
     atr_value = signal['tech_data'].get(atr_col, 0.0) 
     
     if entry_price <= 0 or atr_value <= 0:
-        return {'status': 'error', 'error_message': 'Entry price or ATR is invalid'}
+        # ATRが0の場合、SL/TPの計算ができないため取引をスキップ
+        if atr_value <= 0:
+             return {'status': 'error', 'error_message': 'ATR value is zero or negative. Cannot calculate SL/TP.'}
+        else:
+             return {'status': 'error', 'error_message': 'Entry price is invalid'}
 
     # 1. SL/TP/RRの決定
     sl, tp, rr = calculate_atr_sl_tp(entry_price, atr_value, side)
@@ -1846,6 +1862,7 @@ async def main_bot_scheduler():
             LAST_SUCCESS_TIME = current_time
 
         except Exception as e:
+            # ATRエラーなど、致命的なエラーが発生した場合
             logging.error(f"❌ メイン分析ループで致命的なエラーが発生しました: {e}", exc_info=True)
             # エラー発生時もループを継続
             
