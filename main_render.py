@@ -1,13 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.44 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.45 - Future Trading / 30x Leverage 
 # (Feature: 実践的スコアリングロジック、ATR動的リスク管理導入, スコアブレークダウンの動的修正)
 # 
-# 🚨 致命的エラー修正強化: 
-# 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正済み。
-# 2. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策済み。 
-# 3. 💡 修正: 注文失敗エラー (Amount can not be less than zero) 対策済み。
-# 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決済み。
-# 5. 💡 修正: **【最重要】スコア詳細ブレークダウンが毎回同じ条件となるエラーを修正** (v20.0.44)
+# 🚨 致命的エラー修正強化 (v20.0.45): 
+# 1. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策を強化。
+# 2. 💡 修正: ATR計算失敗による全分析スキップ問題を修正。データフレームの長さとNaNチェックを強化。
+# 3. 💡 修正: スコア詳細ブレークダウンが毎回同じ条件となるエラーはv20.0.44で修正済み。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.44"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.45"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -920,6 +918,8 @@ async def fetch_ohlcv_data(symbol: str, timeframe: str, limit: int) -> Optional[
 async def fetch_top_volume_symbols(top_limit: int) -> List[str]:
     """
     取引所の全ティッカー情報から、出来高TOPのUSDT建て先物シンボルを取得する。
+    
+    💡 修正点: fetch_tickersがNoneまたは非辞書型を返した場合の致命的エラーを回避。
     """
     global EXCHANGE_CLIENT
     
@@ -928,11 +928,11 @@ async def fetch_top_volume_symbols(top_limit: int) -> List[str]:
         return DEFAULT_SYMBOLS.copy()
 
     try:
-        # 💡 修正: fetch_tickersがNoneを返す可能性への対策
         tickers = await EXCHANGE_CLIENT.fetch_tickers()
         
-        if not tickers:
-            logging.warning("⚠️ fetch_tickersが空の結果を返しました。デフォルト銘柄を使用します。")
+        # 💡 修正: fetch_tickersの戻り値がNoneまたは辞書型でない場合のチェックを強化
+        if not isinstance(tickers, dict) or not tickers:
+            logging.warning("⚠️ fetch_tickersが空の結果、または予期せぬ型を返しました。デフォルト銘柄を使用します。")
             return DEFAULT_SYMBOLS.copy()
             
         usdt_futures = {}
@@ -1038,9 +1038,12 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
         return {'score': 0.0, 'tech_data': tech_data} # データ不足
     
     # NaNを許容しないように、常に最新の非NaN行を取得
-    df = df.iloc[-(LONG_TERM_SMA_LENGTH + ATR_LENGTH + 1):].dropna()
+    # ATRはrun_analysisで既に計算済みだが、ここではSMA_200, RSI, MACD, BBands, OBVを計算するために、必要な長さに絞り、NaNをドロップする
+    required_ta_length = max(LONG_TERM_SMA_LENGTH, 26, 20) + 1 
     
-    if len(df) < LONG_TERM_SMA_LENGTH:
+    df = df.iloc[-required_ta_length:].dropna()
+    
+    if len(df) < required_ta_length:
         return {'score': 0.0, 'tech_data': tech_data} # データ不足 (再チェック)
 
     df.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
@@ -1054,7 +1057,7 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
     
     # 2. 長期トレンド一致/逆行 (LONG_TERM_REVERSAL_PENALTY)
     sma_col = f'SMA_{LONG_TERM_SMA_LENGTH}'
-    if sma_col in latest:
+    if sma_col in latest and not math.isnan(latest[sma_col]):
         sma_val = latest[sma_col]
         # ロングの場合: 現在価格 > SMA-200 (順張り) -> ボーナス
         if side == 'long':
@@ -1074,7 +1077,7 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
     
     # 3. RSIモメンタム加速/適正水準 (RSI_MOMENTUM_LOW)
     rsi_col = 'RSI_14'
-    if rsi_col in latest:
+    if rsi_col in latest and not math.isnan(latest[rsi_col]):
         rsi_val = latest[rsi_col]
         rsi_bonus = 0.0
         # ロングの場合: RSI > RSI_MOMENTUM_LOW (40)
@@ -1096,22 +1099,24 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
         latest_hist = latest[hist_col]
         prev_hist = df.iloc[-2][hist_col]
         
-        macd_val = 0.0
-        # ロングの場合: ヒストグラムが陽性、かつ拡大傾向
-        if side == 'long':
-            if latest_hist > 0 and latest_hist > prev_hist:
-                macd_val = MACD_CROSS_PENALTY # ボーナス
-            elif latest_hist < 0:
-                macd_val = -MACD_CROSS_PENALTY # ペナルティ
-        # ショートの場合: ヒストグラムが陰性、かつ拡大傾向
-        elif side == 'short':
-            if latest_hist < 0 and latest_hist < prev_hist:
-                macd_val = MACD_CROSS_PENALTY # ボーナス (MACDは負の方向に拡大)
-            elif latest_hist > 0:
-                macd_val = -MACD_CROSS_PENALTY # ペナルティ
-                
-        final_score += macd_val
-        tech_data['macd_penalty_value'] = macd_val
+        # NaNチェック
+        if not math.isnan(latest_hist) and not math.isnan(prev_hist):
+            macd_val = 0.0
+            # ロングの場合: ヒストグラムが陽性、かつ拡大傾向
+            if side == 'long':
+                if latest_hist > 0 and latest_hist > prev_hist:
+                    macd_val = MACD_CROSS_PENALTY # ボーナス
+                elif latest_hist < 0:
+                    macd_val = -MACD_CROSS_PENALTY # ペナルティ
+            # ショートの場合: ヒストグラムが陰性、かつ拡大傾向
+            elif side == 'short':
+                if latest_hist < 0 and latest_hist < prev_hist:
+                    macd_val = MACD_CROSS_PENALTY # ボーナス (MACDは負の方向に拡大)
+                elif latest_hist > 0:
+                    macd_val = -MACD_CROSS_PENALTY # ペナルティ
+                    
+            final_score += macd_val
+            tech_data['macd_penalty_value'] = macd_val
         
     # 5. OBV出来高確証 (OBV_MOMENTUM_BONUS)
     # OBVは累積出来高なので、最新と過去の値を比較してトレンド方向への確証があるかを見る
@@ -1120,16 +1125,18 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
         latest_obv = latest[obv_col]
         prev_obv = df.iloc[-2][obv_col]
         
-        obv_bonus = 0.0
-        # ロングの場合: OBVが上昇 (出来高が上昇をサポート)
-        if side == 'long' and latest_obv > prev_obv:
-            obv_bonus = OBV_MOMENTUM_BONUS
-        # ショートの場合: OBVが下降 (出来高が下降をサポート)
-        elif side == 'short' and latest_obv < prev_obv:
-            obv_bonus = OBV_MOMENTUM_BONUS
-            
-        final_score += obv_bonus
-        tech_data['obv_momentum_bonus_value'] = obv_bonus
+        # NaNチェック
+        if not math.isnan(latest_obv) and not math.isnan(prev_obv):
+            obv_bonus = 0.0
+            # ロングの場合: OBVが上昇 (出来高が上昇をサポート)
+            if side == 'long' and latest_obv > prev_obv:
+                obv_bonus = OBV_MOMENTUM_BONUS
+            # ショートの場合: OBVが下降 (出来高が下降をサポート)
+            elif side == 'short' and latest_obv < prev_obv:
+                obv_bonus = OBV_MOMENTUM_BONUS
+                
+            final_score += obv_bonus
+            tech_data['obv_momentum_bonus_value'] = obv_bonus
         
     # 6. ボラティリティ過熱ペナルティ (VOLATILITY_BB_PENALTY_THRESHOLD)
     bb_upper_col = 'BBU_20_2.0'
@@ -1137,18 +1144,20 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
     bb_mid_col = 'BBM_20_2.0'
     
     if bb_upper_col in latest and bb_lower_col in latest and bb_mid_col in latest:
-        bb_width = latest[bb_upper_col] - latest[bb_lower_col]
-        bb_mid = latest[bb_mid_col]
-        
-        # BB幅が中間値の VOLATILITY_BB_PENALTY_THRESHOLD (1%) を超える
-        if bb_mid > 0 and (bb_width / bb_mid) > VOLATILITY_BB_PENALTY_THRESHOLD:
-            # BB幅が大きすぎる場合はペナルティを適用（過熱感、高ボラティリティの終焉リスク）
-            volatility_penalty = -STRUCTURAL_PIVOT_BONUS * 2 # -0.10
-        else:
-            volatility_penalty = 0.0
+         # NaNチェック
+        if not math.isnan(latest[bb_upper_col]) and not math.isnan(latest[bb_lower_col]) and not math.isnan(latest[bb_mid_col]):
+            bb_width = latest[bb_upper_col] - latest[bb_lower_col]
+            bb_mid = latest[bb_mid_col]
             
-        final_score += volatility_penalty
-        tech_data['volatility_penalty_value'] = volatility_penalty
+            # BB幅が中間値の VOLATILITY_BB_PENALTY_THRESHOLD (1%) を超える
+            if bb_mid > 0 and (bb_width / bb_mid) > VOLATILITY_BB_PENALTY_THRESHOLD:
+                # BB幅が大きすぎる場合はペナルティを適用（過熱感、高ボラティリティの終焉リスク）
+                volatility_penalty = -STRUCTURAL_PIVOT_BONUS * 2 # -0.10
+            else:
+                volatility_penalty = 0.0
+                
+            final_score += volatility_penalty
+            tech_data['volatility_penalty_value'] = volatility_penalty
 
     # 7. 流動性ボーナス
     liquidity_bonus = 0.0
@@ -1162,7 +1171,6 @@ def calculate_technical_score(df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: 
     final_score += STRUCTURAL_PIVOT_BONUS
 
     # 9. マクロ環境影響 (FGI Proxy) - 後で `run_analysis` で加算されるため、ここでは tech_data に値をセットするのみ
-    # `GLOBAL_MACRO_CONTEXT` はグローバルから取得するため、ここでは計算しないが、後の `run_analysis` のために場所を確保
 
     # スコアの正規化 (0.0 から 1.0 の範囲に収める)
     final_score = max(0.0, min(1.0, final_score))
@@ -1189,12 +1197,6 @@ async def run_analysis(symbol: str, current_price: float, current_is_top_symbol:
         
     signals: List[Dict] = []
     
-    # 全てのターゲットタイムフレームで最も短い足 (例: 1m) を基軸としてスコアを決定
-    # ここでは便宜上、最も情報量が多いと想定される '1h' を主に見て、他の足も加味した複合的なスコアリングを行う
-    
-    # 実際の実装では、最もシグナルが強い時間足 (例: 1h) のスコアを採用することが多いが、
-    # ここでは全ての足のデータを使用して、最も短い時間足 ('1m') の最新の状態で判定を行う
-
     # 1. SL/TPとATRの計算には、メインの取引時間足（例として1h）を使用
     main_tf = '1h'
     main_df = ohlcv_data.get(main_tf)
@@ -1202,13 +1204,28 @@ async def run_analysis(symbol: str, current_price: float, current_is_top_symbol:
         logging.warning(f"⚠️ {symbol} のメイン時間足 ({main_tf}) データが不足しています。")
         return []
 
+    # 💡 修正: ATR計算のためのデータフレームの準備とチェック
+    required_length = ATR_LENGTH + 1 # ATR_14なら最低15本
+    if len(main_df) < required_length:
+        logging.warning(f"⚠️ {symbol} のメイン時間足 ({main_tf}) データが短すぎます ({len(main_df)}/{required_length})。分析をスキップします。")
+        return []
+        
+    # 最新に必要なデータ行数に絞り、NaN行を除去
+    # pandas_taは内部でNaNを処理しようとするが、明示的にdropna()
+    atr_df = main_df.iloc[-required_length:].dropna()
+
+    if len(atr_df) < ATR_LENGTH:
+         logging.warning(f"⚠️ {symbol} のATR計算に必要なデータがクリーンアップ後に不足しました。分析をスキップします。")
+         return []
+         
     # ATRの計算
-    main_df.ta.atr(length=ATR_LENGTH, append=True)
+    # pandas_taはinplaceで更新する
+    atr_df.ta.atr(length=ATR_LENGTH, append=True)
     latest_atr_col = f'ATR_{ATR_LENGTH}'
-    latest_atr = main_df.iloc[-1].get(latest_atr_col, None)
+    latest_atr = atr_df.iloc[-1].get(latest_atr_col, None) 
     
-    if latest_atr is None or latest_atr <= 0:
-        logging.warning(f"⚠️ {symbol} のATRが計算できませんでした。分析をスキップします。")
+    if latest_atr is None or latest_atr <= 0 or math.isnan(latest_atr): # math.isnanを追加
+        logging.warning(f"⚠️ {symbol} のATRが計算できませんでした ({latest_atr})。分析をスキップします。")
         return []
 
     # SL幅の計算: ATRに基づいて動的に決定
@@ -1365,12 +1382,6 @@ async def execute_trade(signal: Dict) -> Dict:
     
     # 1. 注文数量の計算 (FIXED_NOTIONAL_USDTに基づいて、レバレッジを考慮した数量を計算)
     try:
-        # 名目ロット (FIXED_NOTIONAL_USDT) にレバレッジをかけた後の最大数量
-        # CCXTは通常、レバレッジ込みの数量ではなく、ベース通貨の数量を要求する
-        # quantity (契約数) = (名目ロット * レバレッジ) / エントリー価格
-        # しかし、多くの取引所では、クロス・マージンモードの場合、名目ロット (USDT価値) をそのまま渡すことができる
-        # 安全のため、ベース通貨の数量を計算する
-        
         # 数量 = ロット / 価格
         target_quantity_base = FIXED_NOTIONAL_USDT / entry_price
         
@@ -1601,7 +1612,8 @@ async def main_bot_scheduler():
                     continue
             
             # --- ステップ A: 市場情報の更新 ---
-            if SKIP_MARKET_UPDATE or (time.time() - LAST_SUCCESS_TIME) > (LOOP_INTERVAL * 2): # 強制更新
+            # SKIP_MARKET_UPDATEがFalseの場合、または前回の成功から時間が経ちすぎている場合
+            if not SKIP_MARKET_UPDATE or (time.time() - LAST_SUCCESS_TIME) > (LOOP_INTERVAL * 2):
                 # 監視銘柄リストの更新
                 CURRENT_MONITOR_SYMBOLS = await fetch_top_volume_symbols(TOP_SYMBOL_LIMIT)
                 # マクロコンテキストの更新
