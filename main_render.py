@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v20.0.43 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.44 - Future Trading / 30x Leverage 
 # (Feature: 実践的スコアリングロジック、ATR動的リスク管理導入)
 # 
 # 🚨 致命的エラー修正強化: 
@@ -8,6 +8,7 @@
 # 3. 注文失敗エラー (Amount can not be less than zero) 対策
 # 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決 (v20.0.42で対応済み)
 # 5. 💡 新規: ダミーロジックを実践的スコアリングロジックに置換 (v20.0.43)
+# 6. 💡 修正 (v20.0.44): `AttributeError: 'NoneType' object has no attribute 'get'` のエラーを修正
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +66,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.43"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.44"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -337,7 +338,9 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         
         if TEST_MODE:
             trade_status_line = f"⚠️ **テストモード**: 取引は実行されません。(ロット: {format_usdt(notional_value)} USDT, {LEVERAGE}x)" 
-        elif trade_result is None or trade_result.get('status') == 'error':
+        elif trade_result is None: # <--- 💡 修正: 取引前通知の場合はこちら
+            trade_status_line = f"⏳ **取引注文準備中**: {trade_type_text}注文を執行予定です。" 
+        elif trade_result.get('status') == 'error': # <--- 変更: 取引後エラー報告の場合
             trade_status_line = f"❌ **自動売買 失敗**: {trade_result.get('error_message', 'APIエラー')}"
         elif trade_result.get('status') == 'ok':
             trade_status_line = f"✅ **自動売買 成功**: **{trade_type_text}**注文を執行しました。" 
@@ -1458,6 +1461,7 @@ async def process_entry_signal(symbol: str, timeframe: str, score_data: Dict, cu
     
     # 7. Telegram通知 (取引前)
     current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
+    # trade_result=None で呼び出され、取引前の通知を行う
     message = format_telegram_message(signal_data, "取引シグナル", current_threshold)
     await send_telegram_notification(message)
     
