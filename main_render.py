@@ -1,15 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.45 - Future Trading / 30x Leverage 
-# (Feature: v20.0.44機能 + 致命的バグ修正)
+# Apex BOT v20.0.46 - Future Trading / 30x Leverage 
+# (Feature: v20.0.45機能 + 致命的バグ修正強化)
 # 
-# 🚨 致命的エラー修正強化: 
-# 1. 💡 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
-# 2. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 
-# 3. 注文失敗エラー (Amount can not be less than zero) 対策
-# 4. 💡 修正: 通知メッセージでEntry/SL/TP/清算価格が0になる問題を解決 (v20.0.42で対応済み)
-# 5. 💡 新規: ダミーロジックを実践的スコアリングロジックに置換 (v20.0.43)
-# 6. 💡 新規: ADX/StochRSIによるスコア判別能力強化 (v20.0.44)
-# 7. 💡 修正: main_bot_scheduler内のLAST_WEBSHARE_UPLOAD_TIMEに関するUnboundLocalErrorを修正 (v20.0.45)
+# 🚨 致命的エラー修正強化 (v20.0.46 NEW): 
+# 1. 💡 修正: main_bot_scheduler内の **UnboundLocalError: LAST_SUCCESS_TIME** を修正。
+# 2. 💡 修正: get_top_volume_symbols内の **AttributeError: 'NoneType' object has no attribute 'keys'** (fetch_tickers失敗時) を修正。
+# 3. 💡 修正: get_account_status内の **ccxt.base.errors.NotSupported: mexc fetchBalance()** エラーを検知し、安全に処理してBOTの続行を可能にしました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -67,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.45"            # 💡 BOTバージョンを v20.0.45 に更新 
+BOT_VERSION = "v20.0.46"            # 💡 BOTバージョンを v20.0.46 に更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -156,10 +152,14 @@ OBV_MOMENTUM_BONUS = 0.04
 
 # 💡 新規追加: スコアの差別化と勝率向上を目的とした新しい分析要素
 # StochRSI
+STOCHRSI_LENGTH = 14
+STOCHRSI_K = 3
+STOCHRSI_D = 3
 STOCHRSI_BOS_LEVEL = 20            # 買われ過ぎ/売られ過ぎ水準
 STOCHRSI_BOS_PENALTY = 0.08        # StochRSIが極端な水準にある場合のペナルティ/ボーナス
 
 # ADX
+ADX_LENGTH = 14
 ADX_TREND_STRENGTH_THRESHOLD = 25  # ADXが25以上の場合はトレンドが強いと判断
 ADX_TREND_BONUS = 0.07             # トレンド確証ボーナス
 
@@ -269,28 +269,33 @@ def format_startup_message(account_status: Dict, macro_context: Dict, monitoring
     )
 
     balance_section = f"💰 <b>先物口座ステータス</b>\n" 
+    
     if account_status.get('error'):
+        # 💥 FIX: MEXCエラー発生時もEquityを表示 (前回値または初期値)
+        equity_display = account_status.get('total_usdt_balance', ACCOUNT_EQUITY_USDT)
         balance_section += f"<pre>⚠️ ステータス取得失敗 (致命的エラーにより取引停止中)</pre>\n"
+        balance_section += f"  - **推定総資産 (Equity)**: <code>{format_usdt(equity_display)}</code> USDT\n"
+        balance_section += f"  - **備考**: CCXTの制約 ({CCXT_CLIENT_NAME}) により正確な残高情報取得不可。\n"
     else:
         equity_display = account_status['total_usdt_balance'] 
         balance_section += (
             f"  - **総資産 (Equity)**: <code>{format_usdt(equity_display)}</code> USDT\n" 
         )
         
-        # ボットが管理しているポジション
-        if OPEN_POSITIONS:
-            total_managed_value = sum(p['filled_usdt'] for p in OPEN_POSITIONS) 
-            balance_section += (
-                f"  - **管理中ポジション**: <code>{len(OPEN_POSITIONS)}</code> 銘柄 (名目価値合計: <code>{format_usdt(total_managed_value)}</code> USDT)\n" 
-            )
-            for i, pos in enumerate(OPEN_POSITIONS[:3]): # Top 3のみ表示
-                base_currency = pos['symbol'].split('/')[0] # /USDTを除去
-                side_tag = '🟢L' if pos.get('side', 'long') == 'long' else '🔴S' 
-                balance_section += f"    - Top {i+1}: {base_currency} ({side_tag}, SL: {format_price(pos['stop_loss'])} / TP: {format_price(pos['take_profit'])})\n"
-            if len(OPEN_POSITIONS) > 3:
-                balance_section += f"    - ...他 {len(OPEN_POSITIONS) - 3} 銘柄\n"
-        else:
-             balance_section += f"  - **管理中ポジション**: <code>なし</code>\n"
+    # ボットが管理しているポジション
+    if OPEN_POSITIONS:
+        total_managed_value = sum(p['filled_usdt'] for p in OPEN_POSITIONS) 
+        balance_section += (
+            f"  - **管理中ポジション**: <code>{len(OPEN_POSITIONS)}</code> 銘柄 (名目価値合計: <code>{format_usdt(total_managed_value)}</code> USDT)\n" 
+        )
+        for i, pos in enumerate(OPEN_POSITIONS[:3]): # Top 3のみ表示
+            base_currency = pos['symbol'].split('/')[0] # /USDTを除去
+            side_tag = '🟢L' if pos.get('side', 'long') == 'long' else '🔴S' 
+            balance_section += f"    - Top {i+1}: {base_currency} ({side_tag}, SL: {format_price(pos['stop_loss'])} / TP: {format_price(pos['take_profit'])})\n"
+        if len(OPEN_POSITIONS) > 3:
+            balance_section += f"    - ...他 {len(OPEN_POSITIONS) - 3} 銘柄\n"
+    else:
+         balance_section += f"  - **管理中ポジション**: <code>なし</code>\n"
 
     balance_section += f"\n"
 
@@ -778,8 +783,13 @@ async def get_top_volume_symbols(limit: int) -> List[str]:
         # Ticker情報を全て取得
         tickers = await EXCHANGE_CLIENT.fetch_tickers()
     except Exception as e:
-        # 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策
+        # 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 
         logging.error(f"❌ fetch_tickersでエラーが発生しました: {e}。デフォルトシンボルを使用します。", exc_info=True)
+        return DEFAULT_SYMBOLS
+        
+    # 💥 FIX: fetch_tickersがNoneまたは空の辞書を返した場合のチェック
+    if not tickers:
+        logging.error("❌ fetch_tickersが空または無効なデータを返しました。デフォルトシンボルを使用します。")
         return DEFAULT_SYMBOLS
 
     # 先物/USDT建て、かつアクティブな市場のみをフィルタリング
@@ -850,35 +860,43 @@ async def get_account_status() -> Dict[str, Any]:
     """
     口座残高、証拠金情報などを取得し、USDT建ての総資産を計算する
     """
-    global EXCHANGE_CLIENT, ACCOUNT_EQUITY_USDT
+    global EXCHANGE_CLIENT, ACCOUNT_EQUITY_USDT, IS_CLIENT_READY
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
         logging.error("❌ クライアントが未準備のため、口座ステータスの取得をスキップします。")
-        return {'error': True, 'message': 'Client not ready'}
+        return {'error': True, 'message': 'Client not ready', 'total_usdt_balance': ACCOUNT_EQUITY_USDT}
         
     try:
-        # fetch_balanceで先物口座（通常は'future'または取引所固有のID）の残高を取得
-        balance = await EXCHANGE_CLIENT.fetch_balance()
-        
-        # ccxtの仕様に基づき、USDT建ての残高情報を抽出
-        usdt_balance = balance.get('USDT', {})
-        total_usdt_balance = usdt_balance.get('total', 0.0)
-        free_usdt_balance = usdt_balance.get('free', 0.0)
-        
-        # CCXTの総資産 (Equity) の定義を信頼し、USDTの総額を使用
-        ACCOUNT_EQUITY_USDT = total_usdt_balance
-        
-        logging.info(f"💰 口座ステータス更新: 総資産 (Equity) = {format_usdt(ACCOUNT_EQUITY_USDT)} USDT")
-        
-        return {
-            'total_usdt_balance': total_usdt_balance,
-            'free_usdt_balance': free_usdt_balance,
-            'info': balance.get('info', {})
-        }
-        
+        # 1. fetch_balanceで先物口座（通常は'future'または取引所固有のID）の残高を取得
+        try:
+            # 💥 FIX: MEXCなどの取引所のために、type='future'を明示的に指定して再試行
+            balance = await EXCHANGE_CLIENT.fetch_balance(params={'type': TRADE_TYPE}) 
+            
+            # ccxtの仕様に基づき、USDT建ての残高情報を抽出
+            usdt_balance = balance.get('USDT', {})
+            total_usdt_balance = usdt_balance.get('total', 0.0)
+            free_usdt_balance = usdt_balance.get('free', 0.0)
+            
+            # CCXTの総資産 (Equity) の定義を信頼し、USDTの総額を使用
+            ACCOUNT_EQUITY_USDT = total_usdt_balance
+            
+            logging.info(f"💰 口座ステータス更新: 総資産 (Equity) = {format_usdt(ACCOUNT_EQUITY_USDT)} USDT")
+            
+            return {
+                'total_usdt_balance': total_usdt_balance,
+                'free_usdt_balance': free_usdt_balance,
+                'info': balance.get('info', {})
+            }
+            
+        except ccxt.NotSupported as e:
+            # 💥 FIX: MEXCのNotSupportedエラーを捕捉し、BOTは続行
+            logging.error(f"❌ 口座ステータス取得エラー (NotSupported): {e.args[0]}。CCXTの制約により、Equityを前回値 ({format_usdt(ACCOUNT_EQUITY_USDT)} USDT) または0として続行します。", exc_info=True)
+            return {'error': True, 'message': str(e), 'total_usdt_balance': ACCOUNT_EQUITY_USDT}
+            
     except Exception as e:
-        logging.error(f"❌ 口座ステータス取得中にエラーが発生しました: {e}", exc_info=True)
-        return {'error': True, 'message': str(e)}
+        logging.error(f"❌ 口座ステータス取得中に予期せぬエラーが発生しました: {e}", exc_info=True)
+        return {'error': True, 'message': str(e), 'total_usdt_balance': ACCOUNT_EQUITY_USDT}
+
 
 async def fetch_fgi_data() -> float:
     """
@@ -915,7 +933,7 @@ async def fetch_fgi_data() -> float:
 
 
 # ====================================================================================
-# TECHNICAL ANALYSIS & SCORING LOGIC (v20.0.45 完全に再現)
+# TECHNICAL ANALYSIS & SCORING LOGIC (v20.0.46 完全に再現)
 # ====================================================================================
 
 # MACDのデフォルトパラメータ
@@ -973,7 +991,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
             df['MACD_H'] = np.nan 
 
         # 2. RSI (Relative Strength Index)
-        df.ta.rsi(append=True)
+        df.ta.rsi(length=STOCHRSI_LENGTH, append=True) # StochRSIのRSI期間を使用
         
         # 3. Bollinger Bands (BBANDS)
         bbands_results = df.ta.bbands(append=False)
@@ -1063,7 +1081,7 @@ def calculate_atr_sl_tp(latest_price: float, atr: float, side: str) -> Tuple[flo
 
 def calculate_score(df: pd.DataFrame, timeframe: str, side: str, macro_context: Dict) -> Tuple[float, Dict]:
     """
-    テクニカル指標に基づき、ロング/ショートの総合スコアを計算する (v20.0.45ロジック)
+    テクニカル指標に基づき、ロング/ショートの総合スコアを計算する (v20.0.46ロジック)
     """
     if df.empty or len(df) < 2:
         return 0.0, {}
@@ -1490,8 +1508,8 @@ async def main_bot_scheduler():
     """
     BOTのメインロジック (分析、シグナル生成、取引実行) を定期的に実行する
     """
-    global IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, LAST_WEBSHARE_UPLOAD_TIME
-
+    global IS_FIRST_MAIN_LOOP_COMPLETED, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, LAST_WEBSHARE_UPLOAD_TIME, LAST_SUCCESS_TIME # 🚨 FIX: UnboundLocalError対策
+    
     # 1. クライアントの初期化
     if not await initialize_exchange_client():
         logging.critical("🚨 クライアントの初期化に失敗しました。BOTを停止します。")
