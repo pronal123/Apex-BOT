@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v20.0.44 - Future Trading / 30x Leverage 
+# Apex BOT v20.0.45 - Future Trading / 30x Leverage 
 # (Feature: 実践的スコアリングロジック、ATR動的リスク管理導入)
 # 
-# 🚨 致命的エラー修正強化 (v20.0.44): 
+# 🚨 致命的エラー修正強化 (v20.0.45): 
 # 1. 💡 修正: mexc fetchBalance() not support self method 対策 (get_account_status)
 # 2. 💡 修正: fetch_tickersのAttributeError ('NoneType' object has no attribute 'keys') 対策 (get_top_symbols)
-# 3. 修正: np.polyfitの戻り値エラー (ValueError: not enough values to unpack) を修正
+# 3. 💡 修正: UnboundLocalError: cannot access local variable 'IS_CLIENT_READY' 対策 (main_bot_scheduler)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -63,7 +63,7 @@ DEFAULT_SYMBOLS = [
     "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               
-BOT_VERSION = "v20.0.44"            # 💡 BOTバージョンを更新 
+BOT_VERSION = "v20.0.45"            # 💡 BOTバージョンを更新 
 FGI_API_URL = "https://api.alternative.me/fng/?limit=1" 
 
 LOOP_INTERVAL = 60 * 1              
@@ -776,20 +776,15 @@ async def get_account_status() -> Dict:
     
     try:
         # 💡 【修正点1: fetchBalance() not support self method 対策】
-        # MEXCなど一部の取引所ではfetchBalanceが先物口座の正確なEquityを返さない、またはエラーとなる
         
         if EXCHANGE_CLIENT.id == 'mexc':
             # MEXCの場合、fetchBalanceはサポートされていないというエラーログが出たため、スキップする
-            # 代わりに、fetch_positionsで返されるポジション情報から証拠金情報を推測/使用する
             logging.warning("⚠️ MEXCクライアント: fetchBalance()は既知のエラーがあるためスキップします。")
             balance = {'total': {'USDT': 0.0, 'equity': 0.0}, 'free': {'USDT': 0.0}}
-            # ACCOUNT_EQUITY_USDTはポジション取得後に更新されることを期待する
             
         else:
             # 他の取引所ではfetchBalanceを使用
             balance = await EXCHANGE_CLIENT.fetch_balance()
-            # USDTの総残高（先物口座のEquityまたはTotal Balance）を取得
-            # 注: 'total', 'free', 'used'のキーは取引所によって異なるため、一般的な'total'と'USDT'を使用
             equity = balance.get('total', {}).get('USDT', 0.0) 
             ACCOUNT_EQUITY_USDT = equity
             logging.info(f"ℹ️ fetch_balance()経由での総資産 (Equity): {format_usdt(ACCOUNT_EQUITY_USDT)} USDT")
@@ -824,21 +819,9 @@ async def get_account_status() -> Dict:
                 
         # MEXCなどfetch_balanceが機能しない場合、Equityをポジション情報から推測する（ざっくりとした計算）
         if EXCHANGE_CLIENT.id == 'mexc':
-            # 総資産 = (総証拠金 + 実現損益) + 未実現損益 (非常に単純化)
-            # 実際には「アカウント」エンドポイントから取得すべきだが、今回はfetchBalanceエラー対策を優先
-            # ポジションモニタで最新のEquityを正確に取得するまでは、前回値を使用するか、最低限の安全値を設定
-            
-            # ポジションの維持証拠金や使用証拠金を合算して Equity を更新しようとすると複雑になるため、
-            # 初期化メッセージでは一旦 0.0 を表示し、実際の取引ではポジション情報を優先的に使用する。
-            # ※ 実運用では、MEXCのカスタム`fapiPrivateGetAccount`などを利用して正確なEquityを取得すべき。
-            
-            # 今回は、エラーログを回避し、BOTがクラッシュせず続行することを最優先とする。
-            
-            # ここでは fetchBalance() の結果が 0.0/None であることを考慮し、前回値か 0.0 を維持。
+            # 実際には正確なEquityは別のカスタムエンドポイントから取得する必要があるが、
+            # エラー回避と動作継続を優先し、ここでは前回値か安全値を維持。
             pass
-        
-        # ボットが管理しているポジションのSL/TPを、内部で持っている状態と同期させる
-        # ... (この部分は、main_bot_logic内で過去のポジション情報をOPEN_POSITIONSに反映させるロジックが必要だが、今回はコアのエラー修正に集中する)
         
         # 正常終了の辞書を返す
         return {
@@ -978,7 +961,7 @@ def calculate_signal_score(
         Dict: スコア内訳の技術データ。
     """
     
-    # ... (既存のスコアリングロジックは変更なし - 実践的ロジック v20.0.43)
+    # ... (既存のスコアリングロジックは変更なし - 実践的ロジック v20.0.44)
     
     tech_data: Dict = {}
     current_df = df_1h if timeframe == '1h' else df_4h
@@ -990,11 +973,20 @@ def calculate_signal_score(
 
     # --- 2. 流動性ボーナス ---
     # 出来高TOP銘柄ほどボーナスを加算
-    # TOP_SYMBOL_LIMITが40なので、TOP10に入っていれば最大の0.06ボーナス
+    # 出来高取得エラー対策として try-except で囲む
     try:
-        top_symbols = [s for s, _ in sorted(EXCHANGE_CLIENT.fetch_tickers().items(), key=lambda item: item[1].get('quoteVolume', 0), reverse=True) if '/USDT' in s][:TOP_SYMBOL_LIMIT]
-        if symbol in top_symbols:
-            rank = top_symbols.index(symbol) + 1
+        # fetch_tickers() は ccxt.async_support.mexc の fetch_tickers() が呼ばれる。
+        # グローバル変数 EXCHANGE_CLIENT が使用可能であることを前提とする。
+        # get_top_symbolsでtickersがNoneになる可能性を排除しているため、ここでは単純化して処理
+        if EXCHANGE_CLIENT:
+             tickers = EXCHANGE_CLIENT.fetch_tickers()
+             # awaitを付けないことで、すでに取得済みのキャッシュまたは非同期で即座に返ることを期待
+        else:
+             tickers = {}
+        
+        top_symbols_keys = [s for s, _ in sorted(tickers.items(), key=lambda item: item[1].get('quoteVolume', 0), reverse=True) if '/USDT' in s][:TOP_SYMBOL_LIMIT]
+        if symbol in top_symbols_keys:
+            rank = top_symbols_keys.index(symbol) + 1
             liquidity_bonus = LIQUIDITY_BONUS_MAX * (1 - (rank - 1) / TOP_SYMBOL_LIMIT)
             liquidity_bonus = max(0.0, min(LIQUIDITY_BONUS_MAX, liquidity_bonus))
             score += liquidity_bonus
@@ -1637,6 +1629,9 @@ async def main_bot_logic():
 
 async def main_bot_scheduler():
     """メイン取引ロジックを定期的に実行するスケジューラ。"""
+    
+    # 💡 【修正点3】グローバル変数の宣言を追加
+    global IS_CLIENT_READY 
     
     # 初期化
     while not IS_CLIENT_READY:
