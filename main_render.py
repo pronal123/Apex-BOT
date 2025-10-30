@@ -2,8 +2,8 @@
 # Apex BOT v19.0.30 - Dynamic Lot Sizing Added (Patch 41 - Equity & Score Based)
 #
 # 改良・修正点:
-# 1. 【機能追加】シグナルスコアに基づき、取引ロットサイズを総資産額の10%から50%の範囲で動的に調整する機能を追加。
-# 2. 【ロジック維持】MEXCクライアントの安定稼働、TP/SL監視、FGIマクロ分析ロジックを維持。
+# 1. 【ログ改善】analyze_signals関数内の動的ロット計算ログに、計算対象の銘柄情報 (symbol) を追加。
+# 2. 【機能追加】シグナルスコアに基づき、取引ロットサイズを総資産額の10%から50%の範囲で動的に調整する機能を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -252,7 +252,7 @@ def format_startup_message(
     current_threshold: float,
     bot_version: str
 ) -> str:
-    """初回起動完了通知用のメッセージを作成する 【★修正適用箇所：総資産額の表示】"""
+    """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     fgi_raw_value = macro_context.get('fgi_raw_value', 'N/A')
@@ -273,7 +273,7 @@ def format_startup_message(
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - **確認日時**: {now_jst} (JST)\n"
         f"  - **取引所**: <code>{CCXT_CLIENT_NAME.upper()}</code> (現物モード)\n"
-        f"  - **総資産額 (Equity)**: <code>{format_usdt(account_status['total_equity'])}</code> USDT\n" # 【修正点】
+        f"  - **総資産額 (Equity)**: <code>{format_usdt(account_status['total_equity'])}</code> USDT\n" 
         f"  - **自動売買**: <b>{trade_status}</b>\n"
         f"  - **取引ロット (BASE)**: <code>{BASE_TRADE_SIZE_USDT:.2f}</code> USDT\n" 
         f"  - **監視銘柄数**: <code>{monitoring_count}</code>\n"
@@ -331,7 +331,7 @@ def format_startup_message(
 
 
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
-    """Telegram通知用のメッセージを作成する (取引結果を追加) 【★修正適用箇所：ロット割合の表示】"""
+    """Telegram通知用のメッセージを作成する"""
     global GLOBAL_TOTAL_EQUITY
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -356,7 +356,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     if context == "取引シグナル":
         lot_size = signal.get('lot_size_usdt', BASE_TRADE_SIZE_USDT)
         
-        # 【修正点】ロットサイズ割合の表示
+        # ロットサイズ割合の表示
         if GLOBAL_TOTAL_EQUITY > 0 and lot_size >= BASE_TRADE_SIZE_USDT:
             lot_percent = (lot_size / GLOBAL_TOTAL_EQUITY) * 100
             lot_info = f"<code>{format_usdt(lot_size)}</code> USDT ({lot_percent:.1f}%)"
@@ -551,15 +551,13 @@ async def initialize_exchange_client():
         if not API_KEY or not SECRET_KEY:
             logging.warning("⚠️ APIキーまたはシークレットキーが設定されていません。取引機能は無効です。")
             
-        # 初期化成功後、メインループを待機しているスケジューラに通知
-        # (main_loop_schedulerがIS_CLIENT_READYを見て起動する)
 
     except Exception as e:
         logging.critical(f"❌ CCXTクライアントの初期化に失敗: {e}", exc_info=True)
-        # 失敗した場合、タスクが終了し、メインループは実行されない
+
 
 async def fetch_account_status() -> Dict:
-    """CCXTから口座の残高と、USDT以外の保有資産の情報を取得する。 【★修正適用箇所：総資産額の取得】"""
+    """CCXTから口座の残高と、USDT以外の保有資産の情報を取得する。"""
     global EXCHANGE_CLIENT, GLOBAL_TOTAL_EQUITY
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY:
@@ -571,9 +569,7 @@ async def fetch_account_status() -> Dict:
         
         total_usdt_balance = balance.get('total', {}).get('USDT', 0.0)
         
-        # 【修正点】 total_equity (総資産額) の取得
-        # CCXTのbalance['total']に全ての資産のUSD/USDT相当額の合計が格納されると想定
-        # MEXCの場合、USD/USDTに変換された総資産は 'total' の value に含まれる。
+        # total_equity (総資産額) の取得
         GLOBAL_TOTAL_EQUITY = balance.get('total', {}).get('total', total_usdt_balance)
         if GLOBAL_TOTAL_EQUITY == 0.0:
             GLOBAL_TOTAL_EQUITY = total_usdt_balance # フォールバック
@@ -604,7 +600,7 @@ async def fetch_account_status() -> Dict:
                     
         return {
             'total_usdt_balance': total_usdt_balance,
-            'total_equity': GLOBAL_TOTAL_EQUITY, # 【修正点】
+            'total_equity': GLOBAL_TOTAL_EQUITY, 
             'open_positions': open_positions,
             'error': False
         }
@@ -784,7 +780,6 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         
         # --- テクニカルデータ計算 ---
         fgi_proxy = macro_context.get('fgi_proxy', 0.0)
-        # FGIボーナス/ペナルティ: FGI proxyの大きさに応じてボーナス/ペナルティを調整
         sentiment_fgi_proxy_bonus = (fgi_proxy / FGI_ACTIVE_THRESHOLD) * FGI_PROXY_BONUS_MAX if abs(fgi_proxy) <= FGI_ACTIVE_THRESHOLD and FGI_ACTIVE_THRESHOLD > 0 else (FGI_PROXY_BONUS_MAX if fgi_proxy > 0 else -FGI_PROXY_BONUS_MAX)
         
         # Long-Term Reversal Penalty (価格がSMA200から大きく乖離しすぎている場合)
@@ -888,7 +883,6 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
                 adjustment_ratio = 0.5 
             
             # 最終的なロット割合 = 最小 + (最大 - 最小) * 調整率
-            # 例: 0.10 + (0.50 - 0.10) * adjustment_ratio
             dynamic_percent = DYNAMIC_LOT_MIN_PERCENT + (DYNAMIC_LOT_MAX_PERCENT - DYNAMIC_LOT_MIN_PERCENT) * adjustment_ratio
             
             # USDTロットサイズ = 総資産額 * 割合
@@ -897,11 +891,12 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
             # 最低取引額（BASE_TRADE_SIZE_USDT）を下回らないように保護
             lot_size_usdt = max(calculated_lot_size, BASE_TRADE_SIZE_USDT)
             
-            logging.info(f"💰 動的ロット計算: Score={score:.2f}, Ratio={dynamic_percent*100:.1f}%, Equity={GLOBAL_TOTAL_EQUITY:.2f} -> Lot={lot_size_usdt:.2f} USDT")
+            # 【★修正箇所：銘柄 (symbol) を追加】
+            logging.info(f"💰 動的ロット計算 - {symbol}: Score={score:.2f}, Ratio={dynamic_percent*100:.1f}%, Equity={GLOBAL_TOTAL_EQUITY:.2f} -> Lot={lot_size_usdt:.2f} USDT")
         else:
             # 総資産額が不明な場合は、BASE_TRADE_SIZE_USDTを使用 (フォールバック)
             lot_size_usdt = BASE_TRADE_SIZE_USDT
-            logging.warning("⚠️ 総資産額が不明のため、基本ロットサイズを使用します。")
+            logging.warning(f"⚠️ {symbol}: 総資産額が不明のため、基本ロットサイズを使用します。")
         
         ##############################################################
 
@@ -918,7 +913,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
                 'entry_price': current_price,
                 'stop_loss': stop_loss, 
                 'take_profit': take_profit, 
-                'lot_size_usdt': lot_size_usdt, # 【修正点】動的ロットサイズを格納
+                'lot_size_usdt': lot_size_usdt, # 動的ロットサイズを格納
                 'tech_data': tech_data, 
             }
     return None
@@ -929,7 +924,7 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     
     symbol = signal['symbol']
     action = signal['action'] # 'buy'
-    lot_size_usdt = signal['lot_size_usdt'] # 【修正点】動的ロットを使用
+    lot_size_usdt = signal['lot_size_usdt'] # 動的ロットを使用
     
     if TEST_MODE:
         return {
@@ -998,7 +993,6 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
 
 def liquidate_position(position: Dict, current_price: float, exit_type: str) -> Dict:
     """ポジションを強制的に決済し、損益を計算する (テスト用ロジック)"""
-    # 実際の取引所での決済ロジックは execute_trade と同様になるが、今回は簡易的にP&Lを計算
     
     entry_price = position['entry_price']
     filled_amount = position['filled_amount']
@@ -1284,7 +1278,3 @@ async def startup_event():
     # ポジション監視のスケジューラをバックグラウンドで開始 (10秒ごと)
     asyncio.create_task(position_monitor_scheduler())
     logging.info("(startup_event) - BOTサービスを開始しました。")
-
-# アプリケーションの実行（通常は外部のuvicornコマンドで実行される）
-# if __name__ == "__main__":
-#     uvicorn.run("main_render:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)), reload=False)
