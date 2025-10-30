@@ -5,6 +5,7 @@
 # 1. 【機能修正】グローバルマクロ分析において、ダミーだったFGI (恐怖・貪欲指数) を外部APIから実際に取得するように修正。
 # 2. 【ロジック維持】シグナルスコアとテクニカル要因に基づき、SL/TPを動的に設定するロジックを維持。
 # 3. 【起動修正】initialize_exchange_client() 成功時に初回起動処理を統合し、メインループでの冗長な起動通知を削除。（MEXC対応を安定化）
+# 4. 【スケジューラ修正】起動時の異常な1秒ループを回避するため、main_loop_schedulerに待機ロジックを追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -55,11 +56,7 @@ DEFAULT_SYMBOLS = [
     "ALGO/USDT", "XLM/USDT", "SAND/USDT",
     "GALA/USDT", "FIL/USDT", 
     "AXS/USDT", "MANA/USDT", "AAVE/USDT",
-    "FLOW/USDT", "IMX/USDT", "SUI/USDT", "ASTER/USDT", "ENA/USDT",
-    "ZEC/USDT", "PUMP/USDT", "PEPE/USDT", "FARTCOIN/USDT",
-    "WLFI/USDT", "PENGU/USDT", "ONDO/USDT", "HBAR/USDT", "TRUMP/USDT",
-    "SHIB/USDT", "HYPE/USDT", "LINK/USDT", "ZEC/USDT",
-    "VIRTUAL/USDT", "PIPPIN/USDT", "GIGGLE/USDT", "H/USDT", "AIXBT/USDT", 
+    "FLOW/USDT", "IMX/USDT", 
 ]
 TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高TOPから選出)
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
@@ -603,8 +600,8 @@ async def send_webshare_update(data: Dict[str, Any]):
 # ====================================================================================
 
 async def initialize_exchange_client() -> bool:
-    """CCXTクライアントを初期化し、市場情報をロードする 【★修正適用箇所】"""
-    global EXCHANGE_CLIENT, IS_CLIENT_READY, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT # グローバル変数宣言を追加
+    """CCXTクライアントを初期化し、市場情報をロードする 【★修正適用箇所：sys.exit(1)を削除】"""
+    global EXCHANGE_CLIENT, IS_CLIENT_READY, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT
     
     IS_CLIENT_READY = False
     
@@ -640,7 +637,7 @@ async def initialize_exchange_client() -> bool:
         logging.info(f"✅ CCXTクライアント ({CCXT_CLIENT_NAME}) を現物取引モードで初期化し、市場情報をロードしました。")
         IS_CLIENT_READY = True
 
-        # --- 【MEXC運用修正点】初期化成功時にFGI取得と起動通知を実行 ---
+        # --- 初期化成功時にFGI取得と起動通知を実行 ---
         GLOBAL_MACRO_CONTEXT = await fetch_fgi_data() 
         current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
         account_status = await fetch_account_status() # 口座ステータスを取得
@@ -689,7 +686,11 @@ async def fetch_account_status() -> Dict:
                 try:
                     symbol = f"{currency}/USDT"
                     if symbol not in EXCHANGE_CLIENT.markets:
-                        continue 
+                        # MEXCのMXトークンのように、/USDT形式でないシンボルがあるため、別形式も試す
+                        if f"{currency}USDT" in EXCHANGE_CLIENT.markets:
+                            symbol = f"{currency}USDT"
+                        else:
+                            continue 
                         
                     ticker = await EXCHANGE_CLIENT.fetch_ticker(symbol)
                     usdt_value = amount * ticker['last']
@@ -701,7 +702,8 @@ async def fetch_account_status() -> Dict:
                             'usdt_value': usdt_value
                         })
                 except Exception as e:
-                    logging.warning(f"⚠️ {currency} のUSDT価値を取得できませんでした（{e}）。")
+                    # ★ MEXCのMXUSDTなど、ティッカー取得失敗はCRITICALではなくWARNINGでロギング
+                    logging.warning(f"⚠️ {currency} のUSDT価値を取得できませんでした（{EXCHANGE_CLIENT.name} GET {symbol}）。")
                     
         return {
             'total_usdt_balance': total_usdt_balance,
@@ -801,7 +803,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
 
     return None
 
-# ★新規追加: FGIデータ取得関数★ (変更なし)
+# ★FGIデータ取得関数★ (変更なし)
 async def fetch_fgi_data() -> Dict[str, Any]:
     """
     外部API (Alternative.me) から現在の恐怖・貪欲指数(FGI)を取得する。
@@ -856,7 +858,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     df['SMA200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH)
-    # ... (元の詳細なインジケーター計算ロジックが続く) ...
+    # ... (元の詳細なインジケーター計算ロジックが続く - このコードではSMA200のみでOK)
+    # df['RSI'] = ta.rsi(df['close'])
+    # df[['MACDH', 'MACDI', 'MACDS']] = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    # df[['BB_L', 'BB_M', 'BB_U']] = ta.bbands(df['close'], length=20).iloc[:, :3]
+    # df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    # df['OBV'] = ta.obv(df['close'], df['volume'])
+    
     return df
 
 def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Optional[Dict]:
@@ -1196,14 +1204,12 @@ async def main_bot_loop():
 
     logging.info(f"--- 💡 {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} - BOT LOOP START (M1 Frequency) ---")
 
-    # ★修正: FGIデータを取得し、GLOBAL_MACRO_CONTEXTを更新★ (変更なし)
+    # FGIデータを取得し、GLOBAL_MACRO_CONTEXTを更新
     GLOBAL_MACRO_CONTEXT = await fetch_fgi_data() 
     current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
     
     new_signals: List[Dict] = []
     
-    # ポジション管理は position_monitor_scheduler が別で実行
-
     for symbol in CURRENT_MONITOR_SYMBOLS:
         for timeframe in TARGET_TIMEFRAMES:
             limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 500)
@@ -1256,24 +1262,8 @@ async def main_bot_loop():
             )
             LAST_ANALYSIS_ONLY_NOTIFICATION_TIME = now
             log_signal({'signals': LAST_ANALYSIS_SIGNALS, 'macro': GLOBAL_MACRO_CONTEXT}, 'Hourly Analysis')
-
-    # 7. 初回起動完了通知
-    # 【★修正適用箇所】 initialize_exchange_client() に初回起動ロジックを移動したため、このブロックを削除。
-    # if not IS_FIRST_MAIN_LOOP_COMPLETED:
-    #     account_status = await fetch_account_status() 
-
-    #     await send_telegram_notification(
-    #         format_startup_message(
-    #             account_status, 
-    #             GLOBAL_MACRO_CONTEXT, 
-    #             len(CURRENT_MONITOR_SYMBOLS), 
-    #             current_threshold,
-    #             "v19.0.29 - High-Freq/TP/SL/M1M5 Added (Patch 40 - Live FGI)"
-    #         )
-    #     )
-    #     IS_FIRST_MAIN_LOOP_COMPLETED = True
         
-    # 8. ログの外部アップロード (WebShare - HTTP POSTへ変更)
+    # 7. ログの外部アップロード (WebShare - HTTP POSTへ変更)
     if now - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
         logging.info("WebShareデータをアップロードします (HTTP POST)。")
         webshare_data = {
@@ -1287,13 +1277,13 @@ async def main_bot_loop():
         LAST_WEBSHARE_UPLOAD_TIME = now
 
 
-    # 9. 最終処理
+    # 8. 最終処理
     LAST_SUCCESS_TIME = time.time()
     logging.info(f"--- 💡 BOT LOOP END. Positions: {len(OPEN_POSITIONS)}, New Signals: {len(LAST_ANALYSIS_SIGNALS)} ---")
 
 
 # ====================================================================================
-# FASTAPI & ASYNC EXECUTION (変更なし)
+# FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
 app = FastAPI()
@@ -1322,7 +1312,19 @@ def get_status_info():
     return JSONResponse(content=status_msg)
 
 async def main_loop_scheduler():
-    """メインループを定期実行するスケジューラ (1分ごと)"""
+    """メインループを定期実行するスケジューラ (1分ごと) 【★修正適用箇所：待機ロジックを改良】"""
+    global LAST_SUCCESS_TIME, IS_CLIENT_READY
+    
+    # 💡 修正点: クライアントが準備できていない間は、ループ前に長めに待機する。
+    # この待機により、LAST_SUCCESS_TIMEが古いことによる異常な1秒ループを回避する。
+    while not IS_CLIENT_READY:
+         logging.info("⏳ クライアント準備完了を待機中...")
+         await asyncio.sleep(MONITOR_INTERVAL) # 10秒待機
+         
+    # クライアント初期化が完了したら、LAST_SUCCESS_TIMEを現在の時間に設定
+    # これにより、次回のループ計算が LOOP_INTERVAL に基づいて行われるようになる。
+    LAST_SUCCESS_TIME = time.time()
+    
     while True:
         try:
             await main_bot_loop()
@@ -1331,7 +1333,8 @@ async def main_loop_scheduler():
             await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
 
         # 待機時間を LOOP_INTERVAL (60秒) に基づいて計算
-        wait_time = max(1, LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME))
+        # 💡 修正点: wait_timeが少なくとも MONITOR_INTERVAL (10秒) あることを保証
+        wait_time = max(MONITOR_INTERVAL, LOOP_INTERVAL - (time.time() - LAST_SUCCESS_TIME))
         logging.info(f"次のメインループまで {wait_time:.1f} 秒待機します。")
         await asyncio.sleep(wait_time)
 
