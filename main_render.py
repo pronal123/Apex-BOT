@@ -1,13 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing
+# Apex BOT v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)
 #
 # 改良・修正点:
-# 1. 【スコアリング】スコアの分散を大きくするため、新しい要因とウェイトを導入。
-#    - 中期トレンドアライメント (SMA50/SMA200) ボーナスを追加。
-#    - RSIモメンタム強度に基づく可変ボーナスを追加。
-#    - 出来高スパイク確証ボーナスを追加。
-# 2. 【ロジック維持】動的ロット計算とSL/TP設定ロジックはv19.0.30から維持。
-# 3. 【ログ改善】スコア詳細ブレークダウンに新しい要因を追加。
+# 1. 【価格表示】価格情報（Entry, SL, TP）を小数第4位まで表示するように修正。
+# 2. 【ロジック維持】v19.0.31で導入された高分散スコアリングロジックは維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -163,7 +159,7 @@ SIGNAL_THRESHOLD_ACTIVE = 0.75
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
-    """USDT金額を整形する"""
+    """USDT金額（ロットサイズ、PnLなど）を整形する"""
     if amount is None:
         amount = 0.0
         
@@ -173,6 +169,21 @@ def format_usdt(amount: float) -> str:
         return f"{amount:.4f}"
     else:
         return f"{amount:.6f}"
+
+def format_price_precision(price: float) -> str:
+    """価格を整形する。1.0 USDT以上の価格に対して小数第4位まで表示を保証する。【★V19.0.32で追加】"""
+    if price is None:
+        price = 0.0
+        
+    if price >= 1.0:
+        # 1.0 USDT以上の価格は小数第4位まで表示を保証
+        return f"{price:,.4f}"
+    elif price >= 0.01:
+        # 0.01 USDT以上1.0 USDT未満は小数第4位
+        return f"{price:.4f}"
+    else:
+        # 0.01 USDT未満は小数第6位 (精度維持)
+        return f"{price:.6f}"
 
 def get_estimated_win_rate(score: float) -> str:
     """スコアに基づいて推定勝率を返す"""
@@ -199,7 +210,7 @@ def get_current_threshold(macro_context: Dict) -> float:
         return SIGNAL_THRESHOLD_NORMAL
 
 def get_score_breakdown(signal: Dict) -> str:
-    """シグナルに含まれるテクニカルデータから、スコアの詳細なブレークダウンを文字列として返す 【★修正点】"""
+    """シグナルに含まれるテクニカルデータから、スコアの詳細なブレークダウンを文字列として返す"""
     tech_data = signal.get('tech_data', {})
     score = signal['score']
     
@@ -215,7 +226,7 @@ def get_score_breakdown(signal: Dict) -> str:
     lt_score = f"{(-lt_reversal_pen)*100:.1f}"
     breakdown.append(f"  - {lt_status} (SMA200乖離): <code>{lt_score}</code> 点")
     
-    # 中期トレンドアライメントボーナス ★NEW
+    # 中期トレンドアライメントボーナス
     trend_alignment_bonus = tech_data.get('trend_alignment_bonus_value', 0.0)
     trend_status = '✅ 中期/長期トレンド一致 (SMA50>200)' if trend_alignment_bonus > 0 else '➖ 中期トレンド 中立/逆行'
     trend_score = f"{trend_alignment_bonus*100:.1f}"
@@ -233,7 +244,7 @@ def get_score_breakdown(signal: Dict) -> str:
     macd_score = f"{(-macd_pen)*100:.1f}"
     breakdown.append(f"  - {macd_status}: <code>{macd_score}</code> 点")
 
-    # RSIモメンタムボーナス ★NEW (可変)
+    # RSIモメンタムボーナス (可変)
     rsi_momentum_bonus = tech_data.get('rsi_momentum_bonus_value', 0.0)
     rsi_status = f"✅ RSIモメンタム加速 ({tech_data.get('rsi_value', 0.0):.1f})" if rsi_momentum_bonus > 0 else '➖ RSIモメンタム 中立'
     rsi_score = f"{rsi_momentum_bonus*100:.1f}"
@@ -245,7 +256,7 @@ def get_score_breakdown(signal: Dict) -> str:
     obv_score = f"{obv_bonus*100:.1f}"
     breakdown.append(f"  - {obv_status}: <code>+{obv_score}</code> 点")
     
-    # 出来高スパイクボーナス ★NEW
+    # 出来高スパイクボーナス
     volume_increase_bonus = tech_data.get('volume_increase_bonus_value', 0.0)
     volume_status = '✅ 直近の出来高スパイク' if volume_increase_bonus > 0 else '➖ 出来高スパイクなし'
     volume_score = f"{volume_increase_bonus*100:.1f}"
@@ -318,12 +329,16 @@ def format_startup_message(
         # ボットが管理しているポジション
         if OPEN_POSITIONS:
             total_managed_value = sum(p['filled_usdt'] for p in OPEN_POSITIONS)
+            # SL/TPの表示に新しい関数を使用
+            sl_display = format_price_precision(OPEN_POSITIONS[0]['stop_loss'])
+            tp_display = format_price_precision(OPEN_POSITIONS[0]['take_profit'])
+            
             balance_section += (
                 f"  - **管理中ポジション**: <code>{len(OPEN_POSITIONS)}</code> 銘柄 (投入合計: <code>{format_usdt(total_managed_value)}</code> USDT)\n"
             )
             for i, pos in enumerate(OPEN_POSITIONS[:3]): # Top 3のみ表示
                 base_currency = pos['symbol'].replace('/USDT', '')
-                balance_section += f"    - Top {i+1}: {base_currency} (SL: {format_usdt(pos['stop_loss'])} / TP: {format_usdt(pos['take_profit'])})\n"
+                balance_section += f"    - Top {i+1}: {base_currency} (SL: {format_price_precision(pos['stop_loss'])} / TP: {format_price_precision(pos['take_profit'])})\n"
             if len(OPEN_POSITIONS) > 3:
                 balance_section += f"    - ...他 {len(OPEN_POSITIONS) - 3} 銘柄\n"
         else:
@@ -357,7 +372,7 @@ def format_startup_message(
 
 
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
-    """Telegram通知用のメッセージを作成する"""
+    """Telegram通知用のメッセージを作成する【★V19.0.32で価格表示を変更】"""
     global GLOBAL_TOTAL_EQUITY
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -382,7 +397,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     if context == "取引シグナル":
         lot_size = signal.get('lot_size_usdt', BASE_TRADE_SIZE_USDT)
         
-        # ロットサイズ割合の表示
+        # ロットサイズ割合の表示 (金額なのでformat_usdt)
         if GLOBAL_TOTAL_EQUITY > 0 and lot_size >= BASE_TRADE_SIZE_USDT:
             lot_percent = (lot_size / GLOBAL_TOTAL_EQUITY) * 100
             lot_info = f"<code>{format_usdt(lot_size)}</code> USDT ({lot_percent:.1f}%)"
@@ -421,8 +436,9 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         
         trade_section = (
             f"💰 **決済実行結果** - {pnl_sign}\n"
-            f"  - **エントリー価格**: <code>{format_usdt(entry_price)}</code>\n"
-            f"  - **決済価格**: <code>{format_usdt(exit_price)}</code>\n"
+            # 決済価格も高精度表示
+            f"  - **エントリー価格**: <code>{format_price_precision(entry_price)}</code>\n"
+            f"  - **決済価格**: <code>{format_price_precision(exit_price)}</code>\n"
             f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
             f"  - **損益**: <code>{'+' if pnl_usdt >= 0 else ''}{format_usdt(pnl_usdt)}</code> USDT ({pnl_rate*100:.2f}%)\n"
         )
@@ -438,9 +454,11 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **取引閾値**: <code>{current_threshold * 100:.2f}</code> 点\n"
         f"  - **推定勝率**: <code>{estimated_wr}</code>\n"
         f"  - **リスクリワード比率 (RRR)**: <code>1:{rr_ratio:.2f}</code>\n"
-        f"  - **エントリー**: <code>{format_usdt(entry_price)}</code>\n"
-        f"  - **ストップロス (SL)**: <code>{format_usdt(stop_loss)}</code>\n"
-        f"  - **テイクプロフィット (TP)**: <code>{format_usdt(take_profit)}</code>\n"
+        # ★ここから価格表示をformat_price_precisionに変更
+        f"  - **エントリー**: <code>{format_price_precision(entry_price)}</code>\n"
+        f"  - **ストップロス (SL)**: <code>{format_price_precision(stop_loss)}</code>\n"
+        f"  - **テイクプロフィット (TP)**: <code>{format_price_precision(take_profit)}</code>\n"
+        # リスク・リワード幅（金額）はformat_usdtを維持
         f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price - stop_loss)}</code> USDT\n"
         f"  - **リワード幅 (TP)**: <code>{format_usdt(take_profit - entry_price)}</code> USDT\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
@@ -456,7 +474,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing</i>")
+    message += (f"<i>Bot Ver: v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)</i>")
     return message
 
 
@@ -757,7 +775,7 @@ async def fetch_fgi_data() -> Dict:
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """テクニカル指標を計算し、DataFrameに追加する (pandas_taを使用) 【★修正点】"""
+    """テクニカル指標を計算し、DataFrameに追加する"""
     # SMA
     df['SMA200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH)
     df['SMA50'] = ta.sma(df['close'], length=50) # 中期トレンド用に追加
@@ -777,7 +795,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['OBV'] = ta.obv(df['close'], df['volume'])
     df['OBV_SMA'] = ta.sma(df['OBV'], length=20)
     
-    # 出来高平均 ★NEW
+    # 出来高平均
     df['Volume_SMA20'] = ta.sma(df['volume'], length=20)
     
     # ピボットポイント (簡易版)
@@ -789,7 +807,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Optional[Dict]:
-    """分析ロジックに基づき、取引シグナルを生成する 【★主要修正点】"""
+    """分析ロジックに基づき、取引シグナルを生成する"""
     global GLOBAL_TOTAL_EQUITY, DYNAMIC_LOT_MIN_PERCENT, DYNAMIC_LOT_MAX_PERCENT, DYNAMIC_LOT_SCORE_MAX, SIGNAL_THRESHOLD
     
     if df.empty or df['SMA200'].isnull().all():
@@ -816,7 +834,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         if current_price > df['SMA200'].iloc[-1] * 1.05: # 5%以上乖離
             long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
             
-        # ★NEW FACTOR 1: Mid-Term Trend Alignment Bonus (SMA50 > SMA200)
+        # NEW FACTOR 1: Mid-Term Trend Alignment Bonus (SMA50 > SMA200)
         trend_alignment_bonus_value = 0.0
         if df['SMA50'].iloc[-1] > df['SMA200'].iloc[-1]:
             trend_alignment_bonus_value = TREND_ALIGNMENT_BONUS
@@ -831,7 +849,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         if df['MACD'].iloc[-1] < df['MACD_S'].iloc[-1]:
             macd_penalty_value = MACD_CROSS_PENALTY
 
-        # ★NEW FACTOR 2: RSI Magnitude Bonus (RSI 50-70 の範囲で線形加点)
+        # NEW FACTOR 2: RSI Magnitude Bonus (RSI 50-70 の範囲で線形加点)
         rsi = df['RSI'].iloc[-1]
         rsi_momentum_bonus_value = 0.0
         if rsi >= 50 and rsi < 70:
@@ -844,7 +862,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         if df['OBV'].iloc[-1] > df['OBV_SMA'].iloc[-1] and df['OBV'].iloc[-2] <= df['OBV_SMA'].iloc[-2]:
              obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
              
-        # ★NEW FACTOR 3: Volume Spike Bonus
+        # NEW FACTOR 3: Volume Spike Bonus
         volume_increase_bonus_value = 0.0
         if 'Volume_SMA20' in df.columns and df['Volume_SMA20'].iloc[-1] > 0 and df['volume'].iloc[-1] > df['Volume_SMA20'].iloc[-1] * 1.5: # 出来高が平均の1.5倍
             volume_increase_bonus_value = VOLUME_INCREASE_BONUS
@@ -1231,7 +1249,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold,
-            "v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing"
+            "v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1244,7 +1262,7 @@ async def main_bot_loop():
             'positions': _to_json_compatible(OPEN_POSITIONS),
             'equity': GLOBAL_TOTAL_EQUITY,
             'fgi_raw': GLOBAL_MACRO_CONTEXT['fgi_raw_value'],
-            'bot_version': "v19.0.31"
+            'bot_version': "v19.0.32"
         })
 
     end_time = time.time()
@@ -1256,7 +1274,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.31")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.32")
 
 @app.get("/")
 async def root():
@@ -1268,7 +1286,7 @@ async def root():
         "current_positions": len(OPEN_POSITIONS),
         "last_loop_success": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y/%m/%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
         "total_equity_usdt": f"{GLOBAL_TOTAL_EQUITY:.2f}",
-        "bot_version": "v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing"
+        "bot_version": "v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)"
     })
 
 @app.post("/webhook")
