@@ -1,9 +1,13 @@
 # ====================================================================================
-# Apex BOT v19.0.30 - Dynamic Lot Sizing Added (Patch 41 - Equity & Score Based)
+# Apex BOT v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing
 #
 # 改良・修正点:
-# 1. 【ログ改善】analyze_signals関数内の動的ロット計算ログに、計算対象の銘柄情報 (symbol) を追加。
-# 2. 【機能追加】シグナルスコアに基づき、取引ロットサイズを総資産額の10%から50%の範囲で動的に調整する機能を維持。
+# 1. 【スコアリング】スコアの分散を大きくするため、新しい要因とウェイトを導入。
+#    - 中期トレンドアライメント (SMA50/SMA200) ボーナスを追加。
+#    - RSIモメンタム強度に基づく可変ボーナスを追加。
+#    - 出来高スパイク確証ボーナスを追加。
+# 2. 【ロジック維持】動的ロット計算とSL/TP設定ロジックはv19.0.30から維持。
+# 3. 【ログ改善】スコア詳細ブレークダウンに新しい要因を追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -87,7 +91,7 @@ if BASE_TRADE_SIZE_USDT < 10:
     logging.warning("⚠️ BASE_TRADE_SIZE_USDTが10 USDT未満です。ほとんどの取引所の最小取引額を満たさない可能性があります。")
 
 
-# 【★修正点 1: 動的ロット設定の追加】
+# 【動的ロット設定】
 DYNAMIC_LOT_MIN_PERCENT = 0.10 # 最小ロット (総資産の 10%)
 DYNAMIC_LOT_MAX_PERCENT = 0.50 # 最大ロット (総資産の 50%)
 DYNAMIC_LOT_SCORE_MAX = 0.90   # このスコアで最大ロットが適用される (90点)
@@ -109,7 +113,7 @@ LAST_WEBSHARE_UPLOAD_TIME: float = 0.0
 GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0} # ★初期値を設定
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False # 初回メインループ完了フラグ
 OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (SL/TP監視用)
-GLOBAL_TOTAL_EQUITY: float = 0.0 # 【★修正点 2: 総資産額を格納するグローバル変数】
+GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変数
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -121,30 +125,38 @@ IS_CLIENT_READY: bool = False
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
 SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
-REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを追加
+REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを含む
 
-# テクニカル分析定数 (v19.0.28ベース)
-TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] # 1m, 5mを追加
-BASE_SCORE = 0.40                   # ベースとなる取引基準点 (40点)
+# ====================================================================================
+# 【★スコアリング定数変更 V19.0.31: 高分散スコアリング】
+# ====================================================================================
+TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
+
+# スコアリングウェイト
+BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点に引き上げ)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
-LONG_TERM_REVERSAL_PENALTY = 0.20   # 長期トレンド逆行時のペナルティ
-STRUCTURAL_PIVOT_BONUS = 0.05       # 価格構造/ピボット支持時のボーナス
-RSI_MOMENTUM_LOW = 40               # RSIが40以下でロングモメンタム候補
-MACD_CROSS_PENALTY = 0.15           # MACDが不利なクロス/発散時のペナルティ
-LIQUIDITY_BONUS_MAX = 0.06          # 流動性(板の厚み)による最大ボーナス
-FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ
-FOREX_BONUS_MAX = 0.0               # 為替機能を削除するため0.0に設定
 
-# 市場環境に応じた動的閾値調整のための定数
+# ペナルティ（マイナス要因）
+LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティを強化 (0.20 -> 0.30)
+MACD_CROSS_PENALTY = 0.25           # MACDが不利なクロス/発散時のペナルティを強化 (0.15 -> 0.25)
+VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 # BB幅が1%未満
+
+# ボーナス（プラス要因）
+TREND_ALIGNMENT_BONUS = 0.15        # ★新要因: SMA50 > SMA200 時のボーナス
+STRUCTURAL_PIVOT_BONUS = 0.10       # 価格構造/ピボット支持時のボーナスを強化 (0.05 -> 0.10)
+RSI_MOMENTUM_LOW = 45               # RSIが45以下でロングモメンタム候補
+RSI_MOMENTUM_BONUS_MAX = 0.15       # ★新要因: RSIの強さに応じた可変ボーナスの最大値
+OBV_MOMENTUM_BONUS = 0.08           # OBVの確証ボーナスを強化 (0.04 -> 0.08)
+VOLUME_INCREASE_BONUS = 0.10        # ★新要因: 出来高スパイク時のボーナス
+LIQUIDITY_BONUS_MAX = 0.10          # 流動性(板の厚み)による最大ボーナスを強化 (0.06 -> 0.10)
+FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ (変更なし)
+
+# 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
 SIGNAL_THRESHOLD_SLUMP = 0.90       
 SIGNAL_THRESHOLD_NORMAL = 0.85      
 SIGNAL_THRESHOLD_ACTIVE = 0.75      
-
-RSI_DIVERGENCE_BONUS = 0.10         
-VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 
-OBV_MOMENTUM_BONUS = 0.04           
 
 # ====================================================================================
 # UTILITIES & FORMATTING 
@@ -187,7 +199,7 @@ def get_current_threshold(macro_context: Dict) -> float:
         return SIGNAL_THRESHOLD_NORMAL
 
 def get_score_breakdown(signal: Dict) -> str:
-    """シグナルに含まれるテクニカルデータから、スコアの詳細なブレークダウンを文字列として返す"""
+    """シグナルに含まれるテクニカルデータから、スコアの詳細なブレークダウンを文字列として返す 【★修正点】"""
     tech_data = signal.get('tech_data', {})
     score = signal['score']
     
@@ -197,11 +209,17 @@ def get_score_breakdown(signal: Dict) -> str:
     base_score_line = f"  - **ベーススコア ({signal['timeframe']})**: <code>+{BASE_SCORE*100:.1f}</code> 点"
     breakdown.append(base_score_line)
     
-    # 長期トレンド
+    # 長期トレンド逆行ペナルティ
     lt_reversal_pen = tech_data.get('long_term_reversal_penalty_value', 0.0)
     lt_status = '❌ 長期トレンド逆行' if lt_reversal_pen > 0 else '✅ 長期トレンド一致'
     lt_score = f"{(-lt_reversal_pen)*100:.1f}"
-    breakdown.append(f"  - {lt_status} (SMA200): <code>{lt_score}</code> 点")
+    breakdown.append(f"  - {lt_status} (SMA200乖離): <code>{lt_score}</code> 点")
+    
+    # 中期トレンドアライメントボーナス ★NEW
+    trend_alignment_bonus = tech_data.get('trend_alignment_bonus_value', 0.0)
+    trend_status = '✅ 中期/長期トレンド一致 (SMA50>200)' if trend_alignment_bonus > 0 else '➖ 中期トレンド 中立/逆行'
+    trend_score = f"{trend_alignment_bonus*100:.1f}"
+    breakdown.append(f"  - {trend_status}: <code>+{trend_score}</code> 点")
     
     # 価格構造/ピボット
     pivot_bonus = tech_data.get('structural_pivot_bonus', 0.0)
@@ -209,31 +227,33 @@ def get_score_breakdown(signal: Dict) -> str:
     pivot_score = f"{pivot_bonus*100:.1f}"
     breakdown.append(f"  - {pivot_status}: <code>+{pivot_score}</code> 点")
 
-    # モメンタム/MACD
+    # MACDペナルティ
     macd_pen = tech_data.get('macd_penalty_value', 0.0)
-    macd_bonus = tech_data.get('macd_bonus_value', 0.0)
-    
-    if macd_pen > 0:
-        macd_status = '❌ MACD/RSIモメンタム失速'
-        macd_score = f"{(-macd_pen)*100:.1f}"
-    elif macd_bonus > 0:
-        macd_status = '✅ MACD/RSIモメンタム加速'
-        macd_score = f"{macd_bonus*100:.1f}"
-    else:
-        macd_status = '➖ MACD/RSI 中立'
-        macd_score = "+0.0"
-        
+    macd_status = '❌ MACDクロス/発散 (不利)' if macd_pen > 0 else '➖ MACD 中立'
+    macd_score = f"{(-macd_pen)*100:.1f}"
     breakdown.append(f"  - {macd_status}: <code>{macd_score}</code> 点")
 
-    # 出来高/OBV
+    # RSIモメンタムボーナス ★NEW (可変)
+    rsi_momentum_bonus = tech_data.get('rsi_momentum_bonus_value', 0.0)
+    rsi_status = f"✅ RSIモメンタム加速 ({tech_data.get('rsi_value', 0.0):.1f})" if rsi_momentum_bonus > 0 else '➖ RSIモメンタム 中立'
+    rsi_score = f"{rsi_momentum_bonus*100:.1f}"
+    breakdown.append(f"  - {rsi_status}: <code>+{rsi_score}</code> 点")
+    
+    # 出来高/OBV確証ボーナス
     obv_bonus = tech_data.get('obv_momentum_bonus_value', 0.0)
     obv_status = '✅ 出来高/OBV確証' if obv_bonus > 0 else '➖ 出来高/OBV 中立'
     obv_score = f"{obv_bonus*100:.1f}"
     breakdown.append(f"  - {obv_status}: <code>+{obv_score}</code> 点")
+    
+    # 出来高スパイクボーナス ★NEW
+    volume_increase_bonus = tech_data.get('volume_increase_bonus_value', 0.0)
+    volume_status = '✅ 直近の出来高スパイク' if volume_increase_bonus > 0 else '➖ 出来高スパイクなし'
+    volume_score = f"{volume_increase_bonus*100:.1f}"
+    breakdown.append(f"  - {volume_status}: <code>+{volume_score}</code> 点")
 
     # 流動性
     liquidity_bonus = tech_data.get('liquidity_bonus_value', 0.0)
-    liquidity_status = '✅ 流動性 (板の厚み) 優位' if liquidity_bonus > 0 else '➖ 流動性 中立'
+    liquidity_status = '✅ 流動性 (板の厚み) 優位'
     liquidity_score = f"{liquidity_bonus*100:.1f}"
     breakdown.append(f"  - {liquidity_status}: <code>+{liquidity_score}</code> 点")
 
@@ -242,6 +262,12 @@ def get_score_breakdown(signal: Dict) -> str:
     macro_status = '✅ FGIマクロ影響 順行' if fgi_bonus >= 0 else '❌ FGIマクロ影響 逆行'
     macro_score = f"{fgi_bonus*100:.1f}"
     breakdown.append(f"  - {macro_status}: <code>{macro_score}</code> 点")
+
+    # ボラティリティペナルティ (低ボラティリティ)
+    volatility_pen = tech_data.get('volatility_penalty_value', 0.0)
+    vol_status = '❌ 低ボラティリティペナルティ' if volatility_pen < 0 else '➖ ボラティリティ 中立'
+    vol_score = f"{volatility_pen*100:.1f}"
+    breakdown.append(f"  - {vol_status}: <code>{vol_score}</code> 点")
 
     return '\n'.join(breakdown)
 
@@ -430,7 +456,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.30 - Dynamic Lot Sizing Added (Patch 41 - Equity & Score Based)</i>")
+    message += (f"<i>Bot Ver: v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing</i>")
     return message
 
 
@@ -731,10 +757,10 @@ async def fetch_fgi_data() -> Dict:
 # ====================================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """テクニカル指標を計算し、DataFrameに追加する (pandas_taを使用)"""
+    """テクニカル指標を計算し、DataFrameに追加する (pandas_taを使用) 【★修正点】"""
     # SMA
     df['SMA200'] = ta.sma(df['close'], length=LONG_TERM_SMA_LENGTH)
-    df['SMA50'] = ta.sma(df['close'], length=50)
+    df['SMA50'] = ta.sma(df['close'], length=50) # 中期トレンド用に追加
 
     # RSI
     df['RSI'] = ta.rsi(df['close'], length=14)
@@ -751,8 +777,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['OBV'] = ta.obv(df['close'], df['volume'])
     df['OBV_SMA'] = ta.sma(df['OBV'], length=20)
     
+    # 出来高平均 ★NEW
+    df['Volume_SMA20'] = ta.sma(df['volume'], length=20)
+    
     # ピボットポイント (簡易版)
-    # 現在の終値が直近のS1, R1からどれだけ離れているかなどの構造分析に使用
     df['Pivot'] = (df['high'].shift(1) + df['low'].shift(1) + df['close'].shift(1)) / 3
     df['R1'] = 2 * df['Pivot'] - df['low'].shift(1)
     df['S1'] = 2 * df['Pivot'] - df['high'].shift(1)
@@ -761,7 +789,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context: Dict) -> Optional[Dict]:
-    """分析ロジックに基づき、取引シグナルを生成する 【★修正適用箇所：動的ロットの計算】"""
+    """分析ロジックに基づき、取引シグナルを生成する 【★主要修正点】"""
     global GLOBAL_TOTAL_EQUITY, DYNAMIC_LOT_MIN_PERCENT, DYNAMIC_LOT_MAX_PERCENT, DYNAMIC_LOT_SCORE_MAX, SIGNAL_THRESHOLD
     
     if df.empty or df['SMA200'].isnull().all():
@@ -776,61 +804,84 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     if current_price > df['SMA200'].iloc[-1]:
         
         # --- スコアリングの初期化 ---
-        score = BASE_SCORE # 0.40
+        score = BASE_SCORE # 0.50
         
         # --- テクニカルデータ計算 ---
         fgi_proxy = macro_context.get('fgi_proxy', 0.0)
+        # マクロ環境ボーナス (FGI)
         sentiment_fgi_proxy_bonus = (fgi_proxy / FGI_ACTIVE_THRESHOLD) * FGI_PROXY_BONUS_MAX if abs(fgi_proxy) <= FGI_ACTIVE_THRESHOLD and FGI_ACTIVE_THRESHOLD > 0 else (FGI_PROXY_BONUS_MAX if fgi_proxy > 0 else -FGI_PROXY_BONUS_MAX)
         
         # Long-Term Reversal Penalty (価格がSMA200から大きく乖離しすぎている場合)
         long_term_reversal_penalty_value = 0.0
         if current_price > df['SMA200'].iloc[-1] * 1.05: # 5%以上乖離
             long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
-
+            
+        # ★NEW FACTOR 1: Mid-Term Trend Alignment Bonus (SMA50 > SMA200)
+        trend_alignment_bonus_value = 0.0
+        if df['SMA50'].iloc[-1] > df['SMA200'].iloc[-1]:
+            trend_alignment_bonus_value = TREND_ALIGNMENT_BONUS
+            
         # Structural Pivot Bonus (直近のS1, S2がサポートとして機能している場合)
         structural_pivot_bonus = 0.0
-        if df['S1'].iloc[-1] < current_price and df['S1'].iloc[-1] > df['low'].iloc[-2]: # S1が現在の価格より低く、直前の安値をサポート
+        if df['S1'].iloc[-1] < current_price and df['S1'].iloc[-1] > df['low'].iloc[-2]: 
              structural_pivot_bonus = STRUCTURAL_PIVOT_BONUS
 
-        # MACD Penalty (MACD線がシグナル線の下にある、またはヒストグラムがマイナス)
+        # MACD Penalty (MACD線がシグナル線の下にある)
         macd_penalty_value = 0.0
-        macd_bonus_value = 0.0
         if df['MACD'].iloc[-1] < df['MACD_S'].iloc[-1]:
             macd_penalty_value = MACD_CROSS_PENALTY
-        elif df['RSI'].iloc[-1] < RSI_MOMENTUM_LOW:
-            macd_bonus_value = MACD_CROSS_PENALTY # RSIが低ければモメンタム復活の可能性ありと見なしボーナス
+
+        # ★NEW FACTOR 2: RSI Magnitude Bonus (RSI 50-70 の範囲で線形加点)
+        rsi = df['RSI'].iloc[-1]
+        rsi_momentum_bonus_value = 0.0
+        if rsi >= 50 and rsi < 70:
+            # 50で0点、70でRSI_MOMENTUM_BONUS_MAX (0.15)
+            rsi_momentum_bonus_value = RSI_MOMENTUM_BONUS_MAX * ((rsi - 50.0) / 20.0)
+        # RSIが低すぎる場合はペナルティを考慮しない (ベーススコアに含まれていると見なす)
 
         # OBV Momentum Bonus (OBVがSMAを上抜けている)
         obv_momentum_bonus_value = 0.0
         if df['OBV'].iloc[-1] > df['OBV_SMA'].iloc[-1] and df['OBV'].iloc[-2] <= df['OBV_SMA'].iloc[-2]:
              obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
+             
+        # ★NEW FACTOR 3: Volume Spike Bonus
+        volume_increase_bonus_value = 0.0
+        if 'Volume_SMA20' in df.columns and df['Volume_SMA20'].iloc[-1] > 0 and df['volume'].iloc[-1] > df['Volume_SMA20'].iloc[-1] * 1.5: # 出来高が平均の1.5倍
+            volume_increase_bonus_value = VOLUME_INCREASE_BONUS
 
         # Volatility Penalty (ボリンジャーバンド幅が狭すぎる場合)
         volatility_penalty_value = 0.0
         if df['BBB'].iloc[-1] < VOLATILITY_BB_PENALTY_THRESHOLD * 100: # BB幅が1%未満
             volatility_penalty_value = -0.05 # ペナルティとしてマイナス5点を付与
 
+        # 流動性ボーナス (板情報は省略しMAXボーナスを固定)
+        liquidity_bonus_value = LIQUIDITY_BONUS_MAX 
+
         tech_data = {
             'long_term_reversal_penalty_value': long_term_reversal_penalty_value, 
+            'trend_alignment_bonus_value': trend_alignment_bonus_value, 
             'structural_pivot_bonus': structural_pivot_bonus, 
             'macd_penalty_value': macd_penalty_value, 
-            'macd_bonus_value': macd_bonus_value,
+            'rsi_momentum_bonus_value': rsi_momentum_bonus_value, 
+            'rsi_value': rsi, 
             'obv_momentum_bonus_value': obv_momentum_bonus_value, 
-            'liquidity_bonus_value': LIQUIDITY_BONUS_MAX, # 板情報は省略しMAXボーナスを固定
+            'volume_increase_bonus_value': volume_increase_bonus_value, 
+            'liquidity_bonus_value': liquidity_bonus_value, 
             'sentiment_fgi_proxy_bonus': sentiment_fgi_proxy_bonus, 
             'forex_bonus': 0.0,
             'volatility_penalty_value': volatility_penalty_value,
         }
         
-        # 総合スコア計算
+        # 総合スコア計算 (ウェイト強化)
         score += (
+            tech_data['trend_alignment_bonus_value'] +       
             tech_data['structural_pivot_bonus'] + 
+            tech_data['rsi_momentum_bonus_value'] +          
             tech_data['obv_momentum_bonus_value'] + 
+            tech_data['volume_increase_bonus_value'] +       
             tech_data['liquidity_bonus_value'] + 
             tech_data['sentiment_fgi_proxy_bonus'] + 
-            tech_data['forex_bonus'] +
-            tech_data['volatility_penalty_value'] +
-            tech_data['macd_bonus_value'] - 
+            tech_data['volatility_penalty_value'] - 
             tech_data['long_term_reversal_penalty_value'] -
             tech_data['macd_penalty_value']
         )
@@ -842,12 +893,10 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         
         BASE_RISK_PERCENT = 0.015  # 1.5% のリスク
         PIVOT_SUPPORT_BONUS = tech_data.get('structural_pivot_bonus', 0.0) 
-
-        # ピボットサポートが強いほど、SL幅をわずかに狭める
+        
+        # SL価格の決定
         sl_adjustment = (PIVOT_SUPPORT_BONUS / STRUCTURAL_PIVOT_BONUS) * 0.002 if STRUCTURAL_PIVOT_BONUS > 0 else 0.0
         dynamic_risk_percent = max(0.010, BASE_RISK_PERCENT - sl_adjustment) # 最小1.0%リスク
-
-        # SL価格の決定
         stop_loss = current_price * (1 - dynamic_risk_percent)
         
         # RRRの決定 (スコアが高いほどRRRを改善)
@@ -855,8 +904,10 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         MAX_SCORE_FOR_RRR = 0.85 # このスコアでRRRの最大値に達する
         MAX_RRR = 3.0
         
-        if score > SIGNAL_THRESHOLD:
-            score_ratio = min(1.0, (score - SIGNAL_THRESHOLD) / (MAX_SCORE_FOR_RRR - SIGNAL_THRESHOLD))
+        current_threshold_base = get_current_threshold(macro_context)
+        
+        if score > current_threshold_base:
+            score_ratio = min(1.0, (score - current_threshold_base) / (MAX_SCORE_FOR_RRR - current_threshold_base) if (MAX_SCORE_FOR_RRR - current_threshold_base) > 0 else 1.0)
             dynamic_rr_ratio = BASE_RRR + (MAX_RRR - BASE_RRR) * score_ratio
         else:
             dynamic_rr_ratio = BASE_RRR 
@@ -866,35 +917,26 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         rr_ratio = dynamic_rr_ratio 
         
         ##############################################################
-        # 3. 動的ロットサイズの計算 【★重要修正点】
+        # 3. 動的ロットサイズの計算 
         ##############################################################
         
         if GLOBAL_TOTAL_EQUITY > 0:
             
-            # スコアの正規化: SIGNAL_THRESHOLD (0.65) から DYNAMIC_LOT_SCORE_MAX (0.90) までの範囲
             normalized_score = max(0, score - SIGNAL_THRESHOLD)
             score_range = DYNAMIC_LOT_SCORE_MAX - SIGNAL_THRESHOLD
             
-            # 調整率 (0.0から1.0)
             if score_range > 0:
                 adjustment_ratio = min(1.0, normalized_score / score_range)
             else:
-                # 閾値設定が異常な場合は中間の0.5を使用
                 adjustment_ratio = 0.5 
             
-            # 最終的なロット割合 = 最小 + (最大 - 最小) * 調整率
             dynamic_percent = DYNAMIC_LOT_MIN_PERCENT + (DYNAMIC_LOT_MAX_PERCENT - DYNAMIC_LOT_MIN_PERCENT) * adjustment_ratio
-            
-            # USDTロットサイズ = 総資産額 * 割合
             calculated_lot_size = GLOBAL_TOTAL_EQUITY * dynamic_percent
-            
-            # 最低取引額（BASE_TRADE_SIZE_USDT）を下回らないように保護
             lot_size_usdt = max(calculated_lot_size, BASE_TRADE_SIZE_USDT)
             
-            # 【★修正箇所：銘柄 (symbol) を追加】
+            # 銘柄 (symbol) を含めてログ出力
             logging.info(f"💰 動的ロット計算 - {symbol}: Score={score:.2f}, Ratio={dynamic_percent*100:.1f}%, Equity={GLOBAL_TOTAL_EQUITY:.2f} -> Lot={lot_size_usdt:.2f} USDT")
         else:
-            # 総資産額が不明な場合は、BASE_TRADE_SIZE_USDTを使用 (フォールバック)
             lot_size_usdt = BASE_TRADE_SIZE_USDT
             logging.warning(f"⚠️ {symbol}: 総資産額が不明のため、基本ロットサイズを使用します。")
         
@@ -913,7 +955,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
                 'entry_price': current_price,
                 'stop_loss': stop_loss, 
                 'take_profit': take_profit, 
-                'lot_size_usdt': lot_size_usdt, # 動的ロットサイズを格納
+                'lot_size_usdt': lot_size_usdt, 
                 'tech_data': tech_data, 
             }
     return None
@@ -1189,7 +1231,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold,
-            "v19.0.30 - Dynamic Lot Sizing Added (Patch 41 - Equity & Score Based)"
+            "v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1202,7 +1244,7 @@ async def main_bot_loop():
             'positions': _to_json_compatible(OPEN_POSITIONS),
             'equity': GLOBAL_TOTAL_EQUITY,
             'fgi_raw': GLOBAL_MACRO_CONTEXT['fgi_raw_value'],
-            'bot_version': "v19.0.30"
+            'bot_version': "v19.0.31"
         })
 
     end_time = time.time()
@@ -1214,7 +1256,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.30")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.31")
 
 @app.get("/")
 async def root():
@@ -1226,7 +1268,7 @@ async def root():
         "current_positions": len(OPEN_POSITIONS),
         "last_loop_success": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y/%m/%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
         "total_equity_usdt": f"{GLOBAL_TOTAL_EQUITY:.2f}",
-        "bot_version": "v19.0.30 - Dynamic Lot Sizing Added (Patch 41)"
+        "bot_version": "v19.0.31 - High Dispersion Scoring & Dynamic Lot Sizing"
     })
 
 @app.post("/webhook")
@@ -1278,3 +1320,5 @@ async def startup_event():
     # ポジション監視のスケジューラをバックグラウンドで開始 (10秒ごと)
     asyncio.create_task(position_monitor_scheduler())
     logging.info("(startup_event) - BOTサービスを開始しました。")
+
+# uvicorn.run(app, host="0.0.0.0", port=8000) # uvicorn実行は環境依存のためコメントアウト
