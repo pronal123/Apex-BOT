@@ -89,8 +89,8 @@ if BASE_TRADE_SIZE_USDT < 10:
 
 # 【動的ロット設定】
 DYNAMIC_LOT_MIN_PERCENT = 0.10 # 最小ロット (総資産の 10%)
-DYNAMIC_LOT_MAX_PERCENT = 0.50 # 最大ロット (総資産の 50%)
-DYNAMIC_LOT_SCORE_MAX = 0.90   # このスコアで最大ロットが適用される (90点)
+DYNAMIC_LOT_MAX_PERCENT = 0.20 # 最大ロット (総資産の 20%)
+DYNAMIC_LOT_SCORE_MAX = 0.9999   # このスコアで最大ロットが適用される (99.99点)
 
 
 # 💡 WEBSHARE設定 (HTTP POSTへ変更)
@@ -150,7 +150,7 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.10500       
+SIGNAL_THRESHOLD_SLUMP = 0.9999       
 SIGNAL_THRESHOLD_NORMAL = 0.95      
 SIGNAL_THRESHOLD_ACTIVE = 0.90      
 
