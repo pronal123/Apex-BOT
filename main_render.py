@@ -1,9 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)
+# Apex BOT v19.0.34 - High Dispersion Scoring & Dynamic Lot Sizing (Max Score 1.0 Patch)
 #
 # 改良・修正点:
-# 1. 【価格表示】価格情報（Entry, SL, TP）を小数第4位まで表示するように修正。
-# 2. 【ロジック維持】v19.0.31で導入された高分散スコアリングロジックは維持。
+# 1. 【スコアリング調整】全ての条件が揃った場合の最大スコアを100点 (1.00) に修正。
+# 2. 【閾値調整】最大スコア1.00に合わせ、動的取引閾値を調整。
+# 3. 【ロジック維持】v19.0.33で導入された最小残高チェック、高分散スコアリングロジックは維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -92,6 +93,9 @@ DYNAMIC_LOT_MIN_PERCENT = 0.10 # 最小ロット (総資産の 10%)
 DYNAMIC_LOT_MAX_PERCENT = 0.20 # 最大ロット (総資産の 20%)
 DYNAMIC_LOT_SCORE_MAX = 0.9999   # このスコアで最大ロットが適用される (99.99点)
 
+# 💡 【V19.0.33対応】最小残高設定 (20 USDT未満の場合は取引をスキップ)
+MIN_BALANCE_FOR_TRADE = 20.0
+
 
 # 💡 WEBSHARE設定 (HTTP POSTへ変更)
 WEBSHARE_METHOD = os.getenv("WEBSHARE_METHOD", "HTTP") # デフォルトはHTTPに変更
@@ -119,40 +123,39 @@ IS_CLIENT_READY: bool = False
 
 # 取引ルール設定
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
-SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン
+SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン (この値は動的閾値で上書きされる)
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
 REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを含む
 
 # ====================================================================================
-# 【★スコアリング定数変更 V19.0.31: 高分散スコアリング】
+# 【★スコアリング定数変更 V19.0.34: 最大スコア1.00調整】
 # ====================================================================================
 TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
 
 # スコアリングウェイト
-BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点に引き上げ)
-LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
+BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点) - 変更なし
 
-# ペナルティ（マイナス要因）
-LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティを強化 (0.20 -> 0.30)
-MACD_CROSS_PENALTY = 0.25           # MACDが不利なクロス/発散時のペナルティを強化 (0.15 -> 0.25)
+# ペナルティ（マイナス要因）- 変更なし
+LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティ
+MACD_CROSS_PENALTY = 0.25           # MACDが不利なクロス/発散時のペナルティ
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 # BB幅が1%未満
 
-# ボーナス（プラス要因）
-TREND_ALIGNMENT_BONUS = 0.15        # ★新要因: SMA50 > SMA200 時のボーナス
-STRUCTURAL_PIVOT_BONUS = 0.10       # 価格構造/ピボット支持時のボーナスを強化 (0.05 -> 0.10)
+# ボーナス（プラス要因）- 最大スコア1.00 (ボーナス合計0.50) になるように調整
+TREND_ALIGNMENT_BONUS = 0.12        # 中期/長期トレンド一致ボーナス (0.15 -> 0.12)
+STRUCTURAL_PIVOT_BONUS = 0.06       # 価格構造/ピボット支持時のボーナス (0.10 -> 0.06)
 RSI_MOMENTUM_LOW = 45               # RSIが45以下でロングモメンタム候補
-RSI_MOMENTUM_BONUS_MAX = 0.15       # ★新要因: RSIの強さに応じた可変ボーナスの最大値
-OBV_MOMENTUM_BONUS = 0.08           # OBVの確証ボーナスを強化 (0.04 -> 0.08)
-VOLUME_INCREASE_BONUS = 0.10        # ★新要因: 出来高スパイク時のボーナス
-LIQUIDITY_BONUS_MAX = 0.10          # 流動性(板の厚み)による最大ボーナスを強化 (0.06 -> 0.10)
+RSI_MOMENTUM_BONUS_MAX = 0.12       # RSIの強さに応じた可変ボーナスの最大値 (0.15 -> 0.12)
+OBV_MOMENTUM_BONUS = 0.05           # OBVの確証ボーナス (0.08 -> 0.05)
+VOLUME_INCREASE_BONUS = 0.05        # 出来高スパイク時のボーナス (0.10 -> 0.05)
+LIQUIDITY_BONUS_MAX = 0.05          # 流動性(板の厚み)による最大ボーナス (0.10 -> 0.05)
 FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ (変更なし)
 
-# 市場環境に応じた動的閾値調整のための定数 (変更なし)
+# 市場環境に応じた動的閾値調整のための定数 (最大スコア1.00に合わせて調整)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.9999       
-SIGNAL_THRESHOLD_NORMAL = 0.95      
-SIGNAL_THRESHOLD_ACTIVE = 0.90      
+SIGNAL_THRESHOLD_SLUMP = 0.95       # 0.9999 -> 0.95 (最大スコアに近い水準)
+SIGNAL_THRESHOLD_NORMAL = 0.90      # 0.95 -> 0.90 (通常の強いシグナル水準)
+SIGNAL_THRESHOLD_ACTIVE = 0.80      # 0.90 -> 0.80 (活発な市場での取引可能水準)
 
 # ====================================================================================
 # UTILITIES & FORMATTING 
@@ -187,8 +190,11 @@ def format_price_precision(price: float) -> str:
 
 def get_estimated_win_rate(score: float) -> str:
     """スコアに基づいて推定勝率を返す"""
-    if score >= 0.90:
-        return "90%+"
+    # 最大スコア1.00 (100点) に合わせた調整
+    if score >= 0.95:
+        return "95%+"
+    elif score >= 0.90:
+        return "90-95%"
     elif score >= 0.85:
         return "85-90%"
     elif score >= 0.80:
@@ -474,7 +480,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)</i>")
+    message += (f"<i>Bot Ver: v19.0.34 - High Dispersion Scoring & Dynamic Lot Sizing (Max Score 1.0 Patch)</i>")
     return message
 
 
@@ -834,7 +840,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         if current_price > df['SMA200'].iloc[-1] * 1.05: # 5%以上乖離
             long_term_reversal_penalty_value = LONG_TERM_REVERSAL_PENALTY 
             
-        # NEW FACTOR 1: Mid-Term Trend Alignment Bonus (SMA50 > SMA200)
+        # Mid-Term Trend Alignment Bonus (SMA50 > SMA200)
         trend_alignment_bonus_value = 0.0
         if df['SMA50'].iloc[-1] > df['SMA200'].iloc[-1]:
             trend_alignment_bonus_value = TREND_ALIGNMENT_BONUS
@@ -849,11 +855,11 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         if df['MACD'].iloc[-1] < df['MACD_S'].iloc[-1]:
             macd_penalty_value = MACD_CROSS_PENALTY
 
-        # NEW FACTOR 2: RSI Magnitude Bonus (RSI 50-70 の範囲で線形加点)
+        # RSI Magnitude Bonus (RSI 50-70 の範囲で線形加点)
         rsi = df['RSI'].iloc[-1]
         rsi_momentum_bonus_value = 0.0
         if rsi >= 50 and rsi < 70:
-            # 50で0点、70でRSI_MOMENTUM_BONUS_MAX (0.15)
+            # 50で0点、70でRSI_MOMENTUM_BONUS_MAX (0.12)
             rsi_momentum_bonus_value = RSI_MOMENTUM_BONUS_MAX * ((rsi - 50.0) / 20.0)
         # RSIが低すぎる場合はペナルティを考慮しない (ベーススコアに含まれていると見なす)
 
@@ -862,7 +868,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         if df['OBV'].iloc[-1] > df['OBV_SMA'].iloc[-1] and df['OBV'].iloc[-2] <= df['OBV_SMA'].iloc[-2]:
              obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
              
-        # NEW FACTOR 3: Volume Spike Bonus
+        # Volume Spike Bonus
         volume_increase_bonus_value = 0.0
         if 'Volume_SMA20' in df.columns and df['Volume_SMA20'].iloc[-1] > 0 and df['volume'].iloc[-1] > df['Volume_SMA20'].iloc[-1] * 1.5: # 出来高が平均の1.5倍
             volume_increase_bonus_value = VOLUME_INCREASE_BONUS
@@ -1154,6 +1160,7 @@ async def position_management_loop_async():
 async def main_bot_loop():
     """ボットのメイン実行ループ (1分ごと)"""
     global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_WEBSHARE_UPLOAD_TIME, IS_FIRST_MAIN_LOOP_COMPLETED
+    global MIN_BALANCE_FOR_TRADE # 新たに追加した定数を参照するために必要
     
     start_time = time.time()
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -1212,6 +1219,11 @@ async def main_bot_loop():
         # 最終チェック (閾値を再度超えているか確認)
         if signal['score'] < current_threshold:
             continue
+            
+        # 【V19.0.33対応】残高チェック: 最小残高未満の場合はポジション取得をスキップ
+        if account_status.get('total_usdt_balance', 0.0) < MIN_BALANCE_FOR_TRADE:
+             logging.warning(f"⚠️ {signal['symbol']}: USDT残高 ({account_status.get('total_usdt_balance', 0.0):.2f}) が {MIN_BALANCE_FOR_TRADE:.2f} USDT未満のため、取引をスキップします。")
+             continue
         
         # 取引実行 (TEST_MODEでなければ実際に注文)
         trade_result = await execute_trade(signal, account_status)
@@ -1249,7 +1261,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold,
-            "v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)"
+            "v19.0.34 - High Dispersion Scoring & Dynamic Lot Sizing (Max Score 1.0 Patch)"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1262,7 +1274,7 @@ async def main_bot_loop():
             'positions': _to_json_compatible(OPEN_POSITIONS),
             'equity': GLOBAL_TOTAL_EQUITY,
             'fgi_raw': GLOBAL_MACRO_CONTEXT['fgi_raw_value'],
-            'bot_version': "v19.0.32"
+            'bot_version': "v19.0.34"
         })
 
     end_time = time.time()
@@ -1274,7 +1286,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.32")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.34")
 
 @app.get("/")
 async def root():
@@ -1286,7 +1298,7 @@ async def root():
         "current_positions": len(OPEN_POSITIONS),
         "last_loop_success": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y/%m/%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
         "total_equity_usdt": f"{GLOBAL_TOTAL_EQUITY:.2f}",
-        "bot_version": "v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)"
+        "bot_version": "v19.0.34 - High Dispersion Scoring & Dynamic Lot Sizing (Max Score 1.0 Patch)"
     })
 
 @app.post("/webhook")
