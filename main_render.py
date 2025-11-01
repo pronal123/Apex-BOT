@@ -1,12 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.37 - Limit Entry Dip Strategy & Pending Order Management (SL/TP Post-Fill)
+# Apex BOT v19.0.38 - Limit Entry Dip Strategy & Pending Order Management (Notification Refinement)
 #
 # 改良・修正点:
-# 1. 【エントリー戦略変更】成行注文(market)から指値注文(limit)に切り替え。
-# 2. 【指値ディスカウント導入】LIMIT_DISCOUNT_PERCENT (デフォルト0.3%) 分、現在価格より低い価格で指値を発注。
-# 3. 【SL/TP発注ロジック変更】指値注文の発注時はSL/TPを設定せず、約定完了を待ってから発注するよう変更（_place_sl_tp_orders関数）。
-# 4. 【注文監視機能追加】PENDING_ENTRY_ORDERSリストとmanage_pending_orders_async関数で、待機中の指値注文を監視。
-# 5. 【バージョン更新】v19.0.37に更新。
+# 1. 【通知改善】format_telegram_message関数で、現在市場価格と指値エントリー価格を明確に分けて表示するように修正。
+# 2. 【冗長性排除】取引実行詳細(trade_section)から価格情報を削除し、メインメッセージに統一。
+# 3. 【バージョン更新】v19.0.38に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -164,12 +162,12 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.92       
-SIGNAL_THRESHOLD_NORMAL = 0.90      
-SIGNAL_THRESHOLD_ACTIVE = 0.88      
+SIGNAL_THRESHOLD_SLUMP = 0.94       
+SIGNAL_THRESHOLD_NORMAL = 0.92      
+SIGNAL_THRESHOLD_ACTIVE = 0.90      
 
 # ====================================================================================
-# UTILITIES & FORMATTING 
+# UTILITIES & FORMATTING
 # ====================================================================================
 
 def format_usdt(amount: float) -> str:
@@ -329,7 +327,7 @@ def format_startup_message(
         f"  - **取引ロット (BASE)**: <code>{BASE_TRADE_SIZE_USDT:.2f}</code> USDT\n" 
         f"  - **監視銘柄数**: <code>{monitoring_count}</code>\n"
         # 【変更】バージョン更新
-        f"  - **BOTバージョン**: <code>v19.0.37 - Limit Entry Dip Strategy & Pending Order Management (SL/TP Post-Fill)</code>\n"
+        f"  - **BOTバージョン**: <code>v19.0.38 - Notification Refinement</code>\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n\n"
     )
 
@@ -361,7 +359,8 @@ def format_startup_message(
              
         # 【新規追加】待機中のエントリー注文
         if PENDING_ENTRY_ORDERS:
-            balance_section += f"  - **待機中の指値注文**: <code>{len(PENDING_ENTRY_ORDERS)}</code> 銘柄 (有効期限: {LIMIT_ORDER_TIMEOUT_MIN}分)\n"
+            pending_total = sum(o['usdt_cost'] for o in PENDING_ENTRY_ORDERS)
+            balance_section += f"  - **待機中の指値注文**: <code>{len(PENDING_ENTRY_ORDERS)}</code> 銘柄 (投入予定: <code>{format_usdt(pending_total)}</code> USDT)\n"
             
         # CCXTから取得したがボットが管理していないポジション（現物保有資産）
         open_ccxt_positions = [p for p in account_status['open_positions'] if p['usdt_value'] >= 10]
@@ -399,8 +398,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     timeframe = signal['timeframe']
     score = signal['score']
     
-    # trade_resultから値を取得する場合があるため、get()を使用
-    # 指値注文の場合は signal から limit_price を取得
+    # 指値注文の場合は signal から limit_price (指値価格)を取得。約定済みの場合は実際の約定価格を取得。
     entry_price = signal.get('limit_price', trade_result.get('price', 0.0) if trade_result and trade_result.get('status') == 'ok' else signal.get('entry_price', 0.0))
     current_market_price = signal.get('current_market_price', 0.0) 
     stop_loss = signal.get('stop_loss', trade_result.get('stop_loss', 0.0) if trade_result else 0.0)
@@ -441,8 +439,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
                 f"💰 **注文実行詳細**\n"
                 f"  - **注文タイプ**: <code>現物 (Spot) / 指値買い (Limit)</code>\n"
                 f"  - **動的ロット**: {lot_info} (目標)\n" 
-                f"  - **現在市場価格**: <code>{format_price_precision(current_market_price)}</code>\n" # ★追加
-                f"  - **指値エントリー価格**: <code>{format_price_precision(entry_price)}</code>\n"
+                # 【変更】価格情報はメインメッセージに移動
                 f"  - **SL/TP**: **注文約定後に自動で発注されます**。\n"
             )
             
@@ -462,7 +459,6 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         trade_section = (
             f"💰 **取引実行結果**\n"
             f"  - **注文タイプ**: <code>指値買い (Limit)</code>\n"
-            f"  - **平均約定価格**: <code>{format_price_precision(entry_price)}</code>\n" # 実際の約定価格
             f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
             f"  - **約定額**: <code>{format_usdt(filled_usdt)}</code> USDT\n"
             f"\n"
@@ -490,14 +486,52 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         
         trade_section = (
             f"💰 **決済実行結果** - {pnl_sign}\n"
-            # 決済価格も高精度表示
-            f"  - **エントリー価格**: <code>{format_price_precision(entry_price)}</code>\n"
-            f"  - **決済価格**: <code>{format_price_precision(exit_price)}</code>\n"
             f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
             f"  - **損益**: <code>{'+' if pnl_usdt >= 0 else ''}{format_usdt(pnl_usdt)}</code> USDT ({pnl_rate*100:.2f}%)\n"
         )
             
     
+    # ----------------------------------------------------
+    # 新しい価格表示ロジック (ユーザー要求に対応)
+    # ----------------------------------------------------
+    price_lines = []
+    
+    # エントリー価格/約定価格/決済価格を定義
+    entry_price_for_display = entry_price # リスク幅計算にも使用
+    
+    if context == "取引シグナル":
+        # ユーザー要求: 現在価格と指値価格を明記
+        price_lines.append(f"  - **現在市場価格**: <code>{format_price_precision(current_market_price)}</code>")
+        price_lines.append(f"  - **指値エントリー**: <code>{format_price_precision(entry_price_for_display)}</code>")
+        price_lines.append(f"  - **ストップロス (SL)**: <code>{format_price_precision(stop_loss)}</code>")
+        price_lines.append(f"  - **テイクプロフィット (TP)**: <code>{format_price_precision(take_profit)}</code>")
+        # リスク・リワード幅は指値価格を基準に計算
+        risk_usdt = abs(entry_price_for_display - stop_loss)
+        reward_usdt = abs(take_profit - entry_price_for_display)
+        price_lines.append(f"  - **リスク幅 (SL)**: <code>{format_usdt(risk_usdt)}</code> USDT")
+        price_lines.append(f"  - **リワード幅 (TP)**: <code>{format_usdt(reward_usdt)}</code> USDT")
+
+    elif context == "取引約定 (指値)":
+        # 約定通知: 約定価格とSL/TP
+        price_lines.append(f"  - **平均約定価格**: <code>{format_price_precision(entry_price_for_display)}</code>")
+        price_lines.append(f"  - **ストップロス (SL)**: <code>{format_price_precision(stop_loss)}</code>")
+        price_lines.append(f"  - **テイクプロフィット (TP)**: <code>{format_price_precision(take_profit)}</code>")
+        # リスク・リワード幅は約定価格を基準に計算
+        risk_usdt = abs(entry_price_for_display - stop_loss)
+        reward_usdt = abs(take_profit - entry_price_for_display)
+        price_lines.append(f"  - **リスク幅 (SL)**: <code>{format_usdt(risk_usdt)}</code> USDT")
+        price_lines.append(f"  - **リワード幅 (TP)**: <code>{format_usdt(reward_usdt)}</code> USDT")
+
+    elif context == "ポジション決済":
+        # 決済通知: エントリー価格と決済価格
+        exit_price = trade_result.get('exit_price', 0.0)
+        price_lines.append(f"  - **エントリー価格**: <code>{format_price_precision(entry_price_for_display)}</code>")
+        price_lines.append(f"  - **決済価格**: <code>{format_price_precision(exit_price)}</code>")
+        
+    price_lines_str = '\n'.join(price_lines)
+    # ----------------------------------------------------
+
+
     message = (
         f"🚀 **Apex TRADE {context}**\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
@@ -508,13 +542,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **取引閾値**: <code>{current_threshold * 100:.2f}</code> 点\n"
         f"  - **推定勝率**: <code>{estimated_wr}</code>\n"
         f"  - **リスクリワード比率 (RRR)**: <code>1:{rr_ratio:.2f}</code>\n"
-        # ★ここから価格表示をformat_price_precisionに変更
-        f"  - **エントリー**: <code>{format_price_precision(entry_price)}</code>\n"
-        f"  - **ストップロス (SL)**: <code>{format_price_precision(stop_loss)}</code>\n"
-        f"  - **テイクプロフィット (TP)**: <code>{format_price_precision(take_profit)}</code>\n"
-        # リスク・リワード幅（金額）はformat_usdtを維持
-        f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price - stop_loss)}</code> USDT\n"
-        f"  - **リワード幅 (TP)**: <code>{format_usdt(take_profit - entry_price)}</code> USDT\n"
+        f"{price_lines_str}\n" # ★ 新しい価格表示を挿入
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
     )
     
@@ -529,7 +557,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         )
         
     # 【変更】バージョン更新
-    message += (f"<i>Bot Ver: v19.0.37 - Limit Entry Dip Strategy & Pending Order Management (SL/TP Post-Fill)</i>")
+    message += (f"<i>Bot Ver: v19.0.38 - Notification Refinement</i>")
     return message
 
 
@@ -1303,9 +1331,16 @@ async def manage_pending_orders_async():
                     'tp_order_id': new_position['tp_order_id'],
                     'sl_error': sl_error,
                     'tp_error': tp_error,
+                    'stop_loss': signal['stop_loss'], # SL/TPを表示するためにシグナルから情報を引き継ぐ
+                    'take_profit': signal['take_profit'],
+                    'rr_ratio': signal['rr_ratio'],
                 }
+                # 【修正】約定通知ではシグナルの持つ現在市場価格は無関係なので、0.0を渡す
+                signal_for_notification = signal.copy()
+                signal_for_notification['current_market_price'] = 0.0 
+                
                 notification_message = format_telegram_message(
-                    signal, 
+                    signal_for_notification, 
                     "取引約定 (指値)", 
                     get_current_threshold(GLOBAL_MACRO_CONTEXT), 
                     trade_result
@@ -1440,7 +1475,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold,
-            "v19.0.37 - Limit Entry Dip Strategy & Pending Order Management (SL/TP Post-Fill)"
+            "v19.0.38 - Notification Refinement"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1454,7 +1489,7 @@ async def main_bot_loop():
             'pending_orders': _to_json_compatible(PENDING_ENTRY_ORDERS), # ★待機中の注文を追加
             'equity': GLOBAL_TOTAL_EQUITY,
             'fgi_raw': GLOBAL_MACRO_CONTEXT['fgi_raw_value'],
-            'bot_version': "v19.0.37"
+            'bot_version': "v19.0.38"
         })
 
     end_time = time.time()
@@ -1466,7 +1501,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.37")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.38")
 
 @app.get("/")
 async def root():
@@ -1480,7 +1515,7 @@ async def root():
         "last_loop_success": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y/%m/%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
         "total_equity_usdt": f"{GLOBAL_TOTAL_EQUITY:.2f}",
         # 【変更】バージョン更新
-        "bot_version": "v19.0.37 - Limit Entry Dip Strategy & Pending Order Management (SL/TP Post-Fill)"
+        "bot_version": "v19.0.38 - Notification Refinement"
     })
 
 @app.post("/webhook")
