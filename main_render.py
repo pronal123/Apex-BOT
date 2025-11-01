@@ -1,10 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)
+# Apex BOT v19.0.33 - 100点満点スコアリング調整
 #
 # 改良・修正点:
-# 1. 【価格表示】価格情報（Entry, SL, TP）を小数第4位まで表示するように修正。
-# 2. 【ロジック維持】v19.0.31で導入された高分散スコアリングロジックは維持。
-# 3. 【★新規】1時間ごとの分析スコアレポート通知機能を追加。
+# 1. 【スコアリング】理論上の最高得点が1.00 (100点) となるようにBASE_SCOREを調整しました (0.50 -> 0.27)。
+# 2. 【ロジック維持】v19.0.32で追加された1時間通知機能および全ロジックは維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -91,7 +90,10 @@ if BASE_TRADE_SIZE_USDT < 10:
 # 【動的ロット設定】
 DYNAMIC_LOT_MIN_PERCENT = 0.10 # 最小ロット (総資産の 10%)
 DYNAMIC_LOT_MAX_PERCENT = 0.20 # 最大ロット (総資産の 20%)
-DYNAMIC_LOT_SCORE_MAX = 0.9999   # このスコアで最大ロットが適用される (99.99点)
+
+# 💡 新規取引制限設定 【★V19.0.33で追加】
+MIN_USDT_BALANCE_FOR_TRADE = 20.0 # 新規取引に必要な最小USDT残高 (20.0 USDT)
+DYNAMIC_LOT_SCORE_MAX = 0.96   # このスコアで最大ロットが適用される (96点)
 
 
 # 💡 WEBSHARE設定 (HTTP POSTへ変更)
@@ -126,28 +128,29 @@ TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
 REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを含む
 
 # ====================================================================================
-# 【★スコアリング定数変更 V19.0.31: 高分散スコアリング】
+# 【★スコアリング定数変更 V19.0.33: 100点満点調整】
 # ====================================================================================
 TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
 
 # スコアリングウェイト
-BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点に引き上げ)
+# 💡 100点満点 (理論値1.00) に調整するため、BASE_SCOREを 0.50 から 0.27 に変更
+BASE_SCORE = 0.27                   # ベースとなる取引基準点
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
 
 # ペナルティ（マイナス要因）
-LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティを強化 (0.20 -> 0.30)
-MACD_CROSS_PENALTY = 0.25           # MACDが不利なクロス/発散時のペナルティを強化 (0.15 -> 0.25)
+LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティを強化
+MACD_CROSS_PENALTY = 0.25           # MACDが不利なクロス/発散時のペナルティを強化
 VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 # BB幅が1%未満
 
 # ボーナス（プラス要因）
-TREND_ALIGNMENT_BONUS = 0.15        # ★新要因: SMA50 > SMA200 時のボーナス
-STRUCTURAL_PIVOT_BONUS = 0.10       # 価格構造/ピボット支持時のボーナスを強化 (0.05 -> 0.10)
-RSI_MOMENTUM_LOW = 45               # RSIが45以下でロングモメンタム候補
-RSI_MOMENTUM_BONUS_MAX = 0.15       # ★新要因: RSIの強さに応じた可変ボーナスの最大値
-OBV_MOMENTUM_BONUS = 0.08           # OBVの確証ボーナスを強化 (0.04 -> 0.08)
-VOLUME_INCREASE_BONUS = 0.10        # ★新要因: 出来高スパイク時のボーナス
-LIQUIDITY_BONUS_MAX = 0.10          # 流動性(板の厚み)による最大ボーナスを強化 (0.06 -> 0.10)
-FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ (変更なし)
+TREND_ALIGNMENT_BONUS = 0.15        # SMA50 > SMA200 時のボーナス
+STRUCTURAL_PIVOT_BONUS = 0.10       # 価格構造/ピボット支持時のボーナスを強化
+RSI_MOMENTUM_LOW = 45               # RSIが45以下でロングモメンタム候補 (未使用だが残す)
+RSI_MOMENTUM_BONUS_MAX = 0.15       # RSIの強さに応じた可変ボーナスの最大値
+OBV_MOMENTUM_BONUS = 0.08           # OBVの確証ボーナスを強化
+VOLUME_INCREASE_BONUS = 0.10        # 出来高スパイク時のボーナス
+LIQUIDITY_BONUS_MAX = 0.10          # 流動性(板の厚み)による最大ボーナスを強化
+FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ
 
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
@@ -189,13 +192,16 @@ def format_price_precision(price: float) -> str:
 
 def get_estimated_win_rate(score: float) -> str:
     """スコアに基づいて推定勝率を返す"""
-    if score >= 0.90:
-        return "90%+"
-    elif score >= 0.85:
+    # 100点満点に調整されたため、スコア判定基準も微調整
+    if score >= 0.98:
+        return "95%+"
+    elif score >= 0.95:
+        return "90-95%"
+    elif score >= 0.90:
         return "85-90%"
-    elif score >= 0.80:
+    elif score >= 0.85:
         return "80-85%"
-    elif score >= 0.75:
+    elif score >= 0.80:
         return "75-80%"
     else:
         return "70-75%"
@@ -218,7 +224,7 @@ def get_score_breakdown(signal: Dict) -> str:
     
     breakdown = []
     
-    # ベーススコア
+    # ベーススコア (BASE_SCORE = 0.27)
     base_score_line = f"  - **ベーススコア ({signal['timeframe']})**: <code>+{BASE_SCORE*100:.1f}</code> 点"
     breakdown.append(base_score_line)
     
@@ -476,7 +482,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)</i>")
+    message += (f"<i>Bot Ver: v19.0.33 - 100点満点スコアリング調整</i>")
     return message
 
 # --- ★新規追加: 1時間分析レポート関連の関数 ---
@@ -535,7 +541,7 @@ def format_hourly_analysis_message(
 
     footer = (
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.32 - Hourly Analysis Report</i>"
+        f"<i>Bot Ver: v19.0.33 - 100点満点スコアリング調整</i>"
     )
 
     return header + best_section + worst_section + footer
@@ -919,7 +925,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     if current_price > df['SMA200'].iloc[-1]:
         
         # --- スコアリングの初期化 ---
-        score = BASE_SCORE # 0.50
+        score = BASE_SCORE # 0.27 (100点満点調整済み)
         
         # --- テクニカルデータ計算 ---
         fgi_proxy = macro_context.get('fgi_proxy', 0.0)
@@ -1016,7 +1022,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         
         # RRRの決定 (スコアが高いほどRRRを改善)
         BASE_RRR = 1.5  
-        MAX_SCORE_FOR_RRR = 0.85 # このスコアでRRRの最大値に達する
+        MAX_SCORE_FOR_RRR = 0.95 # このスコアでRRRの最大値に達する (1.00満点に近くなるよう調整)
         MAX_RRR = 3.0
         
         current_threshold_base = get_current_threshold(macro_context)
@@ -1346,7 +1352,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold,
-            "v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)"
+            "v19.0.33 - 100点満点スコアリング調整"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1359,7 +1365,7 @@ async def main_bot_loop():
             'positions': _to_json_compatible(OPEN_POSITIONS),
             'equity': GLOBAL_TOTAL_EQUITY,
             'fgi_raw': GLOBAL_MACRO_CONTEXT['fgi_raw_value'],
-            'bot_version': "v19.0.32"
+            'bot_version': "v19.0.33"
         })
 
     # 8. 1時間分析専用通知の送信 ★新規追加
@@ -1376,7 +1382,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.32")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.33")
 
 @app.get("/")
 async def root():
@@ -1388,7 +1394,7 @@ async def root():
         "current_positions": len(OPEN_POSITIONS),
         "last_loop_success": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y/%m/%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
         "total_equity_usdt": f"{GLOBAL_TOTAL_EQUITY:.2f}",
-        "bot_version": "v19.0.32 - High Dispersion Scoring & Dynamic Lot Sizing (Precision Patch)"
+        "bot_version": "v19.0.33 - 100点満点スコアリング調整"
     })
 
 @app.post("/webhook")
