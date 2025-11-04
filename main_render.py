@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.39 - FULL COMPLIANCE (NaN/None Check Fix)
+# Apex BOT v19.0.40 - FULL COMPLIANCE (Rate Limit Fix)
 #
-# 改良・修正点 (v19.0.38からの追加点):
-# 1. 【バグ修正】score_technical_indicators関数内の np.isnan() の TypeError を修正。
-#    - last_1h.get() が None を返した場合の処理を安全な順番 (Noneチェック -> np.isnan) に変更。(BBands/ATR)
-# 2. 【内部更新】BOTバージョンを v19.0.39 に更新。
+# 改良・修正点 (v19.0.39からの追加点):
+# 1. 【重大修正】レートリミット超過 (429 Too Many Requests) エラー対策。
+#    - process_symbol関数内に、各銘柄の処理開始時にランダムな短い遅延 (0.1秒〜0.5秒) を導入。
+# 2. 【ロギング改善】fetch_ohlcv_safe関数内で、429エラーが発生した場合のログメッセージを明確化。
+# 3. 【内部更新】BOTバージョンを v19.0.40 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -505,7 +506,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.39 - Practical Score Logic</i>")
+    message += (f"<i>Bot Ver: v19.0.40 - Rate Limit Fix</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -554,7 +555,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.39 - Practical Score Logic</i>"
+        f"<i>Bot Ver: v19.0.40 - Rate Limit Fix</i>"
     )
     
     return message
@@ -799,13 +800,17 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
     except ccxt.ExchangeNotAvailable as e:
         logging.error(f"❌ OHLCV取得失敗 ({symbol} - {timeframe}): 取引所が利用できません。{e}")
     except ccxt.ExchangeError as e: 
-        logging.error(f"❌ OHLCV取得失敗 ({symbol} - {timeframe}): 取引所エラー。{e}")
+        error_msg = str(e)
+        if "Too Many Requests" in error_msg or "429" in error_msg:
+            logging.error(f"❌ OHLCV取得失敗 ({symbol} - {timeframe}): レートリミット超過。APIコール頻度を下げてください。{e}")
+        else:
+            logging.error(f"❌ OHLCV取得失敗 ({symbol} - {timeframe}): 取引所エラー。{e}")
     except Exception as e:
         logging.error(f"❌ OHLCV取得中に予期せぬエラー ({symbol} - {timeframe}): {e}")
         return None
 
 # ====================================================================================
-# CORE LOGIC (実践ロジック V19.0.39)
+# CORE LOGIC (実践ロジック V19.0.40)
 # ====================================================================================
 
 async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame]) -> Optional[Dict]:
@@ -865,10 +870,10 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     # A. 長期トレンド逆行/一致 (SMA200に基づく)
     lt_reversal_penalty_value = 0.0
     # SMA200カラムが存在し、値がNaNでないことを前提とする
-    if not np.isnan(last_1h[SMA_200]) and current_price < last_1h[SMA_200]:
+    if not np.isnan(last_1h.get(SMA_200)) and current_price < last_1h.get(SMA_200):
         # 長期トレンド逆行（ロング取引の場合ペナルティ）
         # 価格とSMA200の乖離率を計算
-        deviation_ratio = (last_1h[SMA_200] - current_price) / current_price
+        deviation_ratio = (last_1h.get(SMA_200) - current_price) / current_price
         # 乖離が大きくなるほどペナルティを最大まで増加
         lt_reversal_penalty_value = -min(LONG_TERM_REVERSAL_PENALTY_MAX, deviation_ratio * 10) # 10倍は調整係数
     
@@ -877,7 +882,7 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     
     # B. 中期/長期トレンドアライメント (SMA50 > SMA200)
     trend_alignment_bonus_value = 0.0
-    if not np.isnan(last_1h[SMA_50]) and not np.isnan(last_1h[SMA_200]) and last_1h[SMA_50] > last_1h[SMA_200]:
+    if not np.isnan(last_1h.get(SMA_50)) and not np.isnan(last_1h.get(SMA_200)) and last_1h.get(SMA_50) > last_1h.get(SMA_200):
         # 中期トレンドも順行
         trend_alignment_bonus_value = TREND_ALIGNMENT_BONUS_MAX
         
@@ -888,23 +893,25 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     macd_penalty_value = 0.0
     macd_momentum_bonus = 0.0
     
-    if MACD_LINE in last_1h and MACD_SIGNAL in last_1h and not np.isnan(last_1h[MACD_LINE]) and not np.isnan(last_1h[MACD_SIGNAL]):
-        macd_line = last_1h[MACD_LINE]
-        macd_signal = last_1h[MACD_SIGNAL] # シグナルライン
-        macd_hist = last_1h.get(MACD_HISTOGRAM, 0.0) # MACDヒストグラム (安全に取得)
+    # Noneチェックを先に実行
+    if last_1h.get(MACD_LINE) is not None and last_1h.get(MACD_SIGNAL) is not None:
+        if not np.isnan(last_1h[MACD_LINE]) and not np.isnan(last_1h[MACD_SIGNAL]):
+            macd_line = last_1h[MACD_LINE]
+            macd_signal = last_1h[MACD_SIGNAL] # シグナルライン
+            macd_hist = last_1h.get(MACD_HISTOGRAM, 0.0) # MACDヒストグラム (安全に取得)
 
-        if macd_line > macd_signal and macd_hist > 0 and macd_line > 0:
-            # MACDゴールデンクロス、ヒストグラムがゼロライン上で拡大 (強い順行モメンタム)
-            macd_momentum_bonus = 0.15 
-        elif macd_line > macd_signal and macd_hist > 0 and macd_line < 0:
-            # ゼロライン下からのゴールデンクロス (リバーサル候補)
-            macd_momentum_bonus = 0.05
-        
-        # MACDペナルティ
-        if macd_line < macd_signal and macd_hist < 0 and current_price > last_1h[SMA_200]:
-            # デッドクロス、かつヒストグラムがマイナス域 (ロングに不利)
-            macd_penalty_value = -MACD_CROSS_PENALTY
-            macd_momentum_bonus = 0.0 # ペナルティがある場合、ボーナスはなし
+            if macd_line > macd_signal and macd_hist > 0 and macd_line > 0:
+                # MACDゴールデンクロス、ヒストグラムがゼロライン上で拡大 (強い順行モメンタム)
+                macd_momentum_bonus = 0.15 
+            elif macd_line > macd_signal and macd_hist > 0 and macd_line < 0:
+                # ゼロライン下からのゴールデンクロス (リバーサル候補)
+                macd_momentum_bonus = 0.05
+            
+            # MACDペナルティ
+            if macd_line < macd_signal and macd_hist < 0 and current_price > last_1h.get(SMA_200, 0.0):
+                # デッドクロス、かつヒストグラムがマイナス域 (ロングに不利)
+                macd_penalty_value = -MACD_CROSS_PENALTY
+                macd_momentum_bonus = 0.0 # ペナルティがある場合、ボーナスはなし
         
     total_score += macd_momentum_bonus
     total_score += macd_penalty_value
@@ -912,19 +919,20 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     tech_data['macd_penalty_value'] = macd_penalty_value
     
     # D. RSIモメンタム (1H足)
-    rsi_value = last_1h.get(RSI_14, 50.0) # RSIが計算できない場合は中立値50.0
+    rsi_value = last_1h.get(RSI_14)
     rsi_momentum_bonus_value = 0.0
     
     # RSIがfloatであり、nanでないことを確認
-    if isinstance(rsi_value, (float, np.floating)) and not np.isnan(rsi_value):
+    if rsi_value is not None and isinstance(rsi_value, (float, np.floating)) and not np.isnan(rsi_value):
         if rsi_value < 55 and rsi_value > 30:
             # RSIが売られすぎ水準 (30-45) から55に向けて上昇している場合をボーナス化
             # 45に近いほど (反発が強いほど) ボーナスを大きくする
             ratio = (55 - rsi_value) / (55 - 30) # 30->1.0, 55->0.0
             rsi_momentum_bonus_value = min(RSI_MOMENTUM_BONUS_MAX, ratio * RSI_MOMENTUM_BONUS_MAX)
+            tech_data['rsi_value'] = rsi_value # RSI値を記録 (通知用)
+    else:
+         tech_data['rsi_value'] = 50.0 # 計算失敗の場合は中立値
     
-    # RSI値も記録 (通知用)
-    tech_data['rsi_value'] = rsi_value
     total_score += rsi_momentum_bonus_value
     tech_data['rsi_momentum_bonus_value'] = rsi_momentum_bonus_value
     
@@ -935,7 +943,7 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     bb_upper = last_1h.get('BBU_20_2')
     bb_lower = last_1h.get('BBL_20_2')
     
-    # 【v19.0.39 修正】Noneではないことを確認してから、numpy.isnan()を呼び出す
+    # 【v19.0.39 修正適用済み】Noneではないことを確認してから、numpy.isnan()を呼び出す
     if bb_upper is not None and bb_lower is not None and \
        not np.isnan(bb_upper) and not np.isnan(bb_lower):
          
@@ -954,12 +962,14 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     volume_increase_bonus_value = 0.0
     
     # 出来高の急増を判定
-    avg_volume = df_1h['volume'].iloc[-10:-1].mean()
-    if last_1h['volume'] > avg_volume * 1.5:
-        # 直近の出来高が平均の1.5倍以上 (スパイク)
-        volume_increase_bonus_value = VOLUME_INCREASE_BONUS
-        # OBVも順行と仮定 (出来高スパイクがあればOBVも動いていると見なす)
-        obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
+    # データフレームが過去10本未満の場合は平均計算をスキップ
+    if len(df_1h) >= 10:
+        avg_volume = df_1h['volume'].iloc[-10:-1].mean()
+        if last_1h['volume'] > avg_volume * 1.5:
+            # 直近の出来高が平均の1.5倍以上 (スパイク)
+            volume_increase_bonus_value = VOLUME_INCREASE_BONUS
+            # OBVも順行と仮定 (出来高スパイクがあればOBVも動いていると見なす)
+            obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
 
     total_score += volume_increase_bonus_value
     total_score += obv_momentum_bonus_value
@@ -995,7 +1005,7 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     # 1分足の最新のATR値を取得 (last_1m.get()を使用)
     current_atr = last_1m.get(ATR_NAME)
     
-    # 【v19.0.39 修正】Noneを先にチェックし、Noneの場合は代替値を使用
+    # 【v19.0.39 修正適用済み】Noneを先にチェックし、Noneの場合は代替値を使用
     if current_atr is None or np.isnan(current_atr):
         # ATRが計算できなかった場合 (データ不足など)
         logging.warning(f"⚠️ {symbol}: 1分足のATR計算失敗。価格の0.5%をATRの代わりに使用します。")
@@ -1236,7 +1246,7 @@ async def main_bot_loop():
 
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        bot_version = "v19.0.39" # バージョンを更新
+        bot_version = "v19.0.40" # バージョンを更新
         startup_msg = format_startup_message(
             account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, bot_version
         )
@@ -1274,11 +1284,16 @@ async def main_bot_loop():
 
 async def process_symbol(symbol: str, current_threshold: float) -> Optional[Dict]:
     """個別の銘柄分析と取引実行を行う"""
+    # 【v19.0.40 修正: レートリミット対策】
+    # 各銘柄の処理開始時にランダムな短い遅延を挿入し、APIコールの集中を避ける
+    await asyncio.sleep(random.uniform(0.1, 0.5)) 
+    
     # 1. OHLCVデータの取得
     ohlcv_data: Dict[str, pd.DataFrame] = {}
     for tf, limit in REQUIRED_OHLCV_LIMITS.items():
         df = await fetch_ohlcv_safe(symbol, tf, limit)
         if df is None:
+            # 必要な時間足のデータが一つでも取得できなかった場合、その銘柄の処理をスキップ
             return None 
         ohlcv_data[tf] = df
         
@@ -1385,7 +1400,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
 # API ENDPOINTS & LIFECYCLE
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.39") 
+app = FastAPI(title="Apex BOT API", version="v19.0.40") 
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
