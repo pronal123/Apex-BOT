@@ -1,14 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.34 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
+# Apex BOT v19.0.35 - FULL COMPLIANCE (Stability & Bug Fixes)
 #
-# 改良・修正点 (v19.0.33からの追加点):
-# 1. 【通知機能追加】1時間以内に分析された銘柄の中から、最高スコアと最低スコアの銘柄を1時間ごとに通知する機能を追加 (要件追加1)。
-# 2. 【ロギング強化】ログデータ保存用の一時リストを追加。
-# 3. 【監視機能】BOTの非同期スケジューラが停止しないよう自動再起動機能は、FastAPIのasyncioタスクとロギングにより実質的に担保済み。
-#
-# 【本コードでの追加修正 (24/7稼働とエラー通知の強化)】
-# ① 24時間365日稼働: resilient_scheduler_wrapper 関数を追加し、スケジューラタスク全体のクラッシュを検知し自動再起動する。
-# ② 重大エラー通知: open_order_management_scheduler のエラーキャッチブロックに Telegram 通知を追加。
+# 改良・修正点 (v19.0.34からの追加点):
+# 1. 【バグ修正】score_technical_indicators内のPandas DataFrameの真偽値判定エラー (ValueError) を修正し、クラッシュを防止。
+# 2. 【非効率性修正】hourly_service_scheduler内のWebShareログアップロード警告が1秒ごとに発生する問題を修正し、ログの負荷を軽減。
+# 3. 【可用性強化】resilient_scheduler_wrapper（24/7稼働監視）のロジックは引き続き保持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -496,7 +492,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max</i>")
+    message += (f"<i>Bot Ver: v19.0.35 - Stability Fixes</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -545,7 +541,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max</i>"
+        f"<i>Bot Ver: v19.0.35 - Stability Fixes</i>"
     )
     
     return message
@@ -612,9 +608,8 @@ async def send_webshare_update(data: Dict):
     try:
         logging.info("WebShareデータをアップロードします (HTTP POST)。")
         
-        # 最終ログ時刻を更新
-        LAST_WEBSHARE_UPLOAD_TIME = time.time()
-        
+        # 最終ログ時刻の更新はscheduler側で行う (警告回避のため)
+
         response = requests.post(
             WEBSHARE_POST_URL,
             json=data,
@@ -805,8 +800,12 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
 async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame]) -> Optional[Dict]:
     """テクニカル指標を分析し、総合的な取引スコアを計算する (ダミー)"""
     # 実際には、data (OHLCV) を使用して複雑な分析を行う
-    if not data or not data.get('1m') or data['1m'].empty:
+    
+    # --- 💡 修正点 (DataFrameの真偽値判定エラーの修正) ---
+    df_1m = data.get('1m')
+    if not data or df_1m is None or df_1m.empty:
         return None
+    # ----------------------------------------------------
         
     # スコアをランダムに生成して、動的閾値による動作を確認できるようにする
     score = random.uniform(0.70, 0.98) 
@@ -988,13 +987,21 @@ async def hourly_service_scheduler():
     global LAST_WEBSHARE_UPLOAD_TIME, LAST_HOURLY_NOTIFICATION_TIME, HOURLY_SIGNAL_LOG
     
     while True:
-        await asyncio.sleep(1) # 無限ループを維持するための最小限の待機
+        # --- 💡 修正点 (過剰なWebShare警告の修正: 待機間隔を60秒に変更) ---
+        await asyncio.sleep(60) # 1分待機 (1秒ごとのチェックは非効率なため)
+        # ----------------------------------------------------------------
 
         try:
             current_time = time.time()
             
             # 1. WebShareログアップロード
             if current_time - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
+                
+                # --- 💡 修正点 (過剰なWebShare警告の修正: タイムスタンプを先に更新) ---
+                # タイムスタンプを即座に更新し、頻繁な呼び出しを防ぐ
+                LAST_WEBSHARE_UPLOAD_TIME = current_time 
+                # ----------------------------------------------------------------
+
                 webshare_data = {
                     'equity': GLOBAL_TOTAL_EQUITY,
                     'positions': OPEN_POSITIONS,
@@ -1030,7 +1037,7 @@ async def main_bot_loop():
 
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        bot_version = "v19.0.34" # コード冒頭のバージョンを使用
+        bot_version = "v19.0.35" # バージョンを更新
         startup_msg = format_startup_message(
             account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, bot_version
         )
@@ -1075,8 +1082,9 @@ async def process_symbol(symbol: str, current_threshold: float) -> Optional[Dict
     ohlcv_data: Dict[str, pd.DataFrame] = {}
     for tf, limit in REQUIRED_OHLCV_LIMITS.items():
         df = await fetch_ohlcv_safe(symbol, tf, limit)
+        # DataFrameがNoneの場合は、ここで処理を中断しても問題なし
         if df is None:
-            return None # データ不足
+            return None 
         ohlcv_data[tf] = df
         
     # 2. スコアリング
@@ -1131,9 +1139,8 @@ async def open_order_management_scheduler():
             await open_order_management_loop_async() # 関数名を変更
         except Exception as e:
             logging.critical(f"❌ オープン注文監視ループ実行中に致命的なエラー: {e}", exc_info=True)
-            # --- 💡 修正点 (② 重大エラー通知の強化) ---
+            # 重大エラー通知
             await send_telegram_notification(f"🚨 **致命的なエラー**\n注文監視ループでエラーが発生しました: `{e}`")
-            # --------------------
             # エラーが発生してもループを停止せず、次の間隔で再試行
 
         await asyncio.sleep(MONITOR_INTERVAL) # MONITOR_INTERVAL (10秒) ごとに実行
@@ -1141,7 +1148,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 # SCHEDULER MONITORING & RECOVERY (24/7 稼働対応)
 # ====================================================================================
-# --- 💡 修正点 (① 24時間365日稼働のための監視ラッパーの追加) ---
+# 24時間365日稼働のための監視ラッパー (前回の改良を維持)
 async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
     """
     非同期タスクを無限に監視・再起動するラッパー関数。
@@ -1169,7 +1176,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
             )
             logging.critical(error_message, exc_info=True)
             
-            # 重大エラー通知 (②の強化)
+            # 重大エラー通知
             await send_telegram_notification(error_message)
             
             # 30秒待機してから再起動 (外部サービスなどの復旧を待つため)
@@ -1181,7 +1188,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
 # API ENDPOINTS & LIFECYCLE
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.34")
+app = FastAPI(title="Apex BOT API", version="v19.0.35") # バージョンを更新
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
@@ -1194,11 +1201,9 @@ async def startup_event():
     await initialize_exchange_client()
 
     # メインのスケジューラタスクを、回復力のあるラッパー経由で開始 (24/7対応)
-    # --- 💡 修正点 (① 24時間365日稼働のためのラッパー適用) ---
     asyncio.create_task(resilient_scheduler_wrapper(main_bot_scheduler, "メイン分析スケジューラ"))
     asyncio.create_task(resilient_scheduler_wrapper(open_order_management_scheduler, "注文監視スケジューラ"))
     asyncio.create_task(resilient_scheduler_wrapper(hourly_service_scheduler, "時間ごと通知スケジューラ"))
-    # --------------------
     logging.info("✅ 全スケジューラタスクを開始しました。")
 
 
