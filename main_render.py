@@ -1,5 +1,5 @@
 # ====================================================================================
-# Apex BOT v19.0.34 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
+# Apex BOT v19.0.35 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
 #
 # 改良・修正点 (v19.0.33からの追加点):
 # 1. 【通知機能追加】1時間以内に分析された銘柄の中から、最高スコアと最低スコアの銘柄を1時間ごとに通知する機能を追加 (要件追加1)。
@@ -8,6 +8,7 @@
 #
 # 【v19.0.35での修正点】
 # 1. WebShare関連の機能、設定、ロジックをすべて削除しました。
+# 2. 初回起動通知時の `format_startup_message` の引数不足エラーを修正しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -489,7 +490,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max</i>")
+    message += (f"<i>Bot Ver: v19.0.35 - Limit Order & Exchange SL/TP, Score 100 Max</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -538,7 +539,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max</i>"
+        f"<i>Bot Ver: v19.0.35 - Limit Order & Exchange SL/TP, Score 100 Max</i>"
     )
     
     return message
@@ -1093,8 +1094,11 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
             'status': 'ok',
             'filled_amount': lot_size_usdt / signal['entry_price'],
             'filled_usdt': lot_size_usdt,
+            'entry_price': signal['entry_price'],
             'id': f"TEST-{uuid.uuid4()}",
             'price': signal['entry_price'],
+            'sl_order_id': 'TEST_SL',
+            'tp_order_id': 'TEST_TP',
             'message': 'Test mode: No real trade executed.'
         }
 
@@ -1244,19 +1248,15 @@ async def open_order_management_loop_async():
             
             # 2. SL注文だけがオープン注文リストにない場合: TPが約定した可能性が高い
             elif not sl_open and tp_open:
-                # SL注文が約定した可能性も考慮し、より慎重に判定すべきだが、今回はシンプルにTPと仮定
-                # (このロジックは取引所の実装に依存し、CCXTの挙動により変動する可能性がある)
-                # TPが残っている -> TPがオープンリストにある
-                 # 実際にはここでは決済完了とは見なさない。
-                 # 理由は、SLが約定した場合、取引所がTPを自動キャンセルすることを想定するため。
-                 pass
+                # TPがオープンリストにある -> SLが約定した場合はTPは自動キャンセルされる想定。TPが残っているのはおかしい。
+                # 現物取引所によってはSL/TPの自動キャンセルが行われない場合があるため、この場合は一旦監視続行。
+                pass
             
             # 3. TP注文だけがオープン注文リストにない場合: SLが約定した可能性が高い
             elif sl_open and not tp_open:
-                # SL注文が残っている -> SLがオープンリストにある
-                 # 実際にはここでは決済完了とは見なさない。
-                 # 理由は、TPが約定した場合、取引所がSLを自動キャンセルすることを想定するため。
-                 pass
+                # SLがオープンリストにある -> TPが約定した場合はSLは自動キャンセルされる想定。SLが残っているのはおかしい。
+                # 現物取引所によってはSL/TPの自動キャンセルが行われない場合があるため、この場合は一旦監視続行。
+                pass
 
             # 4. SL/TPが両方残っている場合: ポジションはオープン中
             # elif sl_open and tp_open:
@@ -1405,7 +1405,14 @@ async def main_bot_loop():
     # 6. 初回起動完了通知
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動完了通知を送信
-        startup_message = format_startup_message("v19.0.35")
+        # 【💡 修正済み】format_startup_message の引数不足エラーを修正
+        startup_message = format_startup_message(
+            account_status=account_status, 
+            macro_context=GLOBAL_MACRO_CONTEXT, 
+            monitoring_count=len(CURRENT_MONITOR_SYMBOLS), 
+            current_threshold=current_threshold, 
+            bot_version="v19.0.35"
+        )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
