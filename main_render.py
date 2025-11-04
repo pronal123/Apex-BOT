@@ -7,7 +7,7 @@
 # 3. CCXTクライアントの初期化時のタイムアウト値を20秒に延長し、RequestTimeoutエラーを解消しました。
 # 4. `send_telegram_notification` 関数を定義し、NameErrorを解消しました。
 # 5. 1時間ごとに分析された銘柄の最高・最低スコアを通知する機能を追加。
-# 6. 【今回の修正】`get_estimated_win_rate` 関数を修正し、スコアに応じて勝率が変動する元のロジックに復元しました。
+# 6. 【今回の修正】`get_estimated_win_rate` 関数を修正し、スコアに応じて勝率がより細かく変動するように**8段階**に調整しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -187,21 +187,28 @@ def format_price_precision(price: float) -> str:
         # 0.01 USDT未満は小数第6位 (精度維持)
         return f"{price:.6f}"
 
-# 💡 修正済み: スコアに基づいて推定勝率を返す関数 (元の可変ロジックに復元)
+# 💡 修正箇所: スコアに基づいて推定勝率を返す関数 (より細かく、幅広いばらつき)
 def get_estimated_win_rate(score: float) -> str:
-    """スコアに基づいて推定勝率を返す (最大100点に合わせた調整)"""
-    # 1.00が最高点。スコアが高いほど勝率が高くなるようにばらつきを設ける。
-    if score >= 0.95:
-        return "90%+"
+    """スコアに基づいて推定勝率を返す (8段階の細かいばらつき)"""
+    # 1.00が最高点。スコアが高いほど勝率が高くなるように8段階で調整
+    
+    if score >= 0.98:
+        return "93%+"
+    elif score >= 0.96:
+        return "90-93%"
+    elif score >= 0.94:
+        return "87-90%"
+    elif score >= 0.92:
+        return "84-87%"
     elif score >= 0.90:
-        return "85-90%"
+        return "81-84%"
     elif score >= 0.85:
-        return "80-85%"
+        return "75-81%"
     elif score >= 0.80:
-        return "75-80%"
+        return "68-75%"
     else:
-        # 閾値以下のスコアでもばらつきを持たせた最低値
-        return "70-75%"
+        # 0.80未満の低スコアの場合
+        return "60-68%"
 
 def get_current_threshold(macro_context: Dict) -> float:
     """FGI proxyに基づいて現在の取引閾値を動的に決定する"""
