@@ -9,6 +9,7 @@
 # 【v19.0.35での修正点】
 # 1. WebShare関連の機能、設定、ロジックをすべて削除しました。
 # 2. 初回起動通知時の `format_startup_message` の引数不足エラーを修正しました。
+# 3. 【今回の修正】CCXTクライアントのタイムアウト値を20秒に延長しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -544,30 +545,6 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     
     return message
 
-async def send_telegram_notification(message: str):
-    """Telegramに通知を送信する"""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.warning("⚠️ TelegramトークンまたはCHAT IDが設定されていません。通知をスキップします。")
-        return
-
-    # HTML形式で送信
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML'
-    }
-
-    try:
-        response = requests.post(url, data=payload, timeout=10)
-        response.raise_for_status()
-        if response.status_code == 200:
-            logging.info("✅ Telegram通知を送信しました。")
-        else:
-            logging.error(f"❌ Telegram通知失敗: ステータスコード {response.status_code}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Telegram通知中にエラーが発生: {e}")
-
 def _to_json_compatible(data: Any) -> Any:
     """JSONシリアライズ可能でない型 (numpy, pandas) を標準のPython型に変換するヘルパー関数"""
     if isinstance(data, (np.ndarray, list)):
@@ -621,7 +598,9 @@ async def initialize_exchange_client():
             'enableRateLimit': True, # レートリミットを有効化 (必須)
             'options': {
                 'defaultType': 'spot', # 現物取引モード
-            }
+            },
+            # 💡 【今回の修正点】APIリクエストのタイムアウトを延長 (ミリ秒で指定: 20000ms = 20秒)
+            'timeout': 20000, 
         }
         EXCHANGE_CLIENT = exchange_class(config)
         
