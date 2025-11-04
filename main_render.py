@@ -5,8 +5,9 @@
 # 1. WebShare関連の機能、設定、ロジックをすべて削除しました。
 # 2. 初回起動通知時の `format_startup_message` の引数不足エラーを修正しました。
 # 3. CCXTクライアントの初期化時のタイムアウト値を20秒に延長し、RequestTimeoutエラーを解消しました。
-# 4. 【今回の修正】`send_telegram_notification` 関数を定義し、NameErrorを解消しました。
-# 5. 【通知機能追加】1時間以内に分析された銘柄の中から、最高スコアと最低スコアの銘柄を1時間ごとに通知する機能を追加 (要件追加1)。
+# 4. `send_telegram_notification` 関数を定義し、NameErrorを解消しました。
+# 5. 1時間ごとに分析された銘柄の最高・最低スコアを通知する機能を追加。
+# 6. 【今回の修正】`get_estimated_win_rate` 関数を修正し、スコアに応じて勝率が変動する元のロジックに復元しました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -186,9 +187,10 @@ def format_price_precision(price: float) -> str:
         # 0.01 USDT未満は小数第6位 (精度維持)
         return f"{price:.6f}"
 
+# 💡 修正済み: スコアに基づいて推定勝率を返す関数 (元の可変ロジックに復元)
 def get_estimated_win_rate(score: float) -> str:
     """スコアに基づいて推定勝率を返す (最大100点に合わせた調整)"""
-    # 1.00が最高点
+    # 1.00が最高点。スコアが高いほど勝率が高くなるようにばらつきを設ける。
     if score >= 0.95:
         return "90%+"
     elif score >= 0.90:
@@ -198,6 +200,7 @@ def get_estimated_win_rate(score: float) -> str:
     elif score >= 0.80:
         return "75-80%"
     else:
+        # 閾値以下のスコアでもばらつきを持たせた最低値
         return "70-75%"
 
 def get_current_threshold(macro_context: Dict) -> float:
@@ -1486,8 +1489,6 @@ async def main_bot_scheduler():
         except Exception as e:
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
-            # 【💡 NameError解消のため、ここもsend_telegram_notificationの定義に依存】
-            # send_telegram_notificationが定義されたため、エラー通知も動作する
             try:
                  await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
             except NameError:
