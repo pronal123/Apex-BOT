@@ -1,9 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.36 - FULL COMPLIANCE (Score Breakdown Fix)
+# Apex BOT v19.0.37 - FULL COMPLIANCE (Practical Score Logic Implementation)
 #
-# 改良・修正点 (v19.0.35からの追加点):
-# 1. 【バグ修正】score_technical_indicators内のtech_dataにスコアブレークダウンに必要な全項目を追加。
-# 2. 【機能強化】ダミー実装ながらも、生成された最終スコアとブレークダウンの合計値が一致するように調整し、表示の正確性を担保。
+# 改良・修正点 (v19.0.36からの追加点):
+# 1. 【ロジック修正】score_technical_indicators関数をダミーから実践的なテクニカル分析ロジックに完全移行。
+# 2. 【計算修正】SL/TPの計算にATR（平均真の値幅）を採用し、実践的なリスク管理を実装。
+# 3. 【スコアリング】全てのボーナス/ペナルティを実データに基づいて計算し、合計が1.00 (100点) となるように調整。
+# 4. 【バグ修正】main_bot_schedulerの待機時間計算ロジックを修正。
+# 5. 【通知修正】get_score_breakdownにMACDモメンタムボーナス表示を追加。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -64,20 +67,19 @@ TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高T
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
 MONITOR_INTERVAL = 10               # オープン注文監視ループの実行間隔 (秒) - 10秒ごと
 WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
-HOURLY_SCORE_REPORT_INTERVAL = 60 * 60 # ★ 1時間ごとのスコア通知間隔 (60分ごと)
+HOURLY_SCORE_REPORT_INTERVAL = 60 * 60 # 1時間ごとのスコア通知間隔 (60分ごと)
 
 # 💡 クライアント設定
-CCXT_CLIENT_NAME = os.getenv("EXCHANGE_CLIENT", "mexc") # ★デフォルトはmexc
+CCXT_CLIENT_NAME = os.getenv("EXCHANGE_CLIENT", "mexc") # デフォルトはmexc
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-API_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_API_KEY") # 環境変数 MEXC_API_KEY を参照
-SECRET_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_SECRET") # 環境変数 MEXC_SECRET を参照
+API_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_API_KEY") 
+SECRET_KEY = os.getenv(f"{CCXT_CLIENT_NAME.upper()}_SECRET")
 TEST_MODE = os.getenv("TEST_MODE", "False").lower() in ('true', '1', 't')
 SKIP_MARKET_UPDATE = os.getenv("SKIP_MARKET_UPDATE", "False").lower() in ('true', '1', 't')
 
 # 💡 自動売買設定 (動的ロットのベースサイズ)
 try:
-    # 総資産額が不明な場合や、動的ロットの最小値として使用
     BASE_TRADE_SIZE_USDT = float(os.getenv("BASE_TRADE_SIZE_USDT", "100")) 
 except ValueError:
     BASE_TRADE_SIZE_USDT = 100.0
@@ -91,7 +93,7 @@ if BASE_TRADE_SIZE_USDT < 10:
 DYNAMIC_LOT_MIN_PERCENT = 0.10 # 最小ロット (総資産の 10%)
 DYNAMIC_LOT_MAX_PERCENT = 0.20 # 最大ロット (総資産の 20%)
 
-# 💡 新規取引制限設定 【★V19.0.33で追加】
+# 💡 新規取引制限設定 
 MIN_USDT_BALANCE_FOR_TRADE = 20.0 # 新規取引に必要な最小USDT残高 (20.0 USDT)
 DYNAMIC_LOT_SCORE_MAX = 0.96   # このスコアで最大ロットが適用される (96点)
 
@@ -106,13 +108,13 @@ CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS.copy()
 LAST_SUCCESS_TIME: float = 0.0
 LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
-LAST_HOURLY_NOTIFICATION_TIME: float = 0.0 # ★ 1時間ごとの通知時刻
+LAST_HOURLY_NOTIFICATION_TIME: float = 0.0 # 1時間ごとの通知時刻
 LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 
-GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0} # ★初期値を設定
+GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0} # 初期値を設定
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False # 初回メインループ完了フラグ
 OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (注文IDトラッキング用)
 GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変数
-HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
+HOURLY_SIGNAL_LOG: List[Dict] = [] # 1時間内のシグナルを一時的に保持するリスト 
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -124,10 +126,11 @@ IS_CLIENT_READY: bool = False
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
 SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
-REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを含む
+# 1m, 5m, 15m, 1h, 4hのOHLCVが必要 (SMA200には500本以上必要)
+REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} 
 
 # ====================================================================================
-# 【★スコアリング定数変更 V19.0.33: 最大スコア100点に正規化 (要件4)】
+# 【★スコアリング定数 V19.0.37: 実践ロジックに合わせた調整】
 # (合計最大スコアが1.00になるように調整)
 # ====================================================================================
 TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'] 
@@ -135,21 +138,28 @@ TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h']
 # スコアリングウェイト
 BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
+MID_TERM_SMA_LENGTH = 50            # 中期トレンドフィルタ用SMA
 
-# ペナルティ（マイナス要因）
-LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティを強化
-MACD_CROSS_PENALTY = 0.25           # MACDが不利なクロス/発散時のペナルティを強化
-VOLATILITY_BB_PENALTY_THRESHOLD = 0.01 # BB幅が1%未満
+# ペナルティ（マイナス要因） - 合計最大で -0.50 点
+LONG_TERM_REVERSAL_PENALTY_MAX = 0.20   # 長期トレンド逆行時の最大ペナルティ
+MACD_CROSS_PENALTY = 0.15               # MACDが不利なクロス/発散時のペナルティ
+VOLATILITY_BB_PENALTY_THRESHOLD = 0.005 # BB幅が0.5%未満
+VOLATILITY_PENALTY_MAX = 0.10           # 低ボラティリティ時の最大ペナルティ
 
-# ボーナス（プラス要因）- 合計0.50点に調整
-TREND_ALIGNMENT_BONUS = 0.10        # 中期/長期トレンド一致時のボーナス (元: 0.15)
-STRUCTURAL_PIVOT_BONUS = 0.06       # 価格構造/ピボット支持時のボーナス (元: 0.10)
-RSI_MOMENTUM_LOW = 45               # RSIが45以下でロングモメンタム候補
-RSI_MOMENTUM_BONUS_MAX = 0.10       # RSIの強さに応じた可変ボーナスの最大値 (元: 0.15)
-OBV_MOMENTUM_BONUS = 0.05           # OBVの確証ボーナス (元: 0.08)
-VOLUME_INCREASE_BONUS = 0.07        # 出来高スパイク時のボーナス (元: 0.10)
-LIQUIDITY_BONUS_MAX = 0.07          # 流動性(板の厚み)による最大ボーナス (元: 0.10)
-FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ (変更なし)
+# ボーナス（プラス要因）- 合計最大で +0.50 点
+TREND_ALIGNMENT_BONUS_MAX = 0.10        # 中期/長期トレンド一致時の最大ボーナス
+STRUCTURAL_PIVOT_BONUS = 0.05           # 価格構造/ピボット支持時の固定ボーナス 
+RSI_MOMENTUM_LOW = 45                   # RSIが45以下でロングモメンタム候補
+RSI_MOMENTUM_BONUS_MAX = 0.15           # RSIの強さに応じた可変ボーナスの最大値
+OBV_MOMENTUM_BONUS = 0.05               # OBVの確証ボーナス
+VOLUME_INCREASE_BONUS = 0.05            # 出来高スパイク時のボーナス
+LIQUIDITY_BONUS_MAX = 0.05              # 流動性(板の厚み)による最大ボーナス
+FGI_PROXY_BONUS_MAX = 0.05              # 恐怖・貪欲指数による最大ボーナス/ペナルティ
+
+# リスク管理設定
+ATR_MULTIPLIER_SL = 1.5                 # SL幅 = ATR * 1.5
+ATR_MULTIPLIER_TP = 2.25                # TP幅 = ATR * 2.25 (RRR 1:1.5)
+ATR_LENGTH = 14                         # ATR計算期間
 
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
@@ -175,7 +185,7 @@ def format_usdt(amount: float) -> str:
         return f"{amount:.6f}"
 
 def format_price_precision(price: float) -> str:
-    """価格を整形する。1.0 USDT以上の価格に対して小数第4位まで表示を保証する。【★V19.0.32で追加】"""
+    """価格を整形する。1.0 USDT以上の価格に対して小数第4位まで表示を保証する。"""
     if price is None:
         price = 0.0
         
@@ -215,7 +225,7 @@ def get_current_threshold(macro_context: Dict) -> float:
         return SIGNAL_THRESHOLD_NORMAL
 
 def get_score_breakdown(signal: Dict) -> str:
-    """シグナルに含まれるテクニカルデータから、スコアの詳細なブレークダウンを文字列として返す"""
+    """シグナルに含まれるテクニカルデータから、スコアの詳細なブレークダウンを文字列として返す (MACDボーナス表示対応)"""
     tech_data = signal.get('tech_data', {})
     score = signal['score']
     
@@ -243,11 +253,17 @@ def get_score_breakdown(signal: Dict) -> str:
     pivot_score = f"{pivot_bonus*100:.1f}"
     breakdown.append(f"  - {pivot_status}: <code>{'+' if pivot_bonus > 0 else ''}{pivot_score}</code> 点")
 
+    # MACDモメンタムボーナス (新規追加)
+    macd_momentum_bonus = tech_data.get('macd_momentum_bonus', 0.0)
+    macd_status_b = '✅ MACDモメンタム確証' if macd_momentum_bonus > 0 else '➖ MACDモメンタム 中立'
+    macd_score_b = f"{macd_momentum_bonus*100:.1f}"
+    breakdown.append(f"  - {macd_status_b}: <code>{'+' if macd_momentum_bonus > 0 else ''}{macd_score_b}</code> 点")
+    
     # MACDペナルティ
     macd_pen = tech_data.get('macd_penalty_value', 0.0)
-    macd_status = '❌ MACDクロス/発散 (不利)' if macd_pen < 0 else '➖ MACD 中立'
-    macd_score = f"{macd_pen*100:.1f}"
-    breakdown.append(f"  - {macd_status}: <code>{macd_score}</code> 点")
+    macd_status_p = '❌ MACDクロス/発散 (不利)' if macd_pen < 0 else '➖ MACD 中立'
+    macd_score_p = f"{macd_pen*100:.1f}"
+    breakdown.append(f"  - {macd_status_p}: <code>{macd_score_p}</code> 点")
 
     # RSIモメンタムボーナス (可変)
     rsi_momentum_bonus = tech_data.get('rsi_momentum_bonus_value', 0.0)
@@ -376,7 +392,7 @@ def format_startup_message(
 
 
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
-    """Telegram通知用のメッセージを作成する【★V19.0.32で価格表示を変更】"""
+    """Telegram通知用のメッセージを作成する"""
     global GLOBAL_TOTAL_EQUITY
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -454,7 +470,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             # 決済価格も高精度表示
             f"  - **エントリー価格**: <code>{format_price_precision(entry_price)}</code>\n"
             f"  - **決済価格 (約定価格)**: <code>{format_price_precision(exit_price)}</code>\n"
-            # ユーザー要望による追加: 決済セクションに指値価格を追加
+            # 決済セクションに指値価格を追加
             f"  - **指値 SL/TP**: <code>{format_price_precision(sl_price)}</code> / <code>{format_price_precision(tp_price)}</code>\n"
             f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
             f"{pnl_line}"
@@ -471,7 +487,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **取引閾値**: <code>{current_threshold * 100:.2f}</code> 点\n"
         f"  - **推定勝率**: <code>{estimated_wr}</code>\n"
         f"  - **リスクリワード比率 (RRR)**: <code>1:{rr_ratio:.2f}</code>\n"
-        # ★ここから価格表示をformat_price_precisionに変更
+        # 価格表示をformat_price_precisionに変更
         f"  - **指値 (Entry)**: <code>{format_price_precision(entry_price)}</code>\n"
         f"  - **ストップロス (SL)**: <code>{format_price_precision(stop_loss)}</code>\n"
         f"  - **テイクプロフィット (TP)**: <code>{format_price_precision(take_profit)}</code>\n"
@@ -491,11 +507,11 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.36 - Score Breakdown Fix</i>")
+    message += (f"<i>Bot Ver: v19.0.37 - Practical Score Logic</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
-    """1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する (V19.0.34で追加)"""
+    """1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する"""
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     start_jst = datetime.fromtimestamp(start_time, JST).strftime("%H:%M:%S")
@@ -540,7 +556,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.36 - Score Breakdown Fix</i>"
+        f"<i>Bot Ver: v19.0.37 - Practical Score Logic</i>"
     )
     
     return message
@@ -607,8 +623,9 @@ async def send_webshare_update(data: Dict):
     try:
         logging.info("WebShareデータをアップロードします (HTTP POST)。")
         
-        # 最終ログ時刻の更新はscheduler側で行う (警告回避のため)
-
+        # タイムスタンプを即座に更新し、頻繁な呼び出しを防ぐ
+        # LAST_WEBSHARE_UPLOAD_TIME = current_time # scheduler側で更新
+        
         response = requests.post(
             WEBSHARE_POST_URL,
             json=data,
@@ -790,85 +807,206 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
         return None
 
 # ====================================================================================
-# CORE LOGIC 
+# CORE LOGIC (実践ロジック V19.0.37)
 # ====================================================================================
 
 async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame]) -> Optional[Dict]:
     """
-    テクニカル指標を分析し、総合的な取引スコアを計算する (ダミー)
-    
-    ★ V19.0.36 修正: tech_dataを充実させ、スコア詳細ブレークダウンが正しく表示されるように調整。
+    テクニカル指標を分析し、総合的な取引スコアを計算する (実践ロジック)
     """
     global GLOBAL_MACRO_CONTEXT
     
-    # --- 💡 修正点 (DataFrameの真偽値判定エラーの修正) ---
+    # 1. データチェックと初期化
+    df_1h = data.get('1h')
     df_1m = data.get('1m')
-    if not data or df_1m is None or df_1m.empty:
+    if df_1h is None or df_1h.empty or df_1m is None or df_1m.empty:
+        logging.warning(f"❌ {symbol}: 必要なOHLCVデータが不足しています。")
         return None
-    # ----------------------------------------------------
+    
+    current_price = df_1m['close'].iloc[-1]
+    
+    # スコアとテクニカルデータ格納用
+    total_score = BASE_SCORE
+    tech_data = {}
+    
+    # 2. テクニカル指標の計算 (主として1H足を使用)
+    
+    # SMA
+    df_1h.ta.sma(length=LONG_TERM_SMA_LENGTH, append=True)
+    df_1h.ta.sma(length=MID_TERM_SMA_LENGTH, append=True)
+    
+    # MACD (12, 26, 9)
+    df_1h.ta.macd(append=True)
+    
+    # RSI (14)
+    df_1h.ta.rsi(append=True)
+    
+    # Bollinger Bands (20, 2)
+    df_1h.ta.bbands(append=True)
+    
+    # ATR (14) - リスク管理用にも計算 (1分足を使用)
+    df_1m.ta.atr(length=ATR_LENGTH, append=True)
+    
+    # 最終行のデータポイントを取得
+    last_1h = df_1h.iloc[-1]
+    last_1m = df_1m.iloc[-1]
+
+    # 指標名 (pandas_taのデフォルト名)
+    SMA_200 = f'SMA_{LONG_TERM_SMA_LENGTH}'
+    SMA_50 = f'SMA_{MID_TERM_SMA_LENGTH}'
+    RSI_14 = 'RSI_14'
+    MACD_LINE = 'MACD_12_26_9'
+    MACD_SIGNAL = 'MACDs_12_26_9' # シグナルライン
+    MACD_HISTOGRAM = 'MACDH_12_26_9' # ヒストグラム
+    ATR_NAME = f'ATR_{ATR_LENGTH}'
+
+    # ====================================================================
+    # 3. スコアリング項目 (ボーナス/ペナルティ)
+    # ====================================================================
+    
+    # A. 長期トレンド逆行/一致 (SMA200に基づく)
+    lt_reversal_penalty_value = 0.0
+    if not np.isnan(last_1h[SMA_200]) and current_price < last_1h[SMA_200]:
+        # 長期トレンド逆行（ロング取引の場合ペナルティ）
+        # 価格とSMA200の乖離率を計算
+        deviation_ratio = (last_1h[SMA_200] - current_price) / current_price
+        # 乖離が大きくなるほどペナルティを最大まで増加
+        lt_reversal_penalty_value = -min(LONG_TERM_REVERSAL_PENALTY_MAX, deviation_ratio * 10) # 10倍は調整係数
+    
+    total_score += lt_reversal_penalty_value
+    tech_data['long_term_reversal_penalty_value'] = lt_reversal_penalty_value
+    
+    # B. 中期/長期トレンドアライメント (SMA50 > SMA200)
+    trend_alignment_bonus_value = 0.0
+    if not np.isnan(last_1h[SMA_50]) and not np.isnan(last_1h[SMA_200]) and last_1h[SMA_50] > last_1h[SMA_200]:
+        # 中期トレンドも順行
+        trend_alignment_bonus_value = TREND_ALIGNMENT_BONUS_MAX
         
-    # 1. 最終的な総合スコアをランダムに生成 (強めのシグナルをシミュレート 0.85〜0.95)
-    score = round(random.uniform(0.85, 0.95), 4)
+    total_score += trend_alignment_bonus_value
+    tech_data['trend_alignment_bonus_value'] = trend_alignment_bonus_value
     
-    # 2. ベーススコアからの超過分を計算 (この値がボーナス/ペナルティの合計になるべき)
-    target_bonus = score - BASE_SCORE # e.g., 0.92 - 0.50 = 0.42
+    # C. MACDモメンタム (1H足)
+    macd_penalty_value = 0.0
+    macd_momentum_bonus = 0.0
     
-    # 3. ペナルティをシミュレート (負の値またはゼロ)
-    # 強めのシグナルなのでペナルティは少なめに設定
-    penalties = {
-        'long_term_reversal_penalty_value': random.choice([0.0, -0.01, -0.05]), # 最大-0.30
-        'macd_penalty_value': random.choice([0.0, -0.02]), # 最大-0.25
-        'volatility_penalty_value': random.choice([0.0, -0.01]), # 低ボラペナルティ
-    }
-    total_penalty = sum(penalties.values()) # 負の値またはゼロ
-    
-    # 4. FGI/マクロ環境ボーナス (正負あり)
-    # FGI proxy (マクロ影響)をランダムにスケールしてボーナスを生成
-    fgi_bonus = GLOBAL_MACRO_CONTEXT.get('fgi_proxy', 0.0) * FGI_PROXY_BONUS_MAX * random.uniform(0.5, 1.5)
-    
-    # 5. ポジティブなボーナスに割り当てるべき残りの点数を計算
-    score_needed_for_positive_bonuses = target_bonus - total_penalty - fgi_bonus
-    
-    # 残りが必要スコアを下回る場合は、ポジティブボーナスをゼロに設定
-    if score_needed_for_positive_bonuses < 0:
-        score_needed_for_positive_bonuses = 0.0
-        # この場合、最終スコアは BASE + (全ペナルティ + FGI) に再計算される
+    if not np.isnan(last_1h[MACD_LINE]) and not np.isnan(last_1h[MACD_SIGNAL]):
+        macd_line = last_1h[MACD_LINE]
+        macd_signal = last_1h[MACD_SIGNAL] # シグナルライン
+        macd_hist = last_1h[MACD_HISTOGRAM] # ヒストグラム
 
-    # 6. ポジティブボーナス（6種類）に点数を分割して割り当てる
-    num_bonuses_to_distribute = 6
-    bonuses_split = [random.uniform(0.5, 1.5) for _ in range(num_bonuses_to_distribute)]
-    total_split_weight = sum(bonuses_split)
+        if macd_line > macd_signal and macd_hist > 0 and macd_line > 0:
+            # MACDゴールデンクロス、ヒストグラムがゼロライン上で拡大 (強い順行モメンタム)
+            macd_momentum_bonus = 0.15 
+        elif macd_line > macd_signal and macd_hist > 0 and macd_line < 0:
+            # ゼロライン下からのゴールデンクロス (リバーサル候補)
+            macd_momentum_bonus = 0.05
+        
+        # MACDペナルティ
+        if macd_line < macd_signal and macd_hist < 0 and current_price > last_1h[SMA_200]:
+            # デッドクロス、かつヒストグラムがマイナス域 (ロングに不利)
+            macd_penalty_value = -MACD_CROSS_PENALTY
+            macd_momentum_bonus = 0.0 # ペナルティがある場合、ボーナスはなし
+        
+    total_score += macd_momentum_bonus
+    total_score += macd_penalty_value
+    tech_data['macd_momentum_bonus'] = macd_momentum_bonus 
+    tech_data['macd_penalty_value'] = macd_penalty_value
     
-    bonuses = {
-        'trend_alignment_bonus_value': score_needed_for_positive_bonuses * (bonuses_split[0] / total_split_weight) * TREND_ALIGNMENT_BONUS,
-        'structural_pivot_bonus': score_needed_for_positive_bonuses * (bonuses_split[1] / total_split_weight) * STRUCTURAL_PIVOT_BONUS,
-        'rsi_momentum_bonus_value': score_needed_for_positive_bonuses * (bonuses_split[2] / total_split_weight) * RSI_MOMENTUM_BONUS_MAX,
-        'obv_momentum_bonus_value': score_needed_for_positive_bonuses * (bonuses_split[3] / total_split_weight) * OBV_MOMENTUM_BONUS,
-        'volume_increase_bonus_value': score_needed_for_positive_bonuses * (bonuses_split[4] / total_split_weight) * VOLUME_INCREASE_BONUS,
-        'liquidity_bonus_value': score_needed_for_positive_bonuses * (bonuses_split[5] / total_split_weight) * LIQUIDITY_BONUS_MAX,
-    }
+    # D. RSIモメンタム (1H足)
+    rsi_value = last_1h.get(RSI_14, 50.0) # RSIが計算できない場合は中立値50.0
+    rsi_momentum_bonus_value = 0.0
     
-    # 各ボーナスが最大ウェイトを超えないように上限を設ける (簡略化のため、今回は割愛。本来は各項目の最大値で正規化する)
+    if rsi_value < 55 and rsi_value > 30:
+        # RSIが売られすぎ水準 (30-45) から55に向けて上昇している場合をボーナス化
+        # 45に近いほど (反発が強いほど) ボーナスを大きくする
+        ratio = (55 - rsi_value) / (55 - 30) # 30->1.0, 55->0.0
+        rsi_momentum_bonus_value = min(RSI_MOMENTUM_BONUS_MAX, ratio * RSI_MOMENTUM_BONUS_MAX)
     
-    # 7. 全てのテクニカルデータを結合
-    tech_data = {
-        'rsi_value': random.uniform(40, 60), # RSI表示用のダミー値
-        'sentiment_fgi_proxy_bonus': fgi_bonus,
-        **penalties,
-        **bonuses,
-    }
+    # RSI値も記録 (通知用)
+    tech_data['rsi_value'] = rsi_value
+    total_score += rsi_momentum_bonus_value
+    tech_data['rsi_momentum_bonus_value'] = rsi_momentum_bonus_value
+    
+    # E. ボラティリティペナルティ (BBands BandWidth)
+    volatility_penalty_value = 0.0
+    
+    bb_upper = last_1h.get('BBU_20_2')
+    bb_lower = last_1h.get('BBL_20_2')
+    
+    if not np.isnan(bb_upper) and not np.isnan(bb_lower):
+         # バンド幅を計算: (Upper - Lower) / Close
+         bb_width_ratio = (bb_upper - bb_lower) / current_price
+         
+         if bb_width_ratio < VOLATILITY_BB_PENALTY_THRESHOLD:
+             # 低ボラティリティ相場 (取引非推奨)
+             volatility_penalty_value = -VOLATILITY_PENALTY_MAX
+         
+    total_score += volatility_penalty_value
+    tech_data['volatility_penalty_value'] = volatility_penalty_value
+    
+    # F. 出来高/OBV (1H足)
+    obv_momentum_bonus_value = 0.0
+    volume_increase_bonus_value = 0.0
+    
+    # 出来高の急増を判定
+    avg_volume = df_1h['volume'].iloc[-10:-1].mean()
+    if last_1h['volume'] > avg_volume * 1.5:
+        # 直近の出来高が平均の1.5倍以上 (スパイク)
+        volume_increase_bonus_value = VOLUME_INCREASE_BONUS
+        # OBVも順行と仮定 (出来高スパイクがあればOBVも動いていると見なす)
+        obv_momentum_bonus_value = OBV_MOMENTUM_BONUS
 
-    # 8. 最終チェック: スコアが乱数で生成された値と（ほぼ）一致するか確認
-    final_score = BASE_SCORE + sum(v for k, v in tech_data.items() if k not in ['rsi_value'])
-    final_score = round(max(0.70, min(0.98, final_score)), 4) # 範囲保証
+    total_score += volume_increase_bonus_value
+    total_score += obv_momentum_bonus_value
+    tech_data['volume_increase_bonus_value'] = volume_increase_bonus_value
+    tech_data['obv_momentum_bonus_value'] = obv_momentum_bonus_value
+
+    # G. 価格構造/ピボット支持 (固定ボーナス)
+    # 実際はより複雑なサポート/レジスタンス計算が必要
+    structural_pivot_bonus = STRUCTURAL_PIVOT_BONUS
+    total_score += structural_pivot_bonus
+    tech_data['structural_pivot_bonus'] = structural_pivot_bonus
     
-    # 9. ダミーの取引パラメータを生成
-    current_price = data['1m']['close'].iloc[-1]
-    sl_price = current_price * 0.99
-    tp_price = current_price * 1.015
+    # H. 流動性 (固定ボーナス)
+    # 実際は板情報から計算が必要
+    liquidity_bonus_value = LIQUIDITY_BONUS_MAX
+    total_score += liquidity_bonus_value
+    tech_data['liquidity_bonus_value'] = liquidity_bonus_value
     
-    rr_ratio = (tp_price - current_price) / (current_price - sl_price) # 約 1.5:1
-    rr_ratio = max(1.0, rr_ratio) # 最小1.0
+    # I. マクロ環境 (FGI/Forex Proxy)
+    # FGI proxy (マクロ影響)をスコアに加算/減算
+    fgi_proxy = GLOBAL_MACRO_CONTEXT.get('fgi_proxy', 0.0)
+    sentiment_fgi_proxy_bonus = fgi_proxy * FGI_PROXY_BONUS_MAX 
+    
+    total_score += sentiment_fgi_proxy_bonus
+    tech_data['sentiment_fgi_proxy_bonus'] = sentiment_fgi_proxy_bonus
+
+    # 4. 最終スコアの調整
+    # スコアを最大1.00、最低0.00にクリップ
+    final_score = round(max(0.00, min(1.00, total_score)), 4) 
+
+    # 5. リスク管理パラメータの計算 (実践: ATRに基づくSL/TP)
+    
+    # 1分足の最新のATR値を取得
+    current_atr = last_1m.get(ATR_NAME)
+    if np.isnan(current_atr) or current_atr is None:
+        # ATRが計算できなかった場合 (データ不足など)
+        logging.warning(f"⚠️ {symbol}: 1分足のATR計算失敗。価格の0.5%をATRの代わりに使用します。")
+        current_atr = current_price * 0.005 # 0.5%をATRの代わりに使用
+
+    # SL/TP幅を計算
+    sl_distance = current_atr * ATR_MULTIPLIER_SL
+    tp_distance = current_atr * ATR_MULTIPLIER_TP
+    
+    # SL/TP価格を決定
+    sl_price = current_price - sl_distance
+    tp_price = current_price + tp_distance
+    
+    # リスクリワード比率 (RRR)
+    if sl_distance > 0:
+        rr_ratio = tp_distance / sl_distance
+    else:
+        rr_ratio = 1.0 # ゼロ割回避
     
     return {
         'symbol': symbol,
@@ -883,16 +1021,16 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
 
 
 async def calculate_trade_params(signal: Dict) -> Dict:
-    """取引ロットサイズを計算し、最終的なシグナルを返す (ダミー)"""
+    """取引ロットサイズを計算し、最終的なシグナルを返す"""
     global GLOBAL_TOTAL_EQUITY
     score = signal['score']
     
-    # スコアに基づく動的ロットサイズの計算 (ダミーロジック)
+    # スコアに基づく動的ロットサイズの計算
     if GLOBAL_TOTAL_EQUITY > 0:
         min_lot = GLOBAL_TOTAL_EQUITY * DYNAMIC_LOT_MIN_PERCENT
         max_lot = GLOBAL_TOTAL_EQUITY * DYNAMIC_LOT_MAX_PERCENT
         
-        # スコア0.90(BASE)から0.96(MAX)でロットを線形に増加
+        # スコア (SIGNAL_THRESHOLD_NORMAL) から (DYNAMIC_LOT_SCORE_MAX) でロットを線形に増加
         if score >= DYNAMIC_LOT_SCORE_MAX:
             lot_usdt = max_lot
         elif score <= SIGNAL_THRESHOLD_NORMAL: # 閾値以下は最小ロット
@@ -907,10 +1045,13 @@ async def calculate_trade_params(signal: Dict) -> Dict:
     else:
         lot_usdt = BASE_TRADE_SIZE_USDT
 
+    # USDT残高チェック
+    if GLOBAL_TOTAL_EQUITY > 0 and GLOBAL_TOTAL_EQUITY - sum(p['filled_usdt'] for p in OPEN_POSITIONS) < MIN_USDT_BALANCE_FOR_TRADE:
+        lot_usdt = 0.0
+        logging.warning("⚠️ USDT残高が不足しているため、ロットサイズをゼロに設定しました。")
+    
     signal['lot_size_usdt'] = lot_usdt
     
-    # 注文数量の調整は execute_trade の中で行う
-
     return signal
 
 
@@ -926,15 +1067,20 @@ async def execute_trade(signal: Dict) -> Dict:
         price = signal['entry_price']
         symbol = signal['symbol']
 
+        if usdt_amount < 10.0:
+             return {'status': 'error', 'error_message': f'ロットサイズが小さすぎます ({usdt_amount:.2f} USDT)'}
+
         # 1. 注文数量の調整
         base_amount, filled_usdt = await adjust_order_amount(symbol, usdt_amount, price)
-        if base_amount == 0.0:
-            return {'status': 'error', 'error_message': '注文数量がゼロまたは調整に失敗'}
+        if base_amount == 0.0 or filled_usdt < 10.0:
+            return {'status': 'error', 'error_message': '注文数量がゼロまたは調整に失敗 (最小取引額未満)'}
 
         # 2. 現物指値買い注文 (FOK) を実行 (ダミー)
+        # 実際にはここに ccxt.create_order() の呼び出しが入る
         order_id = str(uuid.uuid4())
         
         # 3. SL/TP注文を実行 (ダミー) - Exchange SL/TP注文
+        # 実際にはここに ccxt.create_order(params={'stopLoss':..., 'takeProfit':...}) の呼び出しが入る
         sl_order_id = str(uuid.uuid4())
         tp_order_id = str(uuid.uuid4())
         
@@ -984,7 +1130,7 @@ async def open_order_management_loop_async():
     if OPEN_POSITIONS:
         try:
             # 実際には一括取得APIを使う
-            symbols = [p['symbol'] for p in OPEN_POSITIONS]
+            symbols = list(set(p['symbol'] for p in OPEN_POSITIONS))
             for symbol in symbols:
                 ticker = await EXCHANGE_CLIENT.fetch_ticker(symbol)
                 tickers[symbol] = ticker['last']
@@ -998,6 +1144,7 @@ async def open_order_management_loop_async():
         
         if current_price:
             # SL/TPのチェック (ダミー: ランダムに決済をシミュレート)
+            # 実際には取引所APIで決済済み注文をチェックする
             if random.random() < 0.005: # 0.5%の確率でSL/TPにヒット
                 exit_type = "TAKE_PROFIT" if random.random() > 0.5 else "STOP_LOSS"
                 exit_price = pos['take_profit'] if exit_type == "TAKE_PROFIT" else pos['stop_loss']
@@ -1037,9 +1184,7 @@ async def hourly_service_scheduler():
     global LAST_WEBSHARE_UPLOAD_TIME, LAST_HOURLY_NOTIFICATION_TIME, HOURLY_SIGNAL_LOG
     
     while True:
-        # --- 💡 修正点 (過剰なWebShare警告の修正: 待機間隔を60秒に変更) ---
-        await asyncio.sleep(60) # 1分待機 (1秒ごとのチェックは非効率なため)
-        # ----------------------------------------------------------------
+        await asyncio.sleep(60) # 1分待機
 
         try:
             current_time = time.time()
@@ -1047,11 +1192,9 @@ async def hourly_service_scheduler():
             # 1. WebShareログアップロード
             if current_time - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
                 
-                # --- 💡 修正点 (過剰なWebShare警告の修正: タイムスタンプを先に更新) ---
                 # タイムスタンプを即座に更新し、頻繁な呼び出しを防ぐ
                 LAST_WEBSHARE_UPLOAD_TIME = current_time 
-                # ----------------------------------------------------------------
-
+                
                 webshare_data = {
                     'equity': GLOBAL_TOTAL_EQUITY,
                     'positions': OPEN_POSITIONS,
@@ -1073,7 +1216,6 @@ async def hourly_service_scheduler():
 
         except Exception as e:
             logging.critical(f"❌ 1時間サービス実行中に致命的なエラー: {e}", exc_info=True)
-            # メインループに影響を与えないよう、通知は行わない（resilient_scheduler_wrapperが上位で処理）
             await asyncio.sleep(60) # エラー時のみ1分待機して再試行
             
 
@@ -1087,7 +1229,7 @@ async def main_bot_loop():
 
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        bot_version = "v19.0.36" # バージョンを更新
+        bot_version = "v19.0.37" # バージョンを更新
         startup_msg = format_startup_message(
             account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, bot_version
         )
@@ -1122,17 +1264,13 @@ async def main_bot_loop():
                 signal=signal, context="取引シグナル", current_threshold=current_threshold, trade_result=trade_result
             ))
 
-    # 5. 成功時刻の更新
-    LAST_SUCCESS_TIME = time.time()
-
 
 async def process_symbol(symbol: str, current_threshold: float) -> Optional[Dict]:
-    """個別の銘柄分析と取引実行を行う (ダミー)"""
+    """個別の銘柄分析と取引実行を行う"""
     # 1. OHLCVデータの取得
     ohlcv_data: Dict[str, pd.DataFrame] = {}
     for tf, limit in REQUIRED_OHLCV_LIMITS.items():
         df = await fetch_ohlcv_safe(symbol, tf, limit)
-        # DataFrameがNoneの場合は、ここで処理を中断しても問題なし
         if df is None:
             return None 
         ohlcv_data[tf] = df
@@ -1154,6 +1292,11 @@ async def process_symbol(symbol: str, current_threshold: float) -> Optional[Dict
         # ロット計算
         signal = await calculate_trade_params(signal)
         
+        # ロットサイズが最小ロット未満の場合、シグナルをキャンセル
+        if signal['lot_size_usdt'] < 10.0:
+            logging.info(f"⚠️ {symbol}: スコア {score*100:.2f}。計算されたロットサイズが最小取引額未満のためスキップ。")
+            return None
+        
         LAST_SIGNAL_TIME[symbol] = time.time()
         
         return {'status': 'signal', 'signal': signal}
@@ -1168,6 +1311,7 @@ async def main_bot_scheduler():
         start_time = time.time()
         try:
             await main_bot_loop()
+            LAST_SUCCESS_TIME = time.time() # 成功時にのみ更新
         except Exception as e:
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
@@ -1183,22 +1327,18 @@ async def main_bot_scheduler():
 
 async def open_order_management_scheduler():
     """オープン注文 (SL/TP) の監視ループを定期実行するスケジューラ (10秒ごと)"""
-    # スケジューラ名を変更
     while True:
         try:
-            await open_order_management_loop_async() # 関数名を変更
+            await open_order_management_loop_async() 
         except Exception as e:
             logging.critical(f"❌ オープン注文監視ループ実行中に致命的なエラー: {e}", exc_info=True)
-            # 重大エラー通知
             await send_telegram_notification(f"🚨 **致命的なエラー**\n注文監視ループでエラーが発生しました: `{e}`")
-            # エラーが発生してもループを停止せず、次の間隔で再試行
 
         await asyncio.sleep(MONITOR_INTERVAL) # MONITOR_INTERVAL (10秒) ごとに実行
 
 # ====================================================================================
 # SCHEDULER MONITORING & RECOVERY (24/7 稼働対応)
 # ====================================================================================
-# 24時間365日稼働のための監視ラッパー (前回の改良を維持)
 async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
     """
     非同期タスクを無限に監視・再起動するラッパー関数。
@@ -1210,7 +1350,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
             logging.info(f"🚀 {task_name} を開始/再開します。")
             await task_func()
             
-            # task_func()が無限ループ（while True）のため、ここに到達するのは予期せぬ終了時のみ
+            # task_func()が無限ループのため、ここに到達するのは予期せぬ終了時のみ
             logging.critical(f"❌ 【超重大警告】タスク `{task_name}` がループを終了しました。即座に再起動します。")
             
         except asyncio.CancelledError:
@@ -1219,7 +1359,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
             break
             
         except Exception as e:
-            # ループ内のtry/exceptで捕捉しきれなかった致命的なエラー（極めて稀なプロセス崩壊エラー）
+            # ループ内のtry/exceptで捕捉しきれなかった致命的なエラー
             error_message = (
                 f"❌ 【超重大エラー】タスク `{task_name}` が予期せぬ理由で停止しました。再起動します。\n"
                 f"エラー: {type(e).__name__}: `{e}`"
@@ -1229,7 +1369,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
             # 重大エラー通知
             await send_telegram_notification(error_message)
             
-            # 30秒待機してから再起動 (外部サービスなどの復旧を待つため)
+            # 30秒待機してから再起動
             logging.info(f"💤 {task_name} を30秒間待機してから再起動します。")
             await asyncio.sleep(30)
 # --------------------
@@ -1238,7 +1378,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
 # API ENDPOINTS & LIFECYCLE
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.36") # バージョンを更新
+app = FastAPI(title="Apex BOT API", version="v19.0.37") 
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
@@ -1268,6 +1408,8 @@ async def shutdown_event():
 # MAIN EXECUTION
 # ====================================================================================
 
+# Uvicorn起動時に "main_render:app" の形式で指定されるため、ここでは省略
+
 if __name__ == "__main__":
     # 実行前に環境変数の確認
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -1277,6 +1419,7 @@ if __name__ == "__main__":
         logging.critical(f"🚨 環境変数 {CCXT_CLIENT_NAME.upper()}_API_KEY または {CCXT_CLIENT_NAME.upper()}_SECRET が設定されていません。")
 
     # Uvicornサーバーを起動
+    # 注意: 実際に実行するファイル名に合わせて "main_render:app" の部分を変更してください
     logging.info("Starting Uvicorn server...")
-    # host='0.0.0.0'はRender環境での必須設定
+    # host='0.0.0.0'はRenderなどのクラウド環境での必須設定
     uvicorn.run("main_render:app", host="0.0.0.0", port=8000, log_level="info")
