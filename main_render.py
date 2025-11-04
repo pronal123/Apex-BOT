@@ -857,7 +857,7 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     RSI_14 = 'RSI_14'
     MACD_LINE = 'MACD_12_26_9'
     MACD_SIGNAL = 'MACDs_12_26_9' # シグナルライン
-    MACD_HISTOGRAM = 'MACDH_12_26_9' # ヒストグラム
+    MACD_HISTOGRAM = 'MACDh_12_26_9' # ヒストグラム
     ATR_NAME = f'ATR_{ATR_LENGTH}'
 
     # ====================================================================
