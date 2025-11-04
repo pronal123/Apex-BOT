@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.34 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
+# Apex BOT v19.0.33 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
 #
-# 改良・修正点 (v19.0.33からの追加点):
-# 1. 【通知機能追加】1時間以内に分析された銘柄の中から、最高スコアと最低スコアの銘柄を1時間ごとに通知する機能を追加 (要件追加1)。
-# 2. 【ロギング強化】ログデータ保存用の一時リストを追加。
-# 3. 【監視機能】BOTの非同期スケジューラが停止しないよう自動再起動機能は、FastAPIのasyncioタスクとロギングにより実質的に担保済み。
+# 改良・修正点:
+# 1. 【注文方法】成行買いから**指値買い (Limit Buy)**へ変更 (要件1)。
+# 2. 【リスク管理】ボット監視SL/TPから**取引所自動SL/TP注文**へ変更 (要件2)。
+# 3. 【スコアリング】最高得点が丁度**1.00 (100点)**になるように定数を正規化 (要件4)。
+# 4. 【通知】価格表示の精度維持とSL/TPの通知は**維持** (要件3)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -65,7 +66,6 @@ TOP_SYMBOL_LIMIT = 40               # 監視対象銘柄の最大数 (出来高T
 LOOP_INTERVAL = 60 * 1              # メインループの実行間隔 (秒) - 1分ごと
 MONITOR_INTERVAL = 10               # オープン注文監視ループの実行間隔 (秒) - 10秒ごと
 WEBSHARE_UPLOAD_INTERVAL = 60 * 60  # WebShareログアップロード間隔 (1時間ごと)
-HOURLY_SCORE_REPORT_INTERVAL = 60 * 60 # ★ 1時間ごとのスコア通知間隔 (60分ごと)
 
 # 💡 クライアント設定
 CCXT_CLIENT_NAME = os.getenv("EXCHANGE_CLIENT", "mexc") # ★デフォルトはmexc
@@ -91,10 +91,7 @@ if BASE_TRADE_SIZE_USDT < 10:
 # 【動的ロット設定】
 DYNAMIC_LOT_MIN_PERCENT = 0.10 # 最小ロット (総資産の 10%)
 DYNAMIC_LOT_MAX_PERCENT = 0.20 # 最大ロット (総資産の 20%)
-
-# 💡 新規取引制限設定 【★V19.0.33で追加】
-MIN_USDT_BALANCE_FOR_TRADE = 20.0 # 新規取引に必要な最小USDT残高 (20.0 USDT)
-DYNAMIC_LOT_SCORE_MAX = 0.96   # このスコアで最大ロットが適用される (96点)
+DYNAMIC_LOT_SCORE_MAX = 0.9999   # このスコアで最大ロットが適用される (99.99点)
 
 
 # 💡 WEBSHARE設定 (HTTP POSTへ変更)
@@ -107,13 +104,12 @@ CURRENT_MONITOR_SYMBOLS: List[str] = DEFAULT_SYMBOLS.copy()
 LAST_SUCCESS_TIME: float = 0.0
 LAST_SIGNAL_TIME: Dict[str, float] = {}
 LAST_ANALYSIS_SIGNALS: List[Dict] = []
-LAST_HOURLY_NOTIFICATION_TIME: float = 0.0 # ★ 1時間ごとの通知時刻
+LAST_HOURLY_NOTIFICATION_TIME: float = 0.0
 LAST_WEBSHARE_UPLOAD_TIME: float = 0.0 
 GLOBAL_MACRO_CONTEXT: Dict = {'fgi_proxy': 0.0, 'fgi_raw_value': 'N/A', 'forex_bonus': 0.0} # ★初期値を設定
 IS_FIRST_MAIN_LOOP_COMPLETED: bool = False # 初回メインループ完了フラグ
 OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (注文IDトラッキング用)
 GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変数
-HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -155,8 +151,8 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.94       
-SIGNAL_THRESHOLD_NORMAL = 0.92      
+SIGNAL_THRESHOLD_SLUMP = 0.9999       
+SIGNAL_THRESHOLD_NORMAL = 0.95      
 SIGNAL_THRESHOLD_ACTIVE = 0.90      
 
 # ====================================================================================
@@ -492,59 +488,9 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max</i>")
+    message += (f"<i>Bot Ver: v19.0.33 - Limit Order & Exchange SL/TP, Score 100 Max</i>")
     return message
 
-def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
-    """1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する (V19.0.34で追加)"""
-    
-    now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
-    start_jst = datetime.fromtimestamp(start_time, JST).strftime("%H:%M:%S")
-    
-    # スコアでソート
-    signals_sorted = sorted(signals, key=lambda x: x['score'], reverse=True)
-    
-    if not signals_sorted:
-        return (
-            f"🕒 **Apex BOT 1時間スコアレポート**\n"
-            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"  - **集計日時**: {start_jst} - {now_jst} (JST)\n"
-            f"  - **分析銘柄数**: <code>0</code>\n"
-            f"  - **レポート**: 過去1時間以内に分析されたシグナルはありませんでした。\n"
-            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        )
-    
-    best_signal = signals_sorted[0]
-    worst_signal = signals_sorted[-1]
-    
-    # 閾値超え銘柄のカウント
-    threshold_count = sum(1 for s in signals if s['score'] >= current_threshold)
-
-    message = (
-        f"🕒 **Apex BOT 1時間スコアレポート**\n"
-        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"  - **集計日時**: {start_jst} - {now_jst} (JST)\n"
-        f"  - **分析銘柄数**: <code>{len(signals)}</code>\n"
-        f"  - **閾値超え銘柄**: <code>{threshold_count}</code> ({current_threshold*100:.2f}点以上)\n"
-        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"\n"
-        f"🟢 **ベストスコア銘柄 (Top)**\n"
-        f"  - **銘柄**: <b>{best_signal['symbol']}</b> ({best_signal['timeframe']})\n"
-        f"  - **スコア**: <code>{best_signal['score'] * 100:.2f} / 100</code>\n"
-        f"  - **推定勝率**: <code>{get_estimated_win_rate(best_signal['score'])}</code>\n"
-        f"  - **現在の価格**: <code>{format_price_precision(best_signal['entry_price'])}</code>\n"
-        f"\n"
-        f"🔴 **ワーストスコア銘柄 (Bottom)**\n"
-        f"  - **銘柄**: <b>{worst_signal['symbol']}</b> ({worst_signal['timeframe']})\n"
-        f"  - **スコア**: <code>{worst_signal['score'] * 100:.2f} / 100</code>\n"
-        f"  - **推定勝率**: <code>{get_estimated_win_rate(worst_signal['score'])}</code>\n"
-        f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
-        f"\n"
-        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max</i>"
-    )
-    
-    return message
 
 async def send_telegram_notification(message: str):
     """Telegramに通知を送信する"""
@@ -1016,7 +962,7 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
             lot_size_usdt = max(calculated_lot_size, BASE_TRADE_SIZE_USDT)
             
             # 銘柄 (symbol) を含めてログ出力
-            # logging.info(f"💰 動的ロット計算 - {symbol}: Score={score:.2f}, Ratio={dynamic_percent*100:.1f}%, Equity={GLOBAL_TOTAL_EQUITY:.2f} -> Lot={lot_size_usdt:.2f} USDT")
+            logging.info(f"💰 動的ロット計算 - {symbol}: Score={score:.2f}, Ratio={dynamic_percent*100:.1f}%, Equity={GLOBAL_TOTAL_EQUITY:.2f} -> Lot={lot_size_usdt:.2f} USDT")
         else:
             lot_size_usdt = BASE_TRADE_SIZE_USDT
             logging.warning(f"⚠️ {symbol}: 総資産額が不明のため、基本ロットサイズを使用します。")
@@ -1026,19 +972,19 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         # 4. 最終チェック
         current_threshold = get_current_threshold(macro_context)
         
-        # トレード実行は閾値を超えるシグナルのみだが、ログにはすべてのシグナルを返す
-        return {
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'action': 'buy', 
-            'score': score,
-            'rr_ratio': rr_ratio, 
-            'entry_price': current_price,
-            'stop_loss': stop_loss, 
-            'take_profit': take_profit, 
-            'lot_size_usdt': lot_size_usdt, 
-            'tech_data': tech_data, 
-        }
+        if score > current_threshold and rr_ratio >= 1.0:
+             return {
+                'symbol': symbol,
+                'timeframe': timeframe,
+                'action': 'buy', 
+                'score': score,
+                'rr_ratio': rr_ratio, 
+                'entry_price': current_price,
+                'stop_loss': stop_loss, 
+                'take_profit': take_profit, 
+                'lot_size_usdt': lot_size_usdt, 
+                'tech_data': tech_data, 
+            }
     return None
 
 async def set_stop_and_take_profit(symbol: str, filled_amount: float, stop_loss: float, take_profit: float) -> Dict:
@@ -1226,7 +1172,6 @@ async def open_order_management_loop_async():
     try:
         # 未決済のオープン注文をフェッチ (SL/TP注文が含まれる)
         # ※ CCXTの現物では 'fetch_open_orders' が SL/TP 注文を取得できない場合があるため、動作保証は取引所API依存
-        # fetch_open_orders() は時間がかかる可能性があるため、最初に取得
         open_orders = await EXCHANGE_CLIENT.fetch_open_orders() 
         open_order_ids = {order['id'] for order in open_orders}
         
@@ -1246,42 +1191,21 @@ async def open_order_management_loop_async():
             sl_open = sl_id in open_order_ids
             tp_open = tp_id in open_order_ids
             
-            # 以下、決済完了の判定ロジック
-            
-            # 1. SLもTPもオープン注文リストにない場合: どちらかで約定し、残った片方もキャンセルされている（取引所依存）。または、両方キャンセル失敗。
             if not sl_open and not tp_open:
-                # ここでは決済完了と見なし、より詳細な判定は取引履歴に依存
+                # SLとTPのどちらもオープン注文リストにない場合、決済完了と見なす
                 is_closed = True
+                # 決済完了だが、どちらで決済されたか断定は難しい
                 exit_type = "SL/TP (取引所決済完了)" 
             
-            # 2. SL注文だけがオープン注文リストにない場合: TPが約定した可能性が高い
-            elif not sl_open and tp_open:
-                # SL注文が約定した可能性も考慮し、より慎重に判定すべきだが、今回はシンプルにTPと仮定
-                # (このロジックは取引所の実装に依存し、CCXTの挙動により変動する可能性がある)
-                 # TPが残っている -> TPがオープンリストにある状態。SLが残っていない -> SLがクローズされた（約定またはキャンセル）。
-                 # CCXTのfetch_open_ordersがストップリミットを取得できない場合、TPが残っていても判定できない。
-                 # ここでは**両方がリストにない場合**を基本の決済完了とする。
-                 
-                 # ロジックを修正: **両方がオープンリストにない場合**のみを決済完了として処理
-                 # 後の処理で決済済みポジションを削除するため、ここでは何もしない。
-                 pass
-            
             elif sl_open and not tp_open:
-                 pass
+                # TP注文がオープンリストにないため、TPが約定した可能性が高い
+                is_closed = True
+                exit_type = "TP (テイクプロフィット)"
             
-            # 3. 再度、両方がオープンリストにない場合のみ処理
-            if not sl_open and not tp_open:
-                 is_closed = True
-                 # 決済完了だが、どちらで決済されたか断定は難しい
-                 exit_type = "SL/TP (取引所決済完了)" 
-                 
-            # 注文のフェッチに失敗した場合も想定し、安全のために取引所履歴を確認するロジックが必要だが、ここではログのみに留める。
-            # ただし、今回はシンプルに「両方の注文IDが未決済注文リストにない」場合を決済完了と見なす。
-
-            
-            # 【重要】ここでは、TP注文がオープンリストになく、SL注文がオープンリストにある場合、TPが約定したとは断定できない（SL注文がCCXTで取得できていない可能性）。
-            # 決済完了の最も安全な判定は「ポジションを保有していない」ことだが、ここでは注文IDの監視に限定。
-            # したがって、**両注文がオープンリストにない**場合のみを決済完了と見なすシンプルなロジックを採用する。
+            elif not sl_open and tp_open:
+                # SL注文がオープンリストにないため、SLが約定した可能性が高い
+                is_closed = True
+                exit_type = "SL (ストップロス)"
             
             if is_closed:
                 positions_to_remove_ids.append(position['id'])
@@ -1303,8 +1227,8 @@ async def open_order_management_loop_async():
                     'id': position['id'],
                 }
                 
-                # 残りの未約定注文をキャンセル (既に決済済みのため、ここではスキップ)
-                # await cancel_all_related_orders(position, open_order_ids)
+                # 残りの未約定注文をキャンセル
+                await cancel_all_related_orders(position, open_order_ids)
 
 
                 notification_message = format_telegram_message(position, "ポジション決済", current_threshold, trade_result=closed_result)
@@ -1325,7 +1249,7 @@ async def open_order_management_loop_async():
 
 async def main_bot_loop():
     """ボットのメイン実行ループ (1分ごと)"""
-    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_WEBSHARE_UPLOAD_TIME, LAST_HOURLY_NOTIFICATION_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, HOURLY_SIGNAL_LOG
+    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_WEBSHARE_UPLOAD_TIME, IS_FIRST_MAIN_LOOP_COMPLETED
     
     start_time = time.time()
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -1341,7 +1265,7 @@ async def main_bot_loop():
     new_signals: List[Dict] = []
     
     # 3. 監視銘柄リストの更新 (初回起動時、または定期的に)
-    if not IS_FIRST_MAIN_LOOP_COMPLETED or (time.time() - LAST_HOURLY_NOTIFICATION_TIME) > HOURLY_SCORE_REPORT_INTERVAL:
+    if not IS_FIRST_MAIN_LOOP_COMPLETED or (time.time() - LAST_HOURLY_NOTIFICATION_TIME) > 60 * 60:
         # TODO: ここでCCXTのfetch_tickersやfetch_markets_volumeなどを利用して監視銘柄を更新する
         # 現状はDEFAULT_SYMBOLSを維持
         CURRENT_MONITOR_SYMBOLS = DEFAULT_SYMBOLS.copy() 
@@ -1372,10 +1296,6 @@ async def main_bot_loop():
             
             if signal:
                 new_signals.append(signal)
-                # ★ HOURLY_SIGNAL_LOGに分析されたシグナルを保存 (重複を除く)
-                if not any(s['symbol'] == signal['symbol'] for s in HOURLY_SIGNAL_LOG):
-                    HOURLY_SIGNAL_LOG.append(signal) 
-                    
                 # 最もスコアの高いシグナルを採用するため、ここではクールダウンは設定しない
                 break # より短い足でシグナルが出たら、より長い足の分析はスキップ
     
@@ -1441,24 +1361,12 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold,
-            "v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max"
+            "v19.0.33 - Limit Order & Exchange SL/TP, Score 100 Max"
         )
         await send_telegram_notification(startup_message)
-        LAST_HOURLY_NOTIFICATION_TIME = time.time() # 初回通知時刻を設定
         IS_FIRST_MAIN_LOOP_COMPLETED = True
 
-    # 7. 1時間ごとのスコアレポートの送信 (V19.0.34で追加)
-    if IS_FIRST_MAIN_LOOP_COMPLETED and (time.time() - LAST_HOURLY_NOTIFICATION_TIME) >= HOURLY_SCORE_REPORT_INTERVAL:
-        logging.info("⏳ 1時間スコアレポートを送信します。")
-        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold)
-        await send_telegram_notification(report_message)
-        
-        # ログと通知時刻をリセット
-        HOURLY_SIGNAL_LOG = []
-        LAST_HOURLY_NOTIFICATION_TIME = time.time()
-        
-
-    # 8. WebShareログのアップロード
+    # 7. WebShareログのアップロード
     if time.time() - LAST_WEBSHARE_UPLOAD_TIME >= WEBSHARE_UPLOAD_INTERVAL:
         await send_webshare_update({
             'timestamp': datetime.now(JST).isoformat(),
@@ -1466,7 +1374,7 @@ async def main_bot_loop():
             'positions': _to_json_compatible(OPEN_POSITIONS),
             'equity': GLOBAL_TOTAL_EQUITY,
             'fgi_raw': GLOBAL_MACRO_CONTEXT['fgi_raw_value'],
-            'bot_version': "v19.0.34"
+            'bot_version': "v19.0.33"
         })
 
     end_time = time.time()
@@ -1478,7 +1386,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.34")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.33")
 
 @app.get("/")
 async def root():
@@ -1490,7 +1398,7 @@ async def root():
         "current_positions": len(OPEN_POSITIONS),
         "last_loop_success": datetime.fromtimestamp(LAST_SUCCESS_TIME, JST).strftime("%Y/%m/%d %H:%M:%S") if LAST_SUCCESS_TIME else "N/A",
         "total_equity_usdt": f"{GLOBAL_TOTAL_EQUITY:.2f}",
-        "bot_version": "v19.0.34 - Limit Order & Exchange SL/TP, Score 100 Max"
+        "bot_version": "v19.0.33 - Limit Order & Exchange SL/TP, Score 100 Max"
     })
 
 @app.post("/webhook")
@@ -1511,7 +1419,6 @@ async def main_loop_scheduler():
         try:
             await main_bot_loop()
         except Exception as e:
-            # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
 
@@ -1530,7 +1437,6 @@ async def open_order_management_scheduler():
             await open_order_management_loop_async() # 関数名を変更
         except Exception as e:
             logging.critical(f"❌ オープン注文監視ループ実行中に致命的なエラー: {e}", exc_info=True)
-             # エラーが発生してもループを停止せず、次の間隔で再試行
 
         await asyncio.sleep(MONITOR_INTERVAL) # MONITOR_INTERVAL (10秒) ごとに実行
 
