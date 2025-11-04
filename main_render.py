@@ -1,12 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.37 - FULL COMPLIANCE (Practical Score Logic Implementation)
+# Apex BOT v19.0.39 - FULL COMPLIANCE (NaN/None Check Fix)
 #
-# 改良・修正点 (v19.0.36からの追加点):
-# 1. 【ロジック修正】score_technical_indicators関数をダミーから実践的なテクニカル分析ロジックに完全移行。
-# 2. 【計算修正】SL/TPの計算にATR（平均真の値幅）を採用し、実践的なリスク管理を実装。
-# 3. 【スコアリング】全てのボーナス/ペナルティを実データに基づいて計算し、合計が1.00 (100点) となるように調整。
-# 4. 【バグ修正】main_bot_schedulerの待機時間計算ロジックを修正。
-# 5. 【通知修正】get_score_breakdownにMACDモメンタムボーナス表示を追加。
+# 改良・修正点 (v19.0.38からの追加点):
+# 1. 【バグ修正】score_technical_indicators関数内の np.isnan() の TypeError を修正。
+#    - last_1h.get() が None を返した場合の処理を安全な順番 (Noneチェック -> np.isnan) に変更。(BBands/ATR)
+# 2. 【内部更新】BOTバージョンを v19.0.39 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -507,7 +505,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.37 - Practical Score Logic</i>")
+    message += (f"<i>Bot Ver: v19.0.39 - Practical Score Logic</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -556,7 +554,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.37 - Practical Score Logic</i>"
+        f"<i>Bot Ver: v19.0.39 - Practical Score Logic</i>"
     )
     
     return message
@@ -807,7 +805,7 @@ async def fetch_ohlcv_safe(symbol: str, timeframe: str, limit: int) -> Optional[
         return None
 
 # ====================================================================================
-# CORE LOGIC (実践ロジック V19.0.37)
+# CORE LOGIC (実践ロジック V19.0.39)
 # ====================================================================================
 
 async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame]) -> Optional[Dict]:
@@ -866,6 +864,7 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     
     # A. 長期トレンド逆行/一致 (SMA200に基づく)
     lt_reversal_penalty_value = 0.0
+    # SMA200カラムが存在し、値がNaNでないことを前提とする
     if not np.isnan(last_1h[SMA_200]) and current_price < last_1h[SMA_200]:
         # 長期トレンド逆行（ロング取引の場合ペナルティ）
         # 価格とSMA200の乖離率を計算
@@ -889,10 +888,10 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     macd_penalty_value = 0.0
     macd_momentum_bonus = 0.0
     
-    if not np.isnan(last_1h[MACD_LINE]) and not np.isnan(last_1h[MACD_SIGNAL]):
+    if MACD_LINE in last_1h and MACD_SIGNAL in last_1h and not np.isnan(last_1h[MACD_LINE]) and not np.isnan(last_1h[MACD_SIGNAL]):
         macd_line = last_1h[MACD_LINE]
         macd_signal = last_1h[MACD_SIGNAL] # シグナルライン
-        macd_hist = last_1h[MACD_HISTOGRAM] # ヒストグラム
+        macd_hist = last_1h.get(MACD_HISTOGRAM, 0.0) # MACDヒストグラム (安全に取得)
 
         if macd_line > macd_signal and macd_hist > 0 and macd_line > 0:
             # MACDゴールデンクロス、ヒストグラムがゼロライン上で拡大 (強い順行モメンタム)
@@ -916,11 +915,13 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     rsi_value = last_1h.get(RSI_14, 50.0) # RSIが計算できない場合は中立値50.0
     rsi_momentum_bonus_value = 0.0
     
-    if rsi_value < 55 and rsi_value > 30:
-        # RSIが売られすぎ水準 (30-45) から55に向けて上昇している場合をボーナス化
-        # 45に近いほど (反発が強いほど) ボーナスを大きくする
-        ratio = (55 - rsi_value) / (55 - 30) # 30->1.0, 55->0.0
-        rsi_momentum_bonus_value = min(RSI_MOMENTUM_BONUS_MAX, ratio * RSI_MOMENTUM_BONUS_MAX)
+    # RSIがfloatであり、nanでないことを確認
+    if isinstance(rsi_value, (float, np.floating)) and not np.isnan(rsi_value):
+        if rsi_value < 55 and rsi_value > 30:
+            # RSIが売られすぎ水準 (30-45) から55に向けて上昇している場合をボーナス化
+            # 45に近いほど (反発が強いほど) ボーナスを大きくする
+            ratio = (55 - rsi_value) / (55 - 30) # 30->1.0, 55->0.0
+            rsi_momentum_bonus_value = min(RSI_MOMENTUM_BONUS_MAX, ratio * RSI_MOMENTUM_BONUS_MAX)
     
     # RSI値も記録 (通知用)
     tech_data['rsi_value'] = rsi_value
@@ -930,10 +931,14 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
     # E. ボラティリティペナルティ (BBands BandWidth)
     volatility_penalty_value = 0.0
     
+    # last_1h.get() はキーが存在しない場合に None を返す可能性がある
     bb_upper = last_1h.get('BBU_20_2')
     bb_lower = last_1h.get('BBL_20_2')
     
-    if not np.isnan(bb_upper) and not np.isnan(bb_lower):
+    # 【v19.0.39 修正】Noneではないことを確認してから、numpy.isnan()を呼び出す
+    if bb_upper is not None and bb_lower is not None and \
+       not np.isnan(bb_upper) and not np.isnan(bb_lower):
+         
          # バンド幅を計算: (Upper - Lower) / Close
          bb_width_ratio = (bb_upper - bb_lower) / current_price
          
@@ -987,9 +992,11 @@ async def score_technical_indicators(symbol: str, data: Dict[str, pd.DataFrame])
 
     # 5. リスク管理パラメータの計算 (実践: ATRに基づくSL/TP)
     
-    # 1分足の最新のATR値を取得
+    # 1分足の最新のATR値を取得 (last_1m.get()を使用)
     current_atr = last_1m.get(ATR_NAME)
-    if np.isnan(current_atr) or current_atr is None:
+    
+    # 【v19.0.39 修正】Noneを先にチェックし、Noneの場合は代替値を使用
+    if current_atr is None or np.isnan(current_atr):
         # ATRが計算できなかった場合 (データ不足など)
         logging.warning(f"⚠️ {symbol}: 1分足のATR計算失敗。価格の0.5%をATRの代わりに使用します。")
         current_atr = current_price * 0.005 # 0.5%をATRの代わりに使用
@@ -1229,7 +1236,7 @@ async def main_bot_loop():
 
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        bot_version = "v19.0.37" # バージョンを更新
+        bot_version = "v19.0.39" # バージョンを更新
         startup_msg = format_startup_message(
             account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, bot_version
         )
@@ -1378,7 +1385,7 @@ async def resilient_scheduler_wrapper(task_func: Callable, task_name: str):
 # API ENDPOINTS & LIFECYCLE
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT API", version="v19.0.37") 
+app = FastAPI(title="Apex BOT API", version="v19.0.39") 
 
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
