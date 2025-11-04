@@ -878,6 +878,10 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
         return None
         
     current_price = df['close'].iloc[-1]
+
+    # 【✅ 修正追加: sl_priceの初期化】
+    # UnboundLocalErrorを回避するため、デフォルト値を設定
+    sl_price = 0.0
     
     # ----------------------------------
     # 1. ロングシグナル判定 (簡易トレンドフィルタ)
