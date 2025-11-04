@@ -1,15 +1,12 @@
 # ====================================================================================
 # Apex BOT v19.0.35 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
 #
-# 改良・修正点 (v19.0.33からの追加点):
-# 1. 【通知機能追加】1時間以内に分析された銘柄の中から、最高スコアと最低スコアの銘柄を1時間ごとに通知する機能を追加 (要件追加1)。
-# 2. 【ロギング強化】ログデータ保存用の一時リストを追加。
-# 3. 【監視機能】BOTの非同期スケジューラが停止しないよう自動再起動機能は、FastAPIのasyncioタスクとロギングにより実質的に担保済み。
-#
-# 【v19.0.35での修正点】
+# 改良・修正点:
 # 1. WebShare関連の機能、設定、ロジックをすべて削除しました。
 # 2. 初回起動通知時の `format_startup_message` の引数不足エラーを修正しました。
-# 3. 【今回の修正】CCXTクライアントのタイムアウト値を20秒に延長しました。
+# 3. CCXTクライアントの初期化時のタイムアウト値を20秒に延長し、RequestTimeoutエラーを解消しました。
+# 4. 【今回の修正】`send_telegram_notification` 関数を定義し、NameErrorを解消しました。
+# 5. 【通知機能追加】1時間以内に分析された銘柄の中から、最高スコアと最低スコアの銘柄を1時間ごとに通知する機能を追加 (要件追加1)。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -577,6 +574,45 @@ def log_signal(signal: Dict, context: str):
 # CCXT & DATA ACQUISITION
 # ====================================================================================
 
+async def send_telegram_notification(message: str) -> bool:
+    """
+    指定されたメッセージをTelegramに送信する非同期関数。
+    NameError解消のため、新たに追加。
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.error("❌ Telegram設定が不足しています。通知をスキップします。")
+        return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    
+    # URLに含めるパラメータ (HTMLパースモードを使用)
+    params = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'HTML' # HTMLタグ (<code>, <b>など) を使用するためHTMLモード
+    }
+    
+    try:
+        # requestsライブラリを使用 (ブロッキングの可能性があるため、本番環境では注意が必要)
+        response = requests.post(url, data=params, timeout=10)
+        response.raise_for_status()
+        
+        # Telegram APIの応答をチェック
+        if response.json().get('ok'):
+            logging.info("✅ Telegram通知を送信しました。")
+            return True
+        else:
+            logging.error(f"❌ Telegram API送信失敗: {response.text}")
+            return False
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"❌ Telegram通知送信失敗 (ネットワークエラー): {e}")
+        return False
+    except Exception as e:
+        logging.error(f"❌ Telegram通知送信中に予期せぬエラー: {e}")
+        return False
+
+
 async def initialize_exchange_client():
     """CCXTクライアントを初期化し、市場情報をロードする"""
     global EXCHANGE_CLIENT, IS_CLIENT_READY
@@ -599,7 +635,7 @@ async def initialize_exchange_client():
             'options': {
                 'defaultType': 'spot', # 現物取引モード
             },
-            # 💡 【今回の修正点】APIリクエストのタイムアウトを延長 (ミリ秒で指定: 20000ms = 20秒)
+            # 💡 【修正点】APIリクエストのタイムアウトを延長 (ミリ秒で指定: 20000ms = 20秒)
             'timeout': 20000, 
         }
         EXCHANGE_CLIENT = exchange_class(config)
@@ -1032,7 +1068,7 @@ async def place_sl_tp_orders(symbol: str, filled_amount: float, stop_loss: float
         amount_to_sell, _ = await adjust_order_amount(symbol, filled_amount * stop_loss, stop_loss)
         
         # ストップトリガー価格: stop_loss
-        # 指値価格: スリッページ対策としてストップ価格よりわずかに下 (0.1%下)
+        # 指値価格: スリッページ対策としてストップ価格よりわずかに下 (0.1%下)
         sl_limit_price = stop_loss * 0.999 
 
         # CCXTのストップ注文は、取引所によってparamsが異なるため、汎用的に'stop_limit'タイプを使用
@@ -1450,7 +1486,13 @@ async def main_bot_scheduler():
         except Exception as e:
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
-            await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
+            # 【💡 NameError解消のため、ここもsend_telegram_notificationの定義に依存】
+            # send_telegram_notificationが定義されたため、エラー通知も動作する
+            try:
+                 await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
+            except NameError:
+                 logging.critical(f"二次エラー: send_telegram_notificationが未定義のため、エラー通知も失敗しました。")
+
 
         # 待機時間を LOOP_INTERVAL (60秒) に基づいて計算
         # 実行にかかった時間を差し引くことで、正確な周期実行を保証
