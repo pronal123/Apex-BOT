@@ -2,12 +2,10 @@
 # Apex BOT v19.0.39 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
 #
 # 改良・修正点:
-# 1. 【既存修正】execute_trade関数内のCCXT注文応答処理を強化。
-# 2. 【既存修正】詳細ロギングを維持。
-# 3. 【新規要件対応】RSI短期/長期クロスによるモメンタム確証を強化。
-# 4. 【新規要件対応】ATRベースの動的ボラティリティフィルタとペナルティを導入。
-# 5. 【新規要件対応】ATRベースの動的ストップロス(SL)/テイクプロフィット(TP)幅決定を導入。
-# 6. 【新規要件対応】エラー発生時の完全なトレースバックを含むTelegram通知を実装。
+# 1. 【要件8】エラー発生時の完全なトレースバックを含むTelegram通知を追加。
+# 2. 【実行ログ対応】mexc fetchOpenOrders() requires a symbol argument エラーに対応するため、
+#    open_order_management_loop関数で、ポジションを持つシンボルごとに注文を取得するように修正。
+# 3. その他、要件1-7に対応したv19.0.39のロジックを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -588,7 +586,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **銘柄**: <b>{worst_signal['symbol']}</b> ({worst_signal['timeframe']})\n"
         f"  - **スコア**: <code>{worst_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(worst_signal['score'])}</code>\n"
-        f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
+        f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price']}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<i>Bot Ver: v19.0.39 - Dynamic Risk/Momentum Fix</i>"
@@ -671,7 +669,7 @@ async def initialize_exchange_client():
     """CCXTクライアントを初期化し、市場情報をロードする"""
     global EXCHANGE_CLIENT, IS_CLIENT_READY
     
-    logging.info(f"⏳ CCXTクライアント ({CCXT_CLIENT_NAME}) の初期化を開始します...")
+    logging.info(f"⏳ CCXTクライアント ({CCXT_CLIENT_NAME}) の初期化を開始します。")
     
     # 以前のインスタンスを閉じる
     if EXCHANGE_CLIENT:
@@ -1063,7 +1061,6 @@ def analyze_signals(df: pd.DataFrame, symbol: str, timeframe: str, macro_context
     return signal_data
 
 
-# ... (adjust_order_amount, place_sl_tp_orders, cancel_all_related_orders, execute_trade のコードは既存のまま)
 async def adjust_order_amount(symbol: str, usdt_amount: float, price: float) -> Tuple[float, float]:
     """取引所のルールに基づいて注文数量を調整する"""
     global EXCHANGE_CLIENT
@@ -1334,7 +1331,7 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                 logging.error(f"❌ FOK約定後、SL/TP注文設定に失敗しました: {sl_tp_result['error_message']}。ポジションは手動管理が必要です。")
                 return {
                     'status': 'error',
-                    'error_message': f"SL/TP注文設定失敗: {sl_tp_result['error_message']}。手動で決済注文を設定してください。",
+                    'error_message': f"SL/TP注文設定失敗: {sl_tp_result['error_message']}。",
                     'id': order['id'],
                     'entry_price': entry_price,
                     'filled_amount': filled_amount,
@@ -1369,15 +1366,35 @@ async def open_order_management_loop():
     
     if not EXCHANGE_CLIENT or not IS_CLIENT_READY or not API_KEY or not SECRET_KEY:
         return # クライアントが未準備または取引不可の場合はスキップ
+        
+    # 💡 【MEXC Spot対応修正】追跡中のポジションがない場合は、エラーを避けるためにスキップ
+    if not OPEN_POSITIONS:
+        logging.info(f"🌐 注文監視開始: 現在 {len(OPEN_POSITIONS)} のポジションを追跡中。監視をスキップします。")
+        return 
 
     positions_to_remove_ids = []
     
     try:
-        # 未決済のオープン注文をフェッチ (SL/TP注文が含まれる)
-        open_orders = await EXCHANGE_CLIENT.fetch_open_orders()
+        # 1. オープン注文のフェッチ (取引所の仕様に合わせて修正)
+        open_orders = []
+        # 管理中のポジションのシンボルを抽出 (重複排除)
+        monitoring_symbols = {p['symbol'] for p in OPEN_POSITIONS}
+
+        for symbol in monitoring_symbols:
+            try:
+                # 💡 シンボル引数を指定してfetch_open_ordersを呼び出す (MEXCなどの現物取引所対応)
+                orders_for_symbol = await EXCHANGE_CLIENT.fetch_open_orders(symbol=symbol)
+                open_orders.extend(orders_for_symbol)
+            except Exception as e:
+                # シンボルごとのフェッチで失敗した場合、そのシンボルはスキップ
+                logging.warning(f"⚠️ {symbol}: オープン注文のフェッチに失敗しました: {e}。このシンボルの決済監視を一時的にスキップします。")
+                continue
+
+
+        # オープン注文IDのセットを作成
         open_order_ids = {order['id'] for order in open_orders}
 
-        logging.info(f"🌐 注文監視開始: 現在 {len(OPEN_POSITIONS)} のポジションを追跡中。オープン注文数: {len(open_orders)}")
+        logging.info(f"🌐 注文監視開始: 現在 {len(OPEN_POSITIONS)} のポジションを追跡中。検出されたオープン決済注文数: {len(open_order_ids)}")
 
         for position in OPEN_POSITIONS:
             is_closed = False
