@@ -1,10 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.37 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
+# Apex BOT v19.0.38 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
 #
 # 改良・修正点:
-# 1. v19.0.36で修正した通知ロジック（取引失敗時のブレークダウン表示）を維持。
-# 2. 【今回の修正】分析・取引ロジック全体にわたり、分析しやすいように詳細なログを追加。
-# 3. v19.0.36で修正した各種エラー/バグフィックスを維持。
+# 1. 【今回の修正】execute_trade関数内のCCXT注文応答処理を強化。
+#    - 取引所APIがCCXT標準の'status'フィールドにNoneを返すケースに対応。
+#    - 'filled'フィールドが0またはNoneの場合にFOK不成立と判断し、エラーログを回避。
+# 2. v19.0.37で修正した詳細ロギングを維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -149,9 +150,9 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.85       
-SIGNAL_THRESHOLD_NORMAL = 0.83      
-SIGNAL_THRESHOLD_ACTIVE = 0.80      
+SIGNAL_THRESHOLD_SLUMP = 0.94       
+SIGNAL_THRESHOLD_NORMAL = 0.92      
+SIGNAL_THRESHOLD_ACTIVE = 0.90      
 
 # ====================================================================================
 # UTILITIES & FORMATTING 
@@ -511,7 +512,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.37 - Enhanced Logging</i>")
+    message += (f"<i>Bot Ver: v19.0.38 - Fix CCXT Status None</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -560,7 +561,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.37 - Enhanced Logging</i>"
+        f"<i>Bot Ver: v19.0.38 - Fix CCXT Status None</i>"
     )
     
     return message
@@ -1202,12 +1203,16 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
             params={'timeInForce': 'FOK'}
         )
 
-        # 3. 注文結果の確認
-        if order and order['status'] == 'closed':
+        # 3. 注文結果の確認 【💡 CCXTステータスNone対応のため修正】
+        filled_amount = order.get('filled')
+        filled_usdt = order.get('cost') 
+        
+        # 注文が部分的にでも約定した場合 (FOKの場合、全量約定が期待される)
+        if filled_amount and filled_amount > 0.0:
+            
             # 即時約定成功
-            filled_amount = order['filled']
-            filled_usdt = order['cost'] # USDT建ての約定金額
-            entry_price = order['average'] if 'average' in order and order['average'] is not None else limit_price
+            # averageがNoneの場合はlimit_priceを使用
+            entry_price = order.get('average') if order.get('average') is not None else limit_price 
             
             logging.info(f"✅ FOK注文成功 ({symbol}): 約定価格={format_price_precision(entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
             
@@ -1234,12 +1239,12 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                  logging.error("❌ FOK約定後のSL/TP注文設定に失敗しました。ポジションは手動で管理してください。")
                  return {'status': 'error', 'error_message': f"約定後のSL/TP注文設定に失敗しました。指値買い注文ID: {order['id']}"}
                  
-        elif order and order['status'] in ('open', 'partial', 'canceled'):
-            logging.info(f"➖ FOK注文スキップ ({symbol}): 即時全量約定しなかったため、キャンセルされました。Status={order['status']}, ID={order['id']}")
-            return {'status': 'error', 'error_message': f"指値注文が即時全量約定しなかったため、取引をスキップしました (FOK)。"}
+        # 約定しなかった場合 (filledがNoneまたは0.0の場合、FOK不成立)
         else:
-            logging.error(f"❌ 注文API応答が不正です: {order}")
-            return {'status': 'error', 'error_message': f"注文API応答が不正です。ログを確認してください。"}
+            # filled_amountがない、または0の場合、CCXTステータス(None, open, partial, canceled)に関わらずFOK不成立と判断
+            logging.info(f"➖ FOK注文スキップ ({symbol}): 即時全量約定しなかったため、キャンセルされました。Status={order.get('status')}, ID={order.get('id')}")
+            return {'status': 'error', 'error_message': f"指値注文が即時全量約定しなかったため、取引をスキップしました (FOK)。"}
+
 
     except ccxt.ExchangeError as e:
         if "Fill-or-Kill" in str(e) or "was not filled" in str(e) or "filled 0" in str(e):
@@ -1502,7 +1507,7 @@ async def main_bot_loop():
             macro_context=GLOBAL_MACRO_CONTEXT, 
             monitoring_count=len(CURRENT_MONITOR_SYMBOLS), 
             current_threshold=current_threshold, 
-            bot_version="v19.0.37"
+            bot_version="v19.0.38"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1525,7 +1530,7 @@ async def main_bot_loop():
 # FASTAPI & ASYNC EXECUTION
 # ====================================================================================
 
-app = FastAPI(title="Apex BOT Trading API", version="v19.0.37")
+app = FastAPI(title="Apex BOT Trading API", version="v19.0.38")
 
 @app.get("/")
 async def root():
@@ -1563,6 +1568,7 @@ async def main_bot_scheduler():
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             try:
+                 # 💡 Telegram通知失敗時の二次エラーをハンドリング
                  await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
             except Exception:
                  logging.critical(f"二次エラー: エラー通知も失敗しました。")
