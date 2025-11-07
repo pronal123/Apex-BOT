@@ -1,10 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.39 - FULL COMPLIANCE (MACD Column Name Re-Fix)
+# Apex BOT v19.0.40 - FULL COMPLIANCE (BBands Column Name Fix & MEXC Order Management Fix)
 #
 # 改良・修正点:
-# 1. v19.0.38の修正内容を維持。
-# 2. 【MACDキー再修正】calculate_indicators関数内のMACD列名を再修正。
-#    - pandas_taの出力がサフィックス付きであることを確認し、MACD, MACDH, MACDSの列名に '_12_26_9' を使用するように変更。
+# 1. 【BBANDSキー修正】calculate_indicators関数内のBBands列名を修正。
+#    - Key 'BBL_20_2.0' not found エラーに対応するため、MACDと異なり一般的なキー名 (BBL, BBU, BBB) を使用するように変更。
+# 2. 【注文監視修正】open_order_management_loop関数を修正。
+#    - mexc fetchOpenOrders() requires a symbol argument エラーに対応するため、
+#      保有ポジションのシンボルのみを対象にオープン注文を取得するようにロジックを変更。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -511,7 +513,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.39 - MACD Column Name Re-Fix</i>")
+    message += (f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -560,7 +562,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.39 - MACD Column Name Re-Fix</i>"
+        f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>"
     )
     
     return message
@@ -829,16 +831,17 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     macd_data = df.ta.macd(close='close', fast=12, slow=26, signal=9, append=False) 
     
     # MACDの結果をDataFrameに追加
-    # 【MACDキーの再修正】 ユーザーのログに合わせてサフィックス付きのキーを使用する
-    df['MACD'] = macd_data['MACD_12_26_9']  # 再修正
-    df['MACD_H'] = macd_data['MACDh_12_26_9'] # 再修正
-    df['MACD_S'] = macd_data['MACDs_12_26_9'] # 再修正
+    # 【MACDキーの再修正】 ユーザーのログに合わせてサフィックス付きのキーを使用する (v19.0.39で修正済み)
+    df['MACD'] = macd_data['MACD_12_26_9']  
+    df['MACD_H'] = macd_data['MACDh_12_26_9'] 
+    df['MACD_S'] = macd_data['MACDs_12_26_9'] 
     
     # Bollinger Bands
     bb_data = df.ta.bbands(close='close', length=20, std=2.0, append=False)
-    df['BBL'] = bb_data['BBL_20_2.0']
-    df['BBU'] = bb_data['BBU_20_2.0']
-    df['BBB'] = bb_data['BBB_20_2.0'] # Band Width Percentage
+    # 💡 【BBANDSキーの修正】 Key 'BBL_20_2.0' not found エラーに対応するため、一般的なキー名に修正 (v19.0.40で修正)
+    df['BBL'] = bb_data['BBL']  # 修正: 'BBL_20_2.0' -> 'BBL'
+    df['BBU'] = bb_data['BBU']  # 修正: 'BBU_20_2.0' -> 'BBU'
+    df['BBB'] = bb_data['BBB'] # 修正: 'BBB_20_2.0' -> 'BBB' (Band Width Percentage)
     
     # OBV
     df['OBV'] = ta.obv(df['close'], df['volume'], append=False)
@@ -1366,12 +1369,32 @@ async def open_order_management_loop():
 
     positions_to_remove_ids = []
     
+    # 💡 【MEXC対応修正】ポジションがない場合は監視をスキップ
+    if not OPEN_POSITIONS:
+        logging.info("🌐 注文監視開始: 現在追跡中のポジションはありません。")
+        return
+    
     try:
-        # 未決済のオープン注文をフェッチ (SL/TP注文が含まれる)
-        open_orders = await EXCHANGE_CLIENT.fetch_open_orders()
-        open_order_ids = {order['id'] for order in open_orders}
+        # 💡 【MEXC対応修正】fetch_open_orders(symbol=None)がサポートされていない取引所(MEXC)に対応するため、
+        #    ポジションを持つシンボルごとにオープン注文をフェッチする。
+        managed_symbols = {p['symbol'] for p in OPEN_POSITIONS}
+        open_orders_list = []
+        
+        # シンボルごとにオープン注文を取得するタスクを作成
+        fetch_tasks = [EXCHANGE_CLIENT.fetch_open_orders(symbol=symbol) for symbol in managed_symbols]
+        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, Exception):
+                # エラーをログに記録し、他のシンボルの処理を継続
+                logging.warning(f"⚠️ オープン注文取得失敗 (一部): {result}")
+            elif isinstance(result, list):
+                open_orders_list.extend(result)
+                
+        open_order_ids = {order['id'] for order in open_orders_list}
 
-        logging.info(f"🌐 注文監視開始: 現在 {len(OPEN_POSITIONS)} のポジションを追跡中。オープン注文数: {len(open_orders)}")
+        logging.info(f"🌐 注文監視開始: 現在 {len(OPEN_POSITIONS)} のポジションを追跡中。オープン注文数: {len(open_order_ids)}")
+
 
         for position in OPEN_POSITIONS:
             is_closed = False
@@ -1593,7 +1616,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitoring_symbols), 
             current_threshold,
-            "v19.0.39 - MACD Column Name Re-Fix"
+            "v19.0.40 - BBands/MEXC Order Fix"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1649,7 +1672,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.39")
+app = FastAPI(title="Apex BOT API", version="v19.0.40")
 
 @app.on_event("startup")
 async def startup_event():
