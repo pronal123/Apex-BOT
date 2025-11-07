@@ -1,12 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.38 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
+# Apex BOT v19.0.39 - FULL COMPLIANCE (MACD Column Name Re-Fix)
 #
 # 改良・修正点:
-# 1. 【今回の修正】execute_trade関数内のCCXT注文応答処理を強化。
-#    - 取引所APIがCCXT標準の'status'フィールドにNoneを返すケースに対応。
-#    - 'filled'フィールドが0またはNoneの場合にFOK不成立と判断し、エラーログを回避。
-# 2. v19.0.37で修正した詳細ロギングを維持。
-# 3. 【ログエラー対応】calculate_indicators関数内のMACD列名を修正 ('MACD_12_26_9' -> 'MACD')。
+# 1. v19.0.38の修正内容を維持。
+# 2. 【MACDキー再修正】calculate_indicators関数内のMACD列名を再修正。
+#    - pandas_taの出力がサフィックス付きであることを確認し、MACD, MACDH, MACDSの列名に '_12_26_9' を使用するように変更。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -513,7 +511,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.38 - Fix CCXT Status None</i>")
+    message += (f"<i>Bot Ver: v19.0.39 - MACD Column Name Re-Fix</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -562,7 +560,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.38 - Fix CCXT Status None</i>"
+        f"<i>Bot Ver: v19.0.39 - MACD Column Name Re-Fix</i>"
     )
     
     return message
@@ -831,10 +829,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     macd_data = df.ta.macd(close='close', fast=12, slow=26, signal=9, append=False) 
     
     # MACDの結果をDataFrameに追加
-    # 【MACDキーの修正】 pandas_taのバージョン変更に対応するため、サフィックスなしのキーを使用
-    df['MACD'] = macd_data['MACD']  # 修正 (旧: macd_data['MACD_12_26_9'])
-    df['MACD_H'] = macd_data['MACDH'] # 修正 (旧: macd_data['MACDH_12_26_9'])
-    df['MACD_S'] = macd_data['MACDS'] # 修正 (旧: macd_data['MACDS_12_26_9'])
+    # 【MACDキーの再修正】 ユーザーのログに合わせてサフィックス付きのキーを使用する
+    df['MACD'] = macd_data['MACD_12_26_9']  # 再修正
+    df['MACD_H'] = macd_data['MACDh_12_26_9'] # 再修正
+    df['MACD_S'] = macd_data['MACDs_12_26_9'] # 再修正
     
     # Bollinger Bands
     bb_data = df.ta.bbands(close='close', length=20, std=2.0, append=False)
@@ -1595,7 +1593,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(monitoring_symbols), 
             current_threshold,
-            "v19.0.38 - Fix CCXT Status None"
+            "v19.0.39 - MACD Column Name Re-Fix"
         )
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1651,7 +1649,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.38")
+app = FastAPI(title="Apex BOT API", version="v19.0.39")
 
 @app.on_event("startup")
 async def startup_event():
