@@ -586,7 +586,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **銘柄**: <b>{worst_signal['symbol']}</b> ({worst_signal['timeframe']})\n"
         f"  - **スコア**: <code>{worst_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(worst_signal['score'])}</code>\n"
-        f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price']}</code>\n"
+        f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<i>Bot Ver: v19.0.39 - Dynamic Risk/Momentum Fix</i>"
