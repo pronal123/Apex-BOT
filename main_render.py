@@ -1,12 +1,9 @@
 # ====================================================================================
-# Apex BOT v19.0.38 - FULL COMPLIANCE (Limit Order & Exchange SL/TP, Score 100 Max)
+# Apex BOT v19.0.39 - Fix Insufficient Data for New/Low-Liquidity Symbols
 #
 # 改良・修正点:
-# 1. 【今回の修正】execute_trade関数内のCCXT注文応答処理を強化。
-#    - 取引所APIがCCXT標準の'status'フィールドにNoneを返すケースに対応。
-#    - 'filled'フィールドが0またはNoneの場合にFOK不成立と判断し、エラーログを回避。
-# 2. v19.0.37で修正した詳細ロギングを維持。
-# 3. 【データ不足警告解消】REQUIRED_OHLCV_LIMITSを500から1000に引き上げ。
+# 1. 【今回の修正】データ不足警告を解消するため、最低必要本数 (MIN_REQUIRED_CANDLES = 220) を設定。
+# 2. fetch_ohlcv関数内のデータ有無チェックを、要求したLIMIT (1000) ではなく、MIN_REQUIRED_CANDLES (220) で行うように変更。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -121,7 +118,7 @@ IS_CLIENT_READY: bool = False
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
 SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
-# 💡 【修正点】データ不足警告を解消するため、OHLCV取得本数を500から1000に引き上げ
+# 💡 【取得本数は1000本のまま維持】取引所が提供可能な最大のOHLCVを取得
 REQUIRED_OHLCV_LIMITS = {'1m': 1000, '5m': 1000, '15m': 1000, '1h': 1000, '4h': 1000} # 1m, 5mを含む
 
 # ====================================================================================
@@ -133,6 +130,7 @@ TARGET_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h']
 # スコアリングウェイト
 BASE_SCORE = 0.50                   # ベースとなる取引基準点 (50点)
 LONG_TERM_SMA_LENGTH = 200          # 長期トレンドフィルタ用SMA
+MIN_REQUIRED_CANDLES = 220          # ★ SMA200+αの最低必要データ本数 (データ不足警告解消のため追加)
 
 # ペナルティ（マイナス要因）
 LONG_TERM_REVERSAL_PENALTY = 0.30   # 長期トレンド逆行時のペナルティを強化
@@ -514,7 +512,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.38 - Fix CCXT Status None</i>")
+    message += (f"<i>Bot Ver: v19.0.39 - Fix Data Avail Check</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -563,7 +561,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.38 - Fix CCXT Status None</i>"
+        f"<i>Bot Ver: v19.0.39 - Fix Data Avail Check</i>"
     )
     
     return message
@@ -661,7 +659,7 @@ async def initialize_exchange_client():
             'options': {
                 'defaultType': 'spot', # 現物取引モード
             },
-            # 💡 【修正点】APIリクエストのタイムアウトを延長 (ミリ秒で指定: 20000ms = 20秒)
+            # 💡 APIリクエストのタイムアウトを延長 (ミリ秒で指定: 20000ms = 20秒)
             'timeout': 20000, 
         }
         EXCHANGE_CLIENT = exchange_class(config)
@@ -753,15 +751,21 @@ async def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         logging.error("❌ OHLCV取得失敗: CCXTクライアントが未準備です。")
         return None
 
-    # REQUIRED_OHLCV_LIMITSから、そのタイムフレームに必要なデータ本数を取得
+    # REQUIRED_OHLCV_LIMITSから、そのタイムフレームに必要なデータ本数を取得 (最大1000本を要求)
     limit = REQUIRED_OHLCV_LIMITS.get(timeframe, 1000) 
 
     try:
         # OHLCVデータを取得
         ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
         
-        if not ohlcv or len(ohlcv) < limit:
-            logging.warning(f"⚠️ {symbol} ({timeframe}): インジケーター計算に必要なデータが不足しています。分析をスキップします。")
+        if not ohlcv:
+            logging.warning(f"⚠️ {symbol} ({timeframe}): データ取得に失敗しました。分析をスキップします。")
+            return None
+
+        # 💡 【修正ポイント】要求本数(limit=1000)ではなく、最低必要本数(MIN_REQUIRED_CANDLES=220)でチェック
+        # 長期インジケーター(SMA200)の計算に必要な最低本数が確保できているか確認
+        if len(ohlcv) < MIN_REQUIRED_CANDLES:
+            logging.warning(f"⚠️ {symbol} ({timeframe}): インジケーター計算に必要な最低限のデータ ({MIN_REQUIRED_CANDLES}本) が不足しています (取得数: {len(ohlcv)}本)。分析をスキップします。")
             return None # データ不足の場合は分析を中止
 
         # DataFrameに変換
@@ -1413,7 +1417,7 @@ async def main_bot_loop():
             GLOBAL_MACRO_CONTEXT, 
             len(CURRENT_MONITOR_SYMBOLS),
             current_threshold,
-            bot_version="v19.0.38 - Fix CCXT Status None"
+            bot_version="v19.0.39 - Fix Data Avail Check" # バージョンを更新
         )
         await send_telegram_notification(notification_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
@@ -1606,8 +1610,8 @@ async def open_order_management_scheduler():
 
 app = FastAPI(
     title="Apex BOT API",
-    description="Apex BOT v19.0.38 - Trading Bot Backend",
-    version="19.0.38"
+    description="Apex BOT v19.0.39 - Trading Bot Backend",
+    version="19.0.39"
 )
 
 # 💡 Uvicornポートの環境変数からの取得に対応
@@ -1656,6 +1660,3 @@ async def read_root():
         },
         "top_5_signals": top_signals
     })
-
-# Uvicornの起動コマンドは、外部で実行されます
-# == > Running 'uvicorn main_render:app --host 0.0.0.0 --port $PORT'
