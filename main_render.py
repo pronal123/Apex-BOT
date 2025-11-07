@@ -839,9 +839,11 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Bollinger Bands
     bb_data = df.ta.bbands(close='close', length=20, std=2.0, append=False)
     # 💡 【BBANDSキーの修正】 Key 'BBL_20_2.0' not found エラーに対応するため、一般的なキー名に修正 (v19.0.40で修正)
-    df['BBL'] = bb_data['BBL']  # 修正: 'BBL_20_2.0' -> 'BBL'
-    df['BBU'] = bb_data['BBU']  # 修正: 'BBU_20_2.0' -> 'BBU'
-    df['BBB'] = bb_data['BBB'] # 修正: 'BBB_20_2.0' -> 'BBB' (Band Width Percentage)
+    df['BBL'] = bb_data['BBL_20_2.0_2.0']
+    df['BBM'] = bb_data['BBM_20_2.0_2.0']
+    df['BBU'] = bb_data['BBU_20_2.0_2.0']
+    df['BBB'] = bb_data['BBB_20_2.0_2.0']
+    df['BBP'] = bb_data['BBP_20_2.0_2.0']
     
     # OBV
     df['OBV'] = ta.obv(df['close'], df['volume'], append=False)
