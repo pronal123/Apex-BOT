@@ -1,12 +1,13 @@
 # ====================================================================================
-# Apex BOT v19.0.43 - Full Analysis Report Mode
+# Apex BOT v19.0.44 - Full Analysis & Async Refactoring
 #
 # 改良・修正点:
-# 1. 【最重要修正】generate_signal_and_score関数から、基本シグナル条件(is_long_signal)を
-#    満たさない場合の早期リターン(return None)を削除。
-#    -> これにより、OHLCVデータが取得できた全ての銘柄に対してスコアリングを強制実行し、
-#    HOURLY_SIGNAL_LOGに記録するようになり、最高/最低スコアレポートが必ず銘柄を通知します。
-# 2. 【バージョン更新】v19.0.43に更新。
+# 1. 【最重要修正】シンボルごとの分析処理を analyze_symbol 関数として分離。
+# 2. 【並列処理】main_bot_loop 内で asyncio.gather を使用し、全銘柄の分析を並列実行。
+#    -> これにより、APIのレート制限による遅延やタイムアウトを防ぎ、分析の成功率を向上させる。
+# 3. 【データチェック緩和】generate_signal_and_score 関数内の OHLCV データ量のチェックを緩和。
+#    -> テクニカル指標に必要なデータが揃っていれば、スコアリングを続行する。
+# 4. 【レポート強化】 hourly_report で分析成功銘柄数と、分析対象外となった銘柄数を明確に報告。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -110,6 +111,7 @@ IS_FIRST_MAIN_LOOP_COMPLETED: bool = False # 初回メインループ完了フ�
 OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (注文IDトラッキング用)
 GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変数
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
+HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -538,14 +540,13 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.43 - Full Analysis Report Mode</i>")
+    message += (f"<i>Bot Ver: v19.0.44 - Full Analysis & Async Refactoring</i>")
     return message
 
-def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
+def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start_time: float, current_threshold: float) -> str:
     """
     1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する。
-    ★この関数は、渡されたシグナルリスト（HOURLY_SIGNAL_LOG）全体から、
-    ★閾値に関わらず最高・最低スコアを選出するように実装されています。(ユーザー要望を満たしています)
+    ★ v19.0.44: 分析成功銘柄数と失敗銘柄数を追加報告
     """
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -554,22 +555,30 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     # スコアでソート
     signals_sorted = sorted(signals, key=lambda x: x['score'], reverse=True)
     
+    analyzed_count = len(signals)
+    attempt_count = len(attempt_log) # 分析試行されたが、クールダウンなどでスキップされた銘柄
+    
+    # 総監視銘柄数から、分析をスキップされた銘柄を計算
+    total_monitoring_count = len(CURRENT_MONITOR_SYMBOLS)
+    skipped_count = total_monitoring_count - analyzed_count - attempt_count
+
     # 基本情報
     message = (
         f"🕒 **Apex BOT 1時間スコアレポート**\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - **集計日時**: {start_jst} - {now_jst} (JST)\n"
-        f"  - **分析銘柄数**: <code>{len(signals)}</code>\n"
+        f"  - **総監視銘柄数**: <code>{total_monitoring_count}</code>\n"
+        f"  - **分析成功銘柄数**: <code>{analyzed_count}</code>\n"
     )
     
     if not signals_sorted:
         # シグナルがなかった場合のレポート
-        # ★ V19.0.43では、データ取得が失敗しない限り、分析銘柄数は0にならない
         message += (
             f"  - **レポート**: 過去1時間以内に有効な分析データが取得できませんでした。\n"
+            f"  - **失敗・スキップ理由**: <code>データ取得失敗、指標計算エラー、クールダウンなど。ログを確認してください。</code>\n"
             f"  - **取引閾値**: <code>{current_threshold*100:.2f}</code> 点\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"<i>Bot Ver: v19.0.43 - Full Analysis Report Mode</i>"
+            f"<i>Bot Ver: v19.0.44 - Full Analysis & Async Refactoring</i>"
         )
         return message
 
@@ -585,7 +594,6 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     message += f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
     
     # 🟢 ベストスコア銘柄
-    # ★ 95点未満でも最高スコアであればここに表示されます。
     message += (
         f"\n"
         f"🟢 **ベストスコア銘柄 (Top)**\n"
@@ -610,7 +618,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     
     message += (
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.43 - Full Analysis Report Mode</i>"
+        f"<i>Bot Ver: v19.0.44 - Full Analysis & Async Refactoring</i>"
     )
     
     return message
@@ -858,16 +866,13 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # MACD
     macd_data = df.ta.macd(close='close', fast=12, slow=26, signal=9, append=False)
     # MACDの結果をDataFrameに追加
-    # 【MACDキーの再修正】 ユーザーのログに合わせてサフィックス付きのキーを使用する (v19.0.39で修正済み)
     df['MACD'] = macd_data['MACD_12_26_9']
     df['MACD_H'] = macd_data['MACDh_12_26_9']
     df['MACD_S'] = macd_data['MACDs_12_26_9']
     
     # Bollinger Bands
     bb_data = df.ta.bbands(close='close', length=20, std=2.0, append=False)
-    # 💡 【BBANDSキーの修正】 Key 'BBL_20_2.0' not found エラーに対応するため、一般的なキー名に修正 (v19.0.40で修正)
-    # pandas-taの最近のバージョンでは、BBANDSは 'BBL_20_2.0' ではなく 'BBL_20_2.0_2.0' や一般的な 'BBL' が使われることがある
-    # ログが示すエラーは「'BBL_20_2.0'」であるため、このコードではキーを修正して対応する
+    # 💡 【BBANDSキーの修正】 Key 'BBL_20_2.0' not found エラーに対応
     df['BBL'] = bb_data['BBL_20_2.0_2.0']
     df['BBM'] = bb_data['BBM_20_2.0_2.0']
     df['BBU'] = bb_data['BBU_20_2.0_2.0']
@@ -880,63 +885,73 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Volume SMA (出来高の平均)
     df['Volume_SMA20'] = ta.sma(df['volume'], length=20)
     
-    # Pivot Points (Pivot Points Standard)
-    # df.ta.pivot_points(append=True) # インデックスに依存するため、ここでは省略
+    # NaN行を削除して、指標計算後に有効なデータのみを残す
+    df = df.dropna().reset_index(drop=True)
     
-    return df.dropna().reset_index(drop=True)
+    return df
 
 def generate_signal_and_score(
     df: pd.DataFrame, 
     timeframe: str,
     market_ticker: Dict,
     macro_context: Dict,
-    required_ohlcv_limit: int = 500
 ) -> Optional[Dict]:
     """
     指定されたデータフレームからロングシグナルを生成し、スコアリングする。
-    ★ V19.0.43: 基本シグナル条件に関わらず、OHLCVデータが存在する限りスコアリングを強制実行します。
+    ★ V19.0.44: データ取得・指標計算でデータ量が少なすぎた場合のみNoneを返す。
     """
     
-    if len(df) < required_ohlcv_limit or df.isnull().values.any():
-        # データが不十分または計算エラーでNaNが含まれる
-        return None
-
-    # 1. テクニカル指標の計算 (既に calculate_indicators で実行済みだが、欠損値処理のためにここでは最新データを確認)
-    df = calculate_indicators(df)
+    # 1. テクニカル指標の計算 (calculate_indicators で実行済みだが、欠損値処理のためにここでは最新データを確認)
+    # calculate_indicators が NaN を drop しているため、有効なデータ数をチェック
     
-    if len(df) < 10: # インジケータ計算でデータが減りすぎた場合
+    # 銘柄分析に最低限必要なデータ量 (例: ATR計算には14, SMA200計算には200のデータが必要なので、それより多く必要)
+    # SMA200の計算には200本必要だが、計算後のデータが10本未満はリスク計算不可
+    if len(df) < 10 or df.isnull().values.any(): 
+        # データが不十分または計算エラーでNaNが含まれる
         return None
 
     # 最新のローソク足データを取得
     last_candle = df.iloc[-1]
     last_close = last_candle['close']
     last_low = last_candle['low']
-    last_high = last_candle['high']
     
-    # 2. シグナル生成 (簡易的なロングエントリー条件 - V19.0.43ではスコアリングのボーナス/ペナルティに利用するのみ)
+    # ATR (Average True Range) を使用したSL/TPの計算のために、まずATRを計算する
+    atr_data = df.ta.atr(length=14, append=False)
     
-    # 【条件1】価格がBBの下限線付近にある (リバーサル/押し目狙い)
-    is_at_lower_bb = last_low <= last_candle['BBL']
-    
-    # 【条件2】RSIが売られすぎ水準を脱しつつある (45 < RSI < 70)
-    rsi = last_candle['RSI']
-    is_rsi_recovering = RSI_MOMENTUM_LOW < rsi < 70.0
-    
-    # 【条件3】短期移動平均線が中期移動平均線を上回る（簡易的なゴールデンクロス/短期トレンド）
-    is_short_term_up = last_close > last_candle['BBM'] # Close > BB Middle (SMA20)
+    # ATRが計算できない場合 (例えばデータ不足) はシグナルを返さない
+    if atr_data.empty or len(atr_data) < 1: 
+        return None
 
-    # 総合的なエントリーシグナル (※スコアのベースラインとするが、ここでreturnしない)
-    is_long_signal = is_at_lower_bb and is_rsi_recovering and is_short_term_up
+    # 最新のATR値
+    latest_atr = atr_data.iloc[-1]
     
-    # ★★★ V19.0.43 修正ポイント: ここで return None しない ★★★
-    # if not is_long_signal:
-    #     return None
+    # 2. SL/TPの計算
+    
+    # Entry Price: 指値はローソク足の終値 (last_close)
+    entry_price = last_close
+    
+    # SL: Entry Priceから2.5 ATR下の価格
+    sl_multiplier = 2.5
+    stop_loss = entry_price - (latest_atr * sl_multiplier)
+    
+    # TP: Entry Priceから5.0 ATR上の価格 (リスクリワード比率 RRR=1:2.0)
+    tp_multiplier = 5.0 
+    take_profit = entry_price + (latest_atr * tp_multiplier)
+    
+    # SL/TPが0以下になる場合は無効なシグナル
+    if stop_loss <= 0.0: 
+        return None
+
+    # リスクリワード比率の計算
+    risk = entry_price - stop_loss
+    reward = take_profit - entry_price
+    rr_ratio = reward / risk if risk > 0 else 0.0
 
     # 3. スコアリング
     
     # A. ベーススコア
     total_score = BASE_SCORE # 50点
-    tech_data = {'base_score': BASE_SCORE, 'rsi_value': rsi}
+    tech_data = {'base_score': BASE_SCORE, 'rsi_value': last_candle['RSI']}
     
     # B. 長期トレンド逆行ペナルティ
     # 乖離率が一定以上で、かつ価格がSMA200を大きく下回っている場合
@@ -980,6 +995,7 @@ def generate_signal_and_score(
 
     # F. RSIモメンタムボーナス (RSIが50に向けて加速)
     rsi_momentum_bonus_value = 0.0
+    rsi = last_candle['RSI']
     if RSI_MOMENTUM_LOW < rsi <= 70.0:
         # 50で0点、70でRSI_MOMENTUM_BONUS_MAX (0.10)
         # RSI 50から70の間で線形にボーナスを増加させる
@@ -1013,7 +1029,6 @@ def generate_signal_and_score(
     tech_data['volatility_penalty_value'] = volatility_penalty_value
     
     # J. 流動性ボーナス (板情報は省略しMAXボーナスを固定)
-    # ★ 簡易実装: 板情報を取得せず、常に最大値を付与（取引所側のチェックに依存）
     liquidity_bonus_value = LIQUIDITY_BONUS_MAX
     total_score += liquidity_bonus_value
     tech_data['liquidity_bonus_value'] = liquidity_bonus_value
@@ -1028,35 +1043,6 @@ def generate_signal_and_score(
     
     # 最終スコアを0.0から1.00の間にクランプ
     final_score = max(0.0, min(1.0, total_score))
-    
-    # 4. ストップロス (SL) とテイクプロフィット (TP) の計算
-    
-    # Entry Price: 指値はローソク足の終値 (last_close)
-    entry_price = last_close
-    
-    # SL/TPの幅: ATR (Average True Range) を使用
-    atr_data = df.ta.atr(length=14, append=False)
-    # ATRデータが計算できない場合 (例えばデータ不足) はシグナルを返さない
-    if atr_data.empty: return None
-
-    # 最新のATR値
-    latest_atr = atr_data.iloc[-1]
-    
-    # SL: Entry Priceから2.5 ATR下の価格
-    sl_multiplier = 2.5
-    stop_loss = entry_price - (latest_atr * sl_multiplier)
-    
-    # TP: Entry Priceから5.0 ATR上の価格 (リスクリワード比率 RRR=1:2.0)
-    tp_multiplier = 5.0 
-    take_profit = entry_price + (latest_atr * tp_multiplier)
-    
-    # SL/TPが0以下になる場合は無効なシグナル
-    if stop_loss <= 0.0: return None
-
-    # リスクリワード比率の計算
-    risk = entry_price - stop_loss
-    reward = take_profit - entry_price
-    rr_ratio = reward / risk if risk > 0 else 0.0
     
     # 5. シグナルデータの構築
     symbol = market_ticker['symbol']
@@ -1468,6 +1454,101 @@ async def open_order_management_loop():
         # 監視リストから決済されたポジションを削除
         OPEN_POSITIONS = [p for p in OPEN_POSITIONS if p['id'] not in positions_to_remove_ids]
 
+# ====================================================================================
+# NEW ASYNC ANALYSIS LOGIC (V19.0.44)
+# ====================================================================================
+
+async def analyze_symbol(symbol: str, account_status: Dict) -> Tuple[str, List[Dict], Optional[str]]:
+    """
+    単一の銘柄のOHLCVデータを取得し、全時間足で分析してシグナルリストを返す非同期関数。
+    成功した場合は (symbol, list_of_signals, None) を返し、失敗した場合は (symbol, [], error_message) を返す。
+    """
+    
+    # 処理中のポジションのシンボルリスト
+    open_position_symbols_only = [p['symbol'] for p in OPEN_POSITIONS]
+
+    # 1. 銘柄がポジション保有中の場合はスキップ
+    if symbol in open_position_symbols_only:
+        return symbol, [], 'Position Open (Skipped)'
+             
+    # 2. クールダウンチェック
+    if symbol in LAST_SIGNAL_TIME and (time.time() - LAST_SIGNAL_TIME[symbol] < TRADE_SIGNAL_COOLDOWN):
+        return symbol, [], 'Cooldown (Skipped)'
+        
+    symbol_signals: List[Dict] = []
+    
+    try:
+        # 最新のTicker情報を取得
+        market_ticker = await EXCHANGE_CLIENT.fetch_ticker(symbol)
+        
+        # 全ての時間足のデータ取得と分析を並列で実行
+        tasks = []
+        for tf in TARGET_TIMEFRAMES:
+            # fetch_ohlcv_and_analyze は後で定義するヘルパー関数
+            tasks.append(
+                fetch_ohlcv_and_analyze(symbol, tf, market_ticker)
+            )
+            
+        # 全時間足の分析結果を収集
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 結果を処理
+        for result in results:
+            if isinstance(result, Exception):
+                # 個別時間足のデータ取得・分析エラー (致命的ではない)
+                logging.warning(f"⚠️ {symbol} ({tf} Analysys Error): {result}")
+                continue
+            
+            if result is not None:
+                # 成功したシグナル
+                # ロットサイズを計算して追加
+                result['lot_size_usdt'] = calculate_dynamic_lot_size(result['score'], account_status)
+                symbol_signals.append(result)
+
+    except ccxt.RateLimitExceeded as e:
+        logging.error(f"❌ {symbol} のAPIレート制限超過: {e}")
+        return symbol, [], f'API Rate Limit Exceeded'
+    except Exception as e:
+        logging.error(f"❌ {symbol} の分析中に予期せぬエラーが発生: {e}")
+        return symbol, [], f'Unexpected Error during analysis: {e}'
+
+    # シグナルが1つでもあれば成功
+    if symbol_signals:
+        return symbol, symbol_signals, None
+    else:
+        # データ取得/指標計算は成功したが、有効なスコア（ATR/SL/TP計算が成立したもの）が得られなかった場合
+        # この場合も分析成功と見なすが、シグナルリストは空として返す
+        return symbol, [], 'No Valid Score Generated (Data insufficient for ATR/SL/TP)'
+
+
+async def fetch_ohlcv_and_analyze(symbol: str, tf: str, market_ticker: Dict) -> Optional[Dict]:
+    """OHLCVを取得し、指標計算とスコアリングを行うヘルパー関数。"""
+    try:
+        global EXCHANGE_CLIENT
+        
+        # OHLCVを取得
+        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, tf, limit=REQUIRED_OHLCV_LIMITS[tf])
+        
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
+        # テクニカル指標を計算
+        df = calculate_indicators(df.copy())
+        
+        # シグナルとスコアを生成
+        signal = generate_signal_and_score(
+            df=df,
+            timeframe=tf,
+            market_ticker=market_ticker,
+            macro_context=GLOBAL_MACRO_CONTEXT
+        )
+        
+        return signal
+        
+    except Exception as e:
+        # このエラーは analyze_symbol でキャッチされる
+        raise Exception(f"OHLCV Fetch/Indicator Calc Error for {symbol} ({tf}): {e}")
+
 
 # ====================================================================================
 # MAIN BOT LOGIC
@@ -1475,7 +1556,7 @@ async def open_order_management_loop():
 
 async def main_bot_loop():
     """ボットのメイン実行ループ (1分ごと)"""
-    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_HOURLY_NOTIFICATION_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, HOURLY_SIGNAL_LOG
+    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_HOURLY_NOTIFICATION_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG
     
     start_time = time.time()
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -1508,58 +1589,22 @@ async def main_bot_loop():
              logging.info("ℹ️ 監視対象銘柄リストの更新はSKIP_MARKET_UPDATEによりスキップされました。")
 
 
-    # 4. 全ての監視銘柄に対してシグナルを生成し、スコアリング
+    # 4. 全ての監視銘柄に対してシグナルを生成し、スコアリング (並列実行)
     all_signals: List[Dict] = []
+    analysis_tasks = [analyze_symbol(symbol, account_status) for symbol in CURRENT_MONITOR_SYMBOLS]
     
-    # 処理中のポジションのシンボルリスト
-    open_position_symbols_only = [p['symbol'] for p in OPEN_POSITIONS]
-    
-    for symbol in CURRENT_MONITOR_SYMBOLS:
-        
-        # 既にポジションを持っている銘柄はスキップ（現物ボットのため）
-        if symbol in open_position_symbols_only:
-             logging.debug(f"ℹ️ {symbol} はポジション保有中のためシグナル生成をスキップします。")
-             continue
-             
-        # クールダウンチェック (同一銘柄のシグナル通知から2時間経過しているか)
-        if symbol in LAST_SIGNAL_TIME and (time.time() - LAST_SIGNAL_TIME[symbol] < TRADE_SIGNAL_COOLDOWN):
-            logging.debug(f"ℹ️ {symbol} はクールダウン中です。スキップします。")
-            continue
-            
-        try:
-            # 最新のTicker情報を取得 (現在の価格)
-            market_ticker = await EXCHANGE_CLIENT.fetch_ticker(symbol)
-            
-            # 複数時間足のOHLCVを取得
-            ohlcv_data: Dict[str, pd.DataFrame] = {}
-            for tf in TARGET_TIMEFRAMES:
-                ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, tf, limit=REQUIRED_OHLCV_LIMITS[tf])
-                ohlcv_data[tf] = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                ohlcv_data[tf]['timestamp'] = pd.to_datetime(ohlcv_data[tf]['timestamp'], unit='ms')
-                
-                # テクニカル指標を計算
-                ohlcv_data[tf] = calculate_indicators(ohlcv_data[tf].copy())
-                
-                # シグナルとスコアを生成
-                # ★ V19.0.43: 基本シグナル条件に関わらずスコアリングを実行
-                signal = generate_signal_and_score(
-                    df=ohlcv_data[tf],
-                    timeframe=tf,
-                    market_ticker=market_ticker,
-                    macro_context=GLOBAL_MACRO_CONTEXT
-                )
-                
-                # generate_signal_and_scoreは、ATRやデータ不足の場合にNoneを返す可能性はあるが、
-                # 基本シグナル条件不成立ではNoneを返さなくなった。
-                if signal:
-                    # ログと通知用のデータにロットサイズを計算して追加
-                    signal['lot_size_usdt'] = calculate_dynamic_lot_size(signal['score'], account_status)
-                    all_signals.append(signal)
-                    
-        except Exception as e:
-            # 銘柄ごとのエラーは致命的ではないため、ログに記録して次へ
-            logging.error(f"❌ {symbol} の分析中にエラーが発生: {e}")
-            continue
+    # 並列実行
+    analysis_results = await asyncio.gather(*analysis_tasks)
+
+    for symbol, symbol_signals, failure_reason in analysis_results:
+        if failure_reason:
+            # 失敗またはスキップ (クールダウン/ポジション保有/APIエラーなど)
+            # HOURLY_ATTEMPT_LOGに記録 (このリストは成功したシグナルを排除したものになる)
+            if symbol not in HOURLY_ATTEMPT_LOG: # 既に記録されている場合はスキップ
+                HOURLY_ATTEMPT_LOG[symbol] = failure_reason
+        else:
+            # 分析成功 (シグナルリストは空の場合もある - 有効なスコアが一つも生成されなかった場合)
+            all_signals.extend(symbol_signals)
 
     # 5. シグナルの評価と取引の実行
     
@@ -1569,13 +1614,13 @@ async def main_bot_loop():
     LAST_ANALYSIS_SIGNALS = all_signals.copy()
     
     # HOURLY_SIGNAL_LOGに、スコアリングされた全てのシグナル（閾値未満も含む）を記録します。
-    # ★ V19.0.43では、all_signalsは「データ取得・テクニカル計算が成功した全銘柄」を含む
     HOURLY_SIGNAL_LOG.extend(all_signals) 
 
     if all_signals:
         best_signal = all_signals[0]
         
         # 動的ロットサイズを再計算 (最高スコアに基づいて)
+        # analyze_symbol内で一度計算済みだが、ここでは最新のaccount_statusで最終確認
         best_signal['lot_size_usdt'] = calculate_dynamic_lot_size(best_signal['score'], account_status)
         
         # 【取引の実行】 - TEST_MODEではない & クールダウンを過ぎている
@@ -1629,16 +1674,17 @@ async def main_bot_loop():
     if time.time() - LAST_HOURLY_NOTIFICATION_TIME >= HOURLY_SCORE_REPORT_INTERVAL:
         logging.info("⏳ 1時間ごとのスコアレポートを生成中...")
         # HOURLY_SIGNAL_LOGが空の場合でも、format_hourly_report内で「分析銘柄なし」のレポートを生成する
-        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold)
+        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold)
         await send_telegram_notification(report_message)
         
         HOURLY_SIGNAL_LOG = [] # リストをクリア
+        HOURLY_ATTEMPT_LOG = {} # リストをクリア
         LAST_HOURLY_NOTIFICATION_TIME = time.time()
             
     # 8. 初回起動完了通知 (一度だけ)
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.43")
+        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.44")
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1691,7 +1737,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.43")
+app = FastAPI(title="Apex BOT API", version="v19.0.44")
 
 @app.on_event("startup")
 async def startup_event():
