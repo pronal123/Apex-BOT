@@ -1,13 +1,10 @@
 # ====================================================================================
-# Apex BOT v19.0.47 - CRITICAL FIX: IOC Trade Misdetection & SL/TP Failure Handling
+# Apex BOT v19.0.48 - CRITICAL FIX: CCXT Order Response NoneType Handling
 #
 # 改良・修正点:
-# 1. 【最重要修正】execute_trade関数内のIOC注文結果の確認ロジックを強化。
-#    - IOC注文が部分約定または全約定した場合に、filled_amount > 0.0 のチェックを最優先し、
-#      確実にSL/TP設定プロセスへ進むようにロジックを修正しました。
-# 2. 【SL/TP失敗時】SL/TP設定に失敗した場合、その後の強制クローズの結果を取引結果に含め、
-#    エラー通知がより正確な情報（例: SL/TP設定失敗、ポジション強制クローズ成功）を伝えるようにしました。
-# 3. BOT_VERSION を v19.0.47 に更新。
+# 1. 【最重要修正】execute_trade関数内のCCXT注文結果のフィールド(filled, cost, average)を、
+#    NoneTypeエラーを防ぐため、明示的にNoneチェックとfloatキャストを行うよう防御的な処理を追加。
+# 2. BOT_VERSION を v19.0.48 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -113,8 +110,8 @@ GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
-# ★ 新規追加: ボットのバージョン (v19.0.47 修正点)
-BOT_VERSION = "v19.0.47"
+# ★ 新規追加: ボットのバージョン (v19.0.48 修正点)
+BOT_VERSION = "v19.0.48"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -156,7 +153,7 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.86       
+SIGNAL_THRESHOLD_SLUMP = 0.85       
 SIGNAL_THRESHOLD_NORMAL = 0.83      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
@@ -1314,16 +1311,31 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
         
         # 4. 注文結果の確認
         # IOCの場合、filled, remaining, statusが返される。
-        filled_amount = order.get('filled', 0.0)
         
-        # 💡 v19.0.47 修正: 約定を確実に検出
+        # V19.0.48 修正: NoneTypeエラーを防ぐため、filled, cost, averageを明示的にチェック
+        filled_amount = order.get('filled')
+        if filled_amount is None:
+            filled_amount = 0.0
+        filled_amount = float(filled_amount) # 二重の保険
+        
         if filled_amount > 0.0:
             # 即時約定成功 (部分約定または全約定)
             
-            filled_usdt = order.get('cost', filled_amount * entry_price) # filled * average (取引所決済完了)"
-            
-            # averageがNoneの場合はlimit_priceを使用
-            avg_entry_price = order.get('average') if order.get('average') is not None else entry_price
+            # filled_usdt (約定コスト) の取得。Noneの場合は計算
+            filled_usdt = order.get('cost')
+            if filled_usdt is None:
+                 # averageをまず取得
+                 avg_entry_price_temp = order.get('average')
+                 if avg_entry_price_temp is None:
+                      avg_entry_price_temp = entry_price # averageもNoneなら指値価格を使用
+                 filled_usdt = filled_amount * avg_entry_price_temp
+            filled_usdt = float(filled_usdt) # 安全のためにfloatにキャスト
+
+            # avg_entry_price (平均約定価格) の取得。Noneの場合は指値価格を使用
+            avg_entry_price = order.get('average')
+            if avg_entry_price is None:
+                avg_entry_price = entry_price
+            avg_entry_price = float(avg_entry_price) # 安全のためにfloatにキャスト
             
             logging.info(f"✅ IOC注文成功 ({symbol}): 約定価格={format_price_precision(avg_entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
             
@@ -1404,9 +1416,21 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
             'close_error_message': close_result.get('error_message'),
         }
     except Exception as e:
-        error_message = f"不明なエラー: {e}"
+        # v19.0.48 修正: ここに到達するのは予期せぬPythonエラー。エラーメッセージをより明確に
+        error_message = f"致命的なPythonエラー: {type(e).__name__} - {e}"
         logging.critical(f"❌ 取引実行中に予期せぬエラーが発生 ({symbol}): {error_message}", exc_info=True)
-        return {'status': 'error', 'error_message': error_message, 'close_status': 'skipped'}
+        
+        # 予期せぬエラーが発生した場合も、強制クローズを試みる
+        filled_amount_unknown = base_amount_to_buy 
+        close_result = await close_position_immediately(symbol, filled_amount_unknown)
+        
+        return {
+            'status': 'error', 
+            'error_message': error_message,
+            'close_status': close_result['status'],
+            'closed_amount': close_result.get('closed_amount', 0.0),
+            'close_error_message': close_result.get('error_message'),
+        }
 
 
 async def cancel_all_related_orders(position: Dict, open_order_ids: List[str]):
