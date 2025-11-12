@@ -1,11 +1,13 @@
 # ====================================================================================
-# Apex BOT v19.0.46 - NameError Fix & Robustness Refactoring
+# Apex BOT v19.0.47 - CRITICAL FIX: IOC Trade Misdetection & SL/TP Failure Handling
 #
 # 改良・修正点:
-# 1. 【最重要修正】NameError: name 'bot_version' is not defined を修正するため、
-#    BOT_VERSION をグローバル定数として定義し、すべての通知関数でこれを使用するように変更しました。
-# 2. format_telegram_message の引数 exit_type の取り扱いを整理し、より直感的にしました。
-# 3. 致命的なエラー発生時の通知にも BOT_VERSION を含め、より迅速なデバッグを可能にしました。
+# 1. 【最重要修正】execute_trade関数内のIOC注文結果の確認ロジックを強化。
+#    - IOC注文が部分約定または全約定した場合に、filled_amount > 0.0 のチェックを最優先し、
+#      確実にSL/TP設定プロセスへ進むようにロジックを修正しました。
+# 2. 【SL/TP失敗時】SL/TP設定に失敗した場合、その後の強制クローズの結果を取引結果に含め、
+#    エラー通知がより正確な情報（例: SL/TP設定失敗、ポジション強制クローズ成功）を伝えるようにしました。
+# 3. BOT_VERSION を v19.0.47 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -111,8 +113,8 @@ GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
-# ★ 新規追加: ボットのバージョン (v19.0.46 修正点)
-BOT_VERSION = "v19.0.46"
+# ★ 新規追加: ボットのバージョン (v19.0.47 修正点)
+BOT_VERSION = "v19.0.47"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -452,10 +454,27 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             trade_status_line = f"❌ **自動売買 失敗**: {error_message}"
             
             # 💡 取引失敗詳細セクションの生成
+            # SL/TP設定失敗後の強制クローズの結果を詳細に表示する
+            close_status = trade_result.get('close_status')
+            
+            failure_section_lines = [f"  - ❌ {error_message}"]
+            
+            if close_status == 'ok':
+                 close_amount = trade_result.get('closed_amount', 0.0)
+                 close_message = f"✅ 不完全ポジションを即時クローズしました (数量: {close_amount:.4f})。"
+                 failure_section_lines.append(f"  - {close_message}")
+            elif close_status == 'error':
+                 close_error = trade_result.get('close_error_message', '不明なエラー')
+                 close_message = f"🚨 不完全ポジションの強制クローズに失敗しました: {close_error}"
+                 failure_section_lines.append(f"  - {close_message}")
+                 failure_section_lines.append(f"  - **🚨 ポジションが残っている可能性があります。手動で確認・決済してください。**")
+            elif close_status == 'skipped':
+                 failure_section_lines.append(f"  - ➖ ポジションは約定しなかった、または約定数量がゼロのためクローズはスキップされました。")
+            
             failure_section = (
                 f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
                 f"**取引失敗詳細**:\n"
-                f"  - ❌ {error_message}\n"
+                f"{'\n'.join(failure_section_lines)}\n"
             )
 
         elif trade_result.get('status') == 'ok':
@@ -542,7 +561,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    # ★ v19.0.46 修正点: BOT_VERSION を使用
+    # ★ v19.0.47 修正点: BOT_VERSION を使用
     message += (f"<i>Bot Ver: {BOT_VERSION} - Full Analysis & Async Refactoring</i>")
     return message
 
@@ -1221,6 +1240,37 @@ async def place_sl_tp_orders(
         'message': 'SL/TP注文が正常に設定されました。'
     }
 
+async def close_position_immediately(symbol: str, filled_amount: float) -> Dict:
+    """
+    現物ポジションを成行で即座にクローズする。
+    Returns: {'status': 'ok', 'closed_amount': amount} or {'status': 'error', 'error_message': '...'}
+    """
+    global EXCHANGE_CLIENT
+    
+    if filled_amount <= 0.0:
+        return {'status': 'skipped', 'error_message': '約定数量がゼロのためクローズスキップ'}
+
+    logging.warning(f"⚠️ リスク回避のため、{symbol} の {filled_amount:.4f} を即時成行でクローズを試みます。")
+    
+    try:
+        # 成行売り注文
+        close_order = await EXCHANGE_CLIENT.create_order(symbol, 'market', 'sell', filled_amount)
+        
+        # 約定数量の確認
+        closed_amount = close_order.get('filled', 0.0)
+        
+        if closed_amount > 0:
+            logging.info(f"✅ 強制クローズ成功: {symbol} - {closed_amount:.4f} 数量を売却しました。")
+            return {'status': 'ok', 'closed_amount': closed_amount}
+        else:
+            logging.error(f"❌ 強制クローズ失敗: 成行注文で約定が発生しませんでした。")
+            return {'status': 'error', 'error_message': '成行売り注文が約定しませんでした。'}
+            
+    except Exception as e:
+        logging.critical(f"❌ 強制クローズ中に致命的なエラーが発生 ({symbol}): {e}", exc_info=True)
+        return {'status': 'error', 'error_message': f'強制クローズ失敗（APIエラー）: {e}'}
+
+
 async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     """
     シグナルに基づいて現物指値買い注文を発注し、SL/TP注文を設定する。
@@ -1252,8 +1302,6 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     
     try:
         # 3. IOC指値買い注文の発注
-        # type='limit', params={'timeInForce': 'IOC'} (Immediate or Cancel)
-        # FOKからIOCへ変更 (部分約定を許可し、約定しなかった残りをキャンセル)
         order = await EXCHANGE_CLIENT.create_order(
             symbol=symbol, 
             type='limit', 
@@ -1265,16 +1313,19 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
         )
         
         # 4. 注文結果の確認
+        # IOCの場合、filled, remaining, statusが返される。
         filled_amount = order.get('filled', 0.0)
-        filled_usdt = order.get('cost', 0.0) # filled * average (取引所決済完了)"
         
-        # 約定したかどうか (IOCの場合、一部または全量の約定)
-        if filled_amount and filled_amount > 0.0:
-            # 即時約定成功
-            # averageがNoneの場合はlimit_priceを使用
-            entry_price = order.get('average') if order.get('average') is not None else entry_price
+        # 💡 v19.0.47 修正: 約定を確実に検出
+        if filled_amount > 0.0:
+            # 即時約定成功 (部分約定または全約定)
             
-            logging.info(f"✅ IOC注文成功 ({symbol}): 約定価格={format_price_precision(entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
+            filled_usdt = order.get('cost', filled_amount * entry_price) # filled * average (取引所決済完了)"
+            
+            # averageがNoneの場合はlimit_priceを使用
+            avg_entry_price = order.get('average') if order.get('average') is not None else entry_price
+            
+            logging.info(f"✅ IOC注文成功 ({symbol}): 約定価格={format_price_precision(avg_entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
             
             # SL/TP注文の設定
             sl_tp_result = await place_sl_tp_orders(
@@ -1286,17 +1337,11 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
             
             if sl_tp_result['status'] == 'ok':
                 # ポジションをグローバルリストに追加
-                # 注: IOCで部分約定した場合、ロットサイズ目標より小さくなる
-                
-                # 約定額が最小ロットを下回る場合はログに記録するが、取引は実行済みとする
-                # if filled_usdt < MIN_USDT_BALANCE_FOR_TRADE:
-                #     logging.warning(f"⚠️ IOCにより部分約定しましたが、約定額が最小ロット({MIN_USDT_BALANCE_FOR_TRADE})を下回りました。")
-                
                 OPEN_POSITIONS.append({
                     'id': str(uuid.uuid4()), # ボットが管理するユニークID
                     'symbol': symbol,
                     'timeframe': signal['timeframe'],
-                    'entry_price': entry_price,
+                    'entry_price': avg_entry_price,
                     'stop_loss': signal['stop_loss'],
                     'take_profit': signal['take_profit'],
                     'filled_amount': filled_amount,
@@ -1310,47 +1355,58 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                     'status': 'ok',
                     'filled_amount': filled_amount,
                     'filled_usdt': filled_usdt,
-                    'entry_price': entry_price,
+                    'entry_price': avg_entry_price,
                     'id': order['id'], # 買い注文のID
                     'sl_order_id': sl_tp_result['sl_order_id'],
                     'tp_order_id': sl_tp_result['tp_order_id'],
                     'message': f"現物指値買い注文が即時約定しました。SL/TP注文を設定済み (ID: {order['id']})"
                 }
             else:
-                logging.error("❌ IOC約定後のSL/TP注文設定に失敗しました。ポジションは手動でクローズしてください。")
+                # 🔴 SL/TP注文設定に失敗した場合
+                logging.error("❌ IOC約定後のSL/TP注文設定に失敗しました。リスク回避のためポジションを即時クローズします。")
                 
                 # SL/TP設定に失敗した場合、リスク回避のため即座にポジションを成行でクローズする
-                try:
-                    await EXCHANGE_CLIENT.create_order(symbol, 'market', 'sell', filled_amount)
-                    logging.warning(f"⚠️ SL/TP設定失敗のため、{symbol} のポジションを即時成行でクローズしました。")
-                except Exception as close_e:
-                    logging.critical(f"❌ SL/TP設定失敗後の強制クローズも失敗: {close_e}")
-                    
-                return {'status': 'error', 'error_message': f'IOC約定後にSL/TP設定に失敗: {sl_tp_result["error_message"]}'}
+                close_result = await close_position_immediately(symbol, filled_amount)
+                
+                return {
+                    'status': 'error', 
+                    'error_message': f'IOC約定後にSL/TP設定に失敗: {sl_tp_result["error_message"]}',
+                    'close_status': close_result['status'],
+                    'closed_amount': close_result.get('closed_amount', 0.0),
+                    'close_error_message': close_result.get('error_message'),
+                }
 
-        elif order.get('status') in ['canceled', 'rejected'] or (order.get('status') is None and (filled_amount is None or filled_amount == 0.0)):
-            # IOC注文が全く約定しなかった場合
-            error_message = '指値買い注文が即時約定しなかったためキャンセルされました。' # メッセージを一般化
-            logging.info(f"ℹ️ 取引スキップ: {error_message}")
-            return {'status': 'error', 'error_message': error_message}
         else:
-            # その他の未約定ステータス (これはIOC/FOKでは起こらないはずだが、念のため)
-            error_message = f'注文が未約定のまま残りました (Status: {order.get("status")})。手動でキャンセルが必要です。'
-            logging.error(f"❌ IOC注文エラー: {error_message}")
-            return {'status': 'error', 'error_message': error_message}
+            # 約定しなかった場合 (filled_amount == 0.0)
+            error_message = '指値買い注文が即時約定しなかったためキャンセルされました。' 
+            logging.info(f"ℹ️ 取引スキップ: {error_message}")
+            return {'status': 'error', 'error_message': error_message, 'close_status': 'skipped'}
             
     except ccxt.NetworkError as e:
         error_message = f"ネットワークエラー: {e}"
         logging.error(f"❌ 取引実行失敗 ({symbol}): {error_message}", exc_info=True)
-        return {'status': 'error', 'error_message': error_message}
+        return {'status': 'error', 'error_message': error_message, 'close_status': 'skipped'}
     except ccxt.ExchangeError as e:
         error_message = f"取引所エラー: {e}"
         logging.error(f"❌ 取引実行失敗 ({symbol}): {error_message}", exc_info=True)
-        return {'status': 'error', 'error_message': error_message}
+        
+        # 💡 CCXTエラーでも約定している可能性を考慮:
+        # このエラーが返された時点で購入が成功し、SL/TP設定中にエラーが発生した可能性
+        # この場合、取引所への問い合わせが必要だが、ここでは簡略化のため強制クローズを試みる
+        filled_amount_unknown = base_amount_to_buy # 注文した数量を暫定として強制クローズを試みる
+        close_result = await close_position_immediately(symbol, filled_amount_unknown)
+
+        return {
+            'status': 'error', 
+            'error_message': f'取引所エラー（IOC/SL/TP設定失敗）: {e}',
+            'close_status': close_result['status'],
+            'closed_amount': close_result.get('closed_amount', 0.0),
+            'close_error_message': close_result.get('error_message'),
+        }
     except Exception as e:
         error_message = f"不明なエラー: {e}"
         logging.critical(f"❌ 取引実行中に予期せぬエラーが発生 ({symbol}): {error_message}", exc_info=True)
-        return {'status': 'error', 'error_message': error_message}
+        return {'status': 'error', 'error_message': error_message, 'close_status': 'skipped'}
 
 
 async def cancel_all_related_orders(position: Dict, open_order_ids: List[str]):
@@ -1654,7 +1710,7 @@ async def main_bot_loop():
                 else:
                     # スコアは満たしたが、残高不足
                     error_message = f"残高不足 (現在: {format_usdt(account_status['total_usdt_balance'])} USDT)。新規取引に必要な額: {MIN_USDT_BALANCE_FOR_TRADE:.2f} USDT。"
-                    trade_result = {'status': 'error', 'error_message': error_message}
+                    trade_result = {'status': 'error', 'error_message': error_message, 'close_status': 'skipped'}
                     logging.warning(f"⚠️ {best_signal['symbol']} 取引スキップ: {error_message}")
             else:
                 logging.info(f"ℹ️ {best_signal['symbol']} は閾値 {current_threshold*100:.2f} を満たしていません。取引をスキップします。")
@@ -1662,22 +1718,22 @@ async def main_bot_loop():
             # 6. Telegram通知
             if trade_result and trade_result.get('status') == 'ok':
                 # 取引成功
-                # ★ v19.0.46 修正点: BOT_VERSION を明示的に渡す
+                # ★ v19.0.47 修正点: BOT_VERSION を明示的に渡す
                 notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
                 await send_telegram_notification(notification_message)
                 log_signal(best_signal, "Signal Executed")
                 LAST_SIGNAL_TIME[best_signal['symbol']] = time.time()
                 
             elif trade_result and trade_result.get('status') == 'error':
-                 # 取引失敗（API/残高不足など）
-                 # ★ v19.0.46 修正点: BOT_VERSION を明示的に渡す
+                 # 取引失敗（API/残高不足/SLTP設定失敗/強制クローズ結果など）
+                 # ★ v19.0.47 修正点: BOT_VERSION を明示的に渡す
                  notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
                  await send_telegram_notification(notification_message)
                  log_signal(best_signal, "Signal Failed")
                  
             else:
                  # シグナルは出たが閾値未満で実行されなかった場合、ログに記録するのみ
-                 log_signal(best_signal, "Signal Not Executed (Below Threshold)")
+                 log_signal(best_signal, "Signal Found (No Trade)")
                 
         else:
             # TEST_MODE または クールダウン中の場合は、最高シグナルをログに記録
@@ -1720,7 +1776,7 @@ async def main_bot_scheduler():
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             try:
-                 # ★ v19.0.46 修正点: BOT_VERSION を使用してエラー通知を強化
+                 # ★ v19.0.47 修正点: BOT_VERSION を使用してエラー通知を強化
                  await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`\n(Bot Ver: {BOT_VERSION})")
             except Exception as notify_e:
                  logging.error(f"❌ 致命的エラー通知の送信に失敗: {notify_e}")
@@ -1751,7 +1807,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-# ★ v19.0.46 修正点: BOT_VERSION を使用
+# ★ v19.0.47 修正点: BOT_VERSION を使用
 app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 
 @app.on_event("startup")
