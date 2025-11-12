@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.44 - Full Analysis & Async Refactoring
+# Apex BOT v19.0.45 - Time-In-Force (TIF) Refactoring (FOK -> IOC)
 #
 # 改良・修正点:
-# 1. 【最重要修正】シンボルごとの分析処理を analyze_symbol 関数として分離。
-# 2. 【並列処理】main_bot_loop 内で asyncio.gather を使用し、全銘柄の分析を並列実行。
-#    -> これにより、APIのレート制限による遅延やタイムアウトを防ぎ、分析の成功率を向上させる。
-# 3. 【データチェック緩和】generate_signal_and_score 関数内の OHLCV データ量のチェックを緩和。
-#    -> テクニカル指標に必要なデータが揃っていれば、スコアリングを続行する。
-# 4. 【レポート強化】 hourly_report で分析成功銘柄数と、分析対象外となった銘柄数を明確に報告。
+# 1. 【最重要修正】execute_trade 関数内の新規指値買い注文の注文条件を FOK (Fill or Kill) から
+#    IOC (Immediate or Cancel) に変更しました。
+#    -> これにより、注文全量が即時約定しなくても、約定可能な数量での部分約定が可能となり、取引成功率を向上させます。
+#    -> FOK失敗時のエラーメッセージを、より一般的なメッセージに変更しました。
+# 2. その他ロギングやレポートのバージョン表記を v19.0.45 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -464,7 +463,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             
             trade_section = (
                 f"💰 **取引実行結果**\n"
-                f"  - **注文タイプ**: <code>現物 (Spot) / 指値買い (FOK)</code>\n"
+                f"  - **注文タイプ**: <code>現物 (Spot) / 指値買い (IOC)</code>\n" # ★ IOCに変更
                 f"  - **動的ロット**: {lot_info} (目標)\n" 
                 f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
                 f"  - **平均約定額**: <code>{format_usdt(filled_usdt)}</code> USDT\n"
@@ -540,10 +539,10 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.44 - Full Analysis & Async Refactoring</i>")
+    message += (f"<i>Bot Ver: {bot_version} - Full Analysis & Async Refactoring</i>")
     return message
 
-def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start_time: float, current_threshold: float) -> str:
+def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start_time: float, current_threshold: float, bot_version: str) -> str:
     """
     1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する。
     ★ v19.0.44: 分析成功銘柄数と失敗銘柄数を追加報告
@@ -578,7 +577,7 @@ def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start
             f"  - **失敗・スキップ理由**: <code>データ取得失敗、指標計算エラー、クールダウンなど。ログを確認してください。</code>\n"
             f"  - **取引閾値**: <code>{current_threshold*100:.2f}</code> 点\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"<i>Bot Ver: v19.0.44 - Full Analysis & Async Refactoring</i>"
+            f"<i>Bot Ver: {bot_version} - Full Analysis & Async Refactoring</i>"
         )
         return message
 
@@ -618,7 +617,7 @@ def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start
     
     message += (
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.44 - Full Analysis & Async Refactoring</i>"
+        f"<i>Bot Ver: {bot_version} - Full Analysis & Async Refactoring</i>"
     )
     
     return message
@@ -1156,7 +1155,8 @@ async def place_sl_tp_orders(
     # 1. TP (テイクプロフィット) 指値売り注文の設定 (Limit Sell)
     try:
         # 数量の丸め (ここでは価格はTP価格を使用)
-        amount_to_sell, _ = await adjust_order_amount(symbol, filled_amount * take_profit, take_profit)
+        # filled_amount が既に丸められているため、ここでは adjust_order_amount は使わず、filled_amount をそのまま使用
+        amount_to_sell = filled_amount 
         
         # TP価格で指値売り
         tp_order = await EXCHANGE_CLIENT.create_order(
@@ -1180,8 +1180,8 @@ async def place_sl_tp_orders(
         stop_price = stop_loss
         limit_price = stop_loss * 0.999 # SL価格より0.1%下の指値価格
         
-        # 数量の丸め (ここでは価格はSL時の指値価格を使用)
-        amount_to_sell, _ = await adjust_order_amount(symbol, filled_amount * limit_price, limit_price)
+        # 数量の丸め (ここでは filled_amount をそのまま使用)
+        amount_to_sell = filled_amount
         
         # ストップ指値売り注文 (Stop Limit Sell)
         sl_order = await EXCHANGE_CLIENT.create_order(
@@ -1248,40 +1248,47 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     logging.info(f"⏳ 現物指値買い注文を発注中: {symbol} @ {format_price_precision(entry_price)} (Qty: {base_amount_to_buy:.4f})")
     
     try:
-        # 3. FOK指値買い注文の発注
-        # type='limit', params={'timeInForce': 'FOK'} (Fill or Kill)
-        # FOK: 全量が即時約定しない場合は全てキャンセルされる
+        # 3. IOC指値買い注文の発注
+        # type='limit', params={'timeInForce': 'IOC'} (Immediate or Cancel)
+        # FOKからIOCへ変更 (部分約定を許可し、約定しなかった残りをキャンセル)
         order = await EXCHANGE_CLIENT.create_order(
             symbol=symbol, 
             type='limit', 
             side='buy', 
             amount=base_amount_to_buy, 
             price=entry_price,
-            params={'timeInForce': 'FOK'}
+            # ★ FOKからIOCへ変更 (v19.0.45 修正点)
+            params={'timeInForce': 'IOC'} 
         )
         
         # 4. 注文結果の確認
         filled_amount = order.get('filled', 0.0)
         filled_usdt = order.get('cost', 0.0) # filled * average (取引所決済完了)"
         
-        # 約定したかどうか (FOKの場合、全量約定が期待される)
+        # 約定したかどうか (IOCの場合、一部または全量の約定)
         if filled_amount and filled_amount > 0.0:
             # 即時約定成功
             # averageがNoneの場合はlimit_priceを使用
             entry_price = order.get('average') if order.get('average') is not None else entry_price
             
-            logging.info(f"✅ FOK注文成功 ({symbol}): 約定価格={format_price_precision(entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
+            logging.info(f"✅ IOC注文成功 ({symbol}): 約定価格={format_price_precision(entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
             
             # SL/TP注文の設定
             sl_tp_result = await place_sl_tp_orders(
                 symbol=symbol,
-                filled_amount=filled_amount,
+                filled_amount=filled_amount, # 約定した数量のみSL/TPを設定
                 stop_loss=signal['stop_loss'],
                 take_profit=signal['take_profit']
             )
             
             if sl_tp_result['status'] == 'ok':
                 # ポジションをグローバルリストに追加
+                # 注: IOCで部分約定した場合、ロットサイズ目標より小さくなる
+                
+                # 約定額が最小ロットを下回る場合はログに記録するが、取引は実行済みとする
+                # if filled_usdt < MIN_USDT_BALANCE_FOR_TRADE:
+                #     logging.warning(f"⚠️ IOCにより部分約定しましたが、約定額が最小ロット({MIN_USDT_BALANCE_FOR_TRADE})を下回りました。")
+                
                 OPEN_POSITIONS.append({
                     'id': str(uuid.uuid4()), # ボットが管理するユニークID
                     'symbol': symbol,
@@ -1304,10 +1311,10 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                     'id': order['id'], # 買い注文のID
                     'sl_order_id': sl_tp_result['sl_order_id'],
                     'tp_order_id': sl_tp_result['tp_order_id'],
-                    'message': f"現物指値買い注文が即時全量約定しました。SL/TP注文を設定済み (ID: {order['id']})"
+                    'message': f"現物指値買い注文が即時約定しました。SL/TP注文を設定済み (ID: {order['id']})"
                 }
             else:
-                logging.error("❌ FOK約定後のSL/TP注文設定に失敗しました。ポジションは手動でクローズしてください。")
+                logging.error("❌ IOC約定後のSL/TP注文設定に失敗しました。ポジションは手動でクローズしてください。")
                 
                 # SL/TP設定に失敗した場合、リスク回避のため即座にポジションを成行でクローズする
                 try:
@@ -1316,17 +1323,17 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                 except Exception as close_e:
                     logging.critical(f"❌ SL/TP設定失敗後の強制クローズも失敗: {close_e}")
                     
-                return {'status': 'error', 'error_message': f'FOK約定後にSL/TP設定に失敗: {sl_tp_result["error_message"]}'}
+                return {'status': 'error', 'error_message': f'IOC約定後にSL/TP設定に失敗: {sl_tp_result["error_message"]}'}
 
         elif order.get('status') in ['canceled', 'rejected'] or (order.get('status') is None and (filled_amount is None or filled_amount == 0.0)):
-            # FOK注文が約定しなかった場合 (status=canceled/rejected または status=None and filled=0.0)
-            error_message = 'FOK指値買い注文が即時約定しなかったためキャンセルされました。'
+            # IOC注文が全く約定しなかった場合
+            error_message = '指値買い注文が即時約定しなかったためキャンセルされました。' # メッセージを一般化
             logging.info(f"ℹ️ 取引スキップ: {error_message}")
             return {'status': 'error', 'error_message': error_message}
         else:
-            # その他の未約定ステータス (これはFOKでは起こらないはずだが、念のため)
-            error_message = f'FOK注文が未約定のまま残りました (Status: {order.get("status")})。手動でキャンセルが必要です。'
-            logging.error(f"❌ FOK注文エラー: {error_message}")
+            # その他の未約定ステータス (これはIOC/FOKでは起こらないはずだが、念のため)
+            error_message = f'注文が未約定のまま残りました (Status: {order.get("status")})。手動でキャンセルが必要です。'
+            logging.error(f"❌ IOC注文エラー: {error_message}")
             return {'status': 'error', 'error_message': error_message}
             
     except ccxt.NetworkError as e:
@@ -1455,7 +1462,7 @@ async def open_order_management_loop():
         OPEN_POSITIONS = [p for p in OPEN_POSITIONS if p['id'] not in positions_to_remove_ids]
 
 # ====================================================================================
-# NEW ASYNC ANALYSIS LOGIC (V19.0.44)
+# NEW ASYNC ANALYSIS LOGIC (V19.0.44/V19.0.45)
 # ====================================================================================
 
 async def analyze_symbol(symbol: str, account_status: Dict) -> Tuple[str, List[Dict], Optional[str]]:
@@ -1651,14 +1658,14 @@ async def main_bot_loop():
             # 6. Telegram通知
             if trade_result and trade_result.get('status') == 'ok':
                 # 取引成功
-                notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
+                notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result, "v19.0.45")
                 await send_telegram_notification(notification_message)
                 log_signal(best_signal, "Signal Executed")
                 LAST_SIGNAL_TIME[best_signal['symbol']] = time.time()
                 
             elif trade_result and trade_result.get('status') == 'error':
                  # 取引失敗（API/残高不足など）
-                 notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
+                 notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result, "v19.0.45")
                  await send_telegram_notification(notification_message)
                  log_signal(best_signal, "Signal Failed")
                  
@@ -1674,7 +1681,7 @@ async def main_bot_loop():
     if time.time() - LAST_HOURLY_NOTIFICATION_TIME >= HOURLY_SCORE_REPORT_INTERVAL:
         logging.info("⏳ 1時間ごとのスコアレポートを生成中...")
         # HOURLY_SIGNAL_LOGが空の場合でも、format_hourly_report内で「分析銘柄なし」のレポートを生成する
-        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold)
+        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold, "v19.0.45")
         await send_telegram_notification(report_message)
         
         HOURLY_SIGNAL_LOG = [] # リストをクリア
@@ -1684,7 +1691,7 @@ async def main_bot_loop():
     # 8. 初回起動完了通知 (一度だけ)
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.44")
+        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.45")
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1737,7 +1744,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.44")
+app = FastAPI(title="Apex BOT API", version="v19.0.45")
 
 @app.on_event("startup")
 async def startup_event():
