@@ -1,15 +1,13 @@
 # ====================================================================================
-# Apex BOT v19.0.40 - FULL COMPLIANCE (BBands Column Name Fix & MEXC Order Management Fix)
+# Apex BOT v19.0.41 - Win Rate Calculation Full Compliance
 #
 # 改良・修正点:
-# 1. 【BBANDSキー修正】calculate_indicators関数内のBBands列名を修正。
-#    - Key 'BBL_20_2.0' not found エラーに対応するため、MACDと異なり一般的なキー名 (BBL, BBU, BBB) を使用するように変更。
-# 2. 【注文監視修正】open_order_management_loop関数を修正。
-#    - mexc fetchOpenOrders() requires a symbol argument エラーに対応するため、
-#      保有ポジションのシンボルのみを対象にオープン注文を取得するようにロジックを変更。
-# 3. 【★ユーザー要望による修正: 1時間レポートの常時通知と詳細情報表示】
-#    - format_hourly_reportにEntry/SL/TPの表示を追加。
-#    - main_bot_loopでHOURLY_SIGNAL_LOGが空でもレポートを送信するように修正。
+# 1. 【BBANDSキー修正】calculate_indicators関数内のBBands列名を修正。(v19.0.40から継承)
+# 2. 【注文監視修正】open_order_management_loop関数を修正。(v19.0.40から継承)
+# 3. 【1時間レポートの常時通知と詳細情報表示】を維持。(v19.0.40から継承)
+# 4. 【★ユーザー要望による修正: 推定勝率の細分化と最低勝率0%対応】
+#    - get_estimated_win_rate関数を修正し、スコア0.60未満で勝率0%を表示し、
+#      それ以上のスコアではより細かく勝率を分割表示するように線形補間ロジックを適用。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -189,28 +187,54 @@ def format_price_precision(price: float) -> str:
         # 0.01 USDT未満は小数第6位 (精度維持)
         return f"{price:.6f}"
 
-# 💡 修正箇所: スコアに基づいて推定勝率を返す関数 (より細かく、幅広いばらつき)
+# 💡 【★V19.0.41 修正箇所】 スコアに基づいて推定勝率を返す関数 (より細かく、最低勝率0%対応)
 def get_estimated_win_rate(score: float) -> str:
-    """スコアに基づいて推定勝率を返す (8段階の細かいばらつき)"""
-    # 1.00が最高点。スコアが高いほど勝率が高くなるように8段階で調整
+    """スコアに基づいて推定勝率を返す (より細かい段階と最低勝率0%に対応)"""
     
-    if score >= 0.98:
-        return "93%+"
-    elif score >= 0.96:
-        return "90-93%"
-    elif score >= 0.94:
-        return "87-90%"
-    elif score >= 0.92:
-        return "84-87%"
-    elif score >= 0.90:
-        return "81-84%"
-    elif score >= 0.85:
-        return "75-81%"
-    elif score >= 0.80:
-        return "68-75%"
+    # 1. スコアと勝率の基準点を設定
+    # 0.60点 (60点) を勝率 0% のベースラインとする
+    min_score = 0.60
+    max_score = 1.00
+    min_win_rate = 0.0 # 0%
+    max_win_rate = 95.0 # 95%
+    
+    # 2. スコアを勝率パーセンテージに変換 (線形近似を使用)
+    if score <= min_score:
+        base_rate = 0.0
+    elif score >= max_score:
+        base_rate = max_win_rate # 95.0
     else:
-        # 0.80未満の低スコアの場合
-        return "60-68%"
+        # 線形補間: V = V_min + (V_max - V_min) * ((S - S_min) / (S_max - S_min))
+        ratio = (score - min_score) / (max_score - min_score)
+        base_rate = min_win_rate + (max_win_rate - min_win_rate) * ratio
+            
+    # 3. 段階に分割して表示 (より細かい粒度 5%刻み)
+    if base_rate >= 95:
+        return "95%+"
+    elif base_rate >= 90:
+        return "90-95%"
+    elif base_rate >= 85:
+        return "85-90%"
+    elif base_rate >= 80:
+        return "80-85%"
+    elif base_rate >= 75:
+        return "75-80%"
+    elif base_rate >= 70:
+        return "70-75%"
+    elif base_rate >= 65:
+        return "65-70%"
+    elif base_rate >= 60:
+        return "60-65%"
+    elif base_rate >= 50:
+        return "50-60%"
+    elif base_rate >= 30:
+        return "30-50%"
+    elif base_rate > 0:
+        # 0%より大きく、30%未満
+        return "1-30%"
+    else:
+        # 0%以下の場合は全て0%と表示
+        return "0%"
 
 def get_current_threshold(macro_context: Dict) -> float:
     """FGI proxyに基づいて現在の取引閾値を動的に決定する"""
@@ -516,7 +540,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>")
+    message += (f"<i>Bot Ver: v19.0.41 - Win Rate Full Compliance</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
@@ -543,8 +567,9 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         # シグナルがなかった場合のレポート
         message += (
             f"  - **レポート**: 過去1時間以内に有効なシグナル分析はありませんでした。\n"
+            f"  - **取引閾値**: <code>{current_threshold*100:.2f}</code> 点\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>"
+            f"<i>Bot Ver: v19.0.41 - Win Rate Full Compliance</i>"
         )
         return message
 
@@ -586,7 +611,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     
     message += (
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>"
+        f"<i>Bot Ver: v19.0.41 - Win Rate Full Compliance</i>"
     )
     
     return message
@@ -912,11 +937,6 @@ def generate_signal_and_score(
     # 総合的なエントリーシグナル
     is_long_signal = is_at_lower_bb and is_rsi_recovering and is_short_term_up
     
-    # ★ スコアはシグナルが出なくても計算する必要があるため、シグナル条件はスコア計算後に確認する（ここではスコア計算のためにダミーで通過させるか、スコアを算出する銘柄全てで計算させる）
-    # 現状のコードでは、シグナルが出ない場合はNoneを返しているため、スコアリングロジックをシグナル生成の前に移動する
-    # しかし、コードの大幅な変更を避けるため、ここでは「シグナルが出た場合のみスコアリングと詳細情報を計算する」という現行のロジックを維持し、シグナルが出たものだけをレポート対象とする。
-    # シグナルが出なかった銘柄は、HOURLY_SIGNAL_LOGに追加されないため、レポートに載らない。
-    
     # スコア計算はシグナルがONになった後に行う（現在のロジックを維持）
     if not is_long_signal:
         return None
@@ -1139,8 +1159,6 @@ async def place_sl_tp_orders(
 ) -> Dict:
     """
     現物ポジションのストップロス (SL) とテイクプロフィット (TP) 注文を同時に設定する。
-    MEXCなどの取引所では、SL/TPは個別の注文として、またはOCO/T-S-L注文として扱われる。
-    ここでは、CCXTの stop/stop_limit または limit を利用して設定を試みる。
     
     Returns:
         {'status': 'ok', 'sl_order_id': '...', 'tp_order_id': '...'}
@@ -1622,7 +1640,7 @@ async def main_bot_loop():
     # 8. 初回起動完了通知 (一度だけ)
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.40")
+        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.41")
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1675,7 +1693,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.40")
+app = FastAPI(title="Apex BOT API", version="v19.0.41")
 
 @app.on_event("startup")
 async def startup_event():
@@ -1690,27 +1708,6 @@ async def startup_event():
     
     # オープン注文監視ループの非同期タスクを開始
     asyncio.create_task(open_order_management_scheduler())
-
-
-async def main_bot_scheduler():
-    """メインBOTループを定期実行するスケジューラ (1分ごと)"""
-    # 初回起動後の待機時間を考慮し、初回は即座に実行を試みる
-    await asyncio.sleep(5) 
-    
-    while True:
-        try:
-            await main_bot_loop()
-        except Exception as e:
-            # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
-            logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
-            try:
-                 # 💡 Telegram通知失敗時の二次エラーをハンドリング
-                 await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
-            except Exception as notify_e:
-                 logging.error(f"❌ 致命的エラー通知の送信に失敗: {notify_e}")
-
-        # 次のループまで待機
-        await asyncio.sleep(LOOP_INTERVAL)
 
 
 if __name__ == "__main__":
