@@ -1,12 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.45 - Time-In-Force (TIF) Refactoring (FOK -> IOC)
+# Apex BOT v19.0.46 - NameError Fix & Robustness Refactoring
 #
 # 改良・修正点:
-# 1. 【最重要修正】execute_trade 関数内の新規指値買い注文の注文条件を FOK (Fill or Kill) から
-#    IOC (Immediate or Cancel) に変更しました。
-#    -> これにより、注文全量が即時約定しなくても、約定可能な数量での部分約定が可能となり、取引成功率を向上させます。
-#    -> FOK失敗時のエラーメッセージを、より一般的なメッセージに変更しました。
-# 2. その他ロギングやレポートのバージョン表記を v19.0.45 に更新。
+# 1. 【最重要修正】NameError: name 'bot_version' is not defined を修正するため、
+#    BOT_VERSION をグローバル定数として定義し、すべての通知関数でこれを使用するように変更しました。
+# 2. format_telegram_message の引数 exit_type の取り扱いを整理し、より直感的にしました。
+# 3. 致命的なエラー発生時の通知にも BOT_VERSION を含め、より迅速なデバッグを可能にしました。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -111,6 +110,9 @@ OPEN_POSITIONS: List[Dict] = [] # 現在保有中のポジション (注文IDト
 GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変数
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
+
+# ★ 新規追加: ボットのバージョン (v19.0.46 修正点)
+BOT_VERSION = "v19.0.46"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -324,7 +326,7 @@ def format_startup_message(
     macro_context: Dict, 
     monitoring_count: int,
     current_threshold: float,
-    bot_version: str
+    bot_version: str # この引数はそのまま維持
 ) -> str:
     """初回起動完了通知用のメッセージを作成する"""
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -407,9 +409,10 @@ def format_startup_message(
     return header + balance_section + macro_section + footer
 
 
+# ★ v19.0.46 修正点: exit_typeを分離し、bot_versionの代わりにグローバル定数 BOT_VERSION を使用するように修正
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
-    """Telegram通知用のメッセージを作成する【★V19.0.32で価格表示を変更】"""
-    global GLOBAL_TOTAL_EQUITY
+    """Telegram通知用のメッセージを作成する"""
+    global GLOBAL_TOTAL_EQUITY, BOT_VERSION
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     symbol = signal['symbol']
@@ -539,13 +542,13 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: {bot_version} - Full Analysis & Async Refactoring</i>")
+    # ★ v19.0.46 修正点: BOT_VERSION を使用
+    message += (f"<i>Bot Ver: {BOT_VERSION} - Full Analysis & Async Refactoring</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start_time: float, current_threshold: float, bot_version: str) -> str:
     """
     1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する。
-    ★ v19.0.44: 分析成功銘柄数と失敗銘柄数を追加報告
     """
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -1447,7 +1450,8 @@ async def open_order_management_loop():
                 
                 # 通知
                 current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
-                notification_message = format_telegram_message(closed_result, "ポジション決済", current_threshold, closed_result, exit_type)
+                # ★ v19.0.46 修正点: exit_typeを引数として渡す
+                notification_message = format_telegram_message(closed_result, "ポジション決済", current_threshold, closed_result, exit_type=exit_type)
                 await send_telegram_notification(notification_message)
                 log_signal(closed_result, "Position Exit")
                 
@@ -1563,7 +1567,7 @@ async def fetch_ohlcv_and_analyze(symbol: str, tf: str, market_ticker: Dict) -> 
 
 async def main_bot_loop():
     """ボットのメイン実行ループ (1分ごと)"""
-    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_HOURLY_NOTIFICATION_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG
+    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, CURRENT_MONITOR_SYMBOLS, GLOBAL_MACRO_CONTEXT, LAST_HOURLY_NOTIFICATION_TIME, IS_FIRST_MAIN_LOOP_COMPLETED, HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG, BOT_VERSION
     
     start_time = time.time()
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -1658,14 +1662,16 @@ async def main_bot_loop():
             # 6. Telegram通知
             if trade_result and trade_result.get('status') == 'ok':
                 # 取引成功
-                notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result, "v19.0.45")
+                # ★ v19.0.46 修正点: BOT_VERSION を明示的に渡す
+                notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
                 await send_telegram_notification(notification_message)
                 log_signal(best_signal, "Signal Executed")
                 LAST_SIGNAL_TIME[best_signal['symbol']] = time.time()
                 
             elif trade_result and trade_result.get('status') == 'error':
                  # 取引失敗（API/残高不足など）
-                 notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result, "v19.0.45")
+                 # ★ v19.0.46 修正点: BOT_VERSION を明示的に渡す
+                 notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
                  await send_telegram_notification(notification_message)
                  log_signal(best_signal, "Signal Failed")
                  
@@ -1681,7 +1687,7 @@ async def main_bot_loop():
     if time.time() - LAST_HOURLY_NOTIFICATION_TIME >= HOURLY_SCORE_REPORT_INTERVAL:
         logging.info("⏳ 1時間ごとのスコアレポートを生成中...")
         # HOURLY_SIGNAL_LOGが空の場合でも、format_hourly_report内で「分析銘柄なし」のレポートを生成する
-        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold, "v19.0.45")
+        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, HOURLY_ATTEMPT_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold, BOT_VERSION)
         await send_telegram_notification(report_message)
         
         HOURLY_SIGNAL_LOG = [] # リストをクリア
@@ -1691,7 +1697,7 @@ async def main_bot_loop():
     # 8. 初回起動完了通知 (一度だけ)
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.45")
+        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, BOT_VERSION)
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1703,6 +1709,7 @@ async def main_bot_loop():
 
 async def main_bot_scheduler():
     """メインBOTループを定期実行するスケジューラ (1分ごと)"""
+    global BOT_VERSION
     # 初回起動後の待機時間を考慮し、初回は即座に実行を試みる
     await asyncio.sleep(5) 
     
@@ -1713,8 +1720,8 @@ async def main_bot_scheduler():
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             try:
-                 # 💡 Telegram通知失敗時の二次エラーをハンドリング
-                 await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`")
+                 # ★ v19.0.46 修正点: BOT_VERSION を使用してエラー通知を強化
+                 await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`\n(Bot Ver: {BOT_VERSION})")
             except Exception as notify_e:
                  logging.error(f"❌ 致命的エラー通知の送信に失敗: {notify_e}")
 
@@ -1744,7 +1751,8 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.45")
+# ★ v19.0.46 修正点: BOT_VERSION を使用
+app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 
 @app.on_event("startup")
 async def startup_event():
