@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.49 - CRITICAL FIX: MARKET BUY ENTRY & SL/TP Robustness
+# Apex BOT v19.0.50 - CRITICAL FIX: API Lag / Race Condition Handling
 #
 # 改良・修正点:
-# 1. 【最重要修正】execute_trade関数: 新規ポジションのエントリーを「成行買い (Market Buy)」に変更。
-#    - 予期せぬ約定価格での取引や、指値注文の結果解析時に発生するNoneTypeエラーを回避。
-# 2. BOT_VERSION を v19.0.49 に更新。
-# 3. Telegram通知の注文タイプ表示を「成行買い (Market)」に修正。
+# 1. 【最重要修正】execute_trade関数内の注文結果確認ロジックを強化。
+#    - create_order後に約定数量(filled)が0だった場合、APIレイテンシーを考慮し1秒待機後、
+#      fetch_orderで注文ステータスを再確認するロジックを追加。
+# 2. BOT_VERSION を v19.0.50 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -111,8 +111,8 @@ GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
-# ★ 新規追加: ボットのバージョン (v19.0.49 修正点: Market Buy Entry)
-BOT_VERSION = "v19.0.49"
+# ★ 新規追加: ボットのバージョン (v19.0.50 修正点)
+BOT_VERSION = "v19.0.50"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -154,7 +154,7 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (変更なし)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.86       
+SIGNAL_THRESHOLD_SLUMP = 0.85       
 SIGNAL_THRESHOLD_NORMAL = 0.83      
 SIGNAL_THRESHOLD_ACTIVE = 0.80      
 
@@ -409,7 +409,7 @@ def format_startup_message(
     return header + balance_section + macro_section + footer
 
 
-# ★ v19.0.49 修正点: 注文タイプを「成行買い」に変更
+# ★ v19.0.46 修正点: exit_typeを分離し、bot_versionの代わりにグローバル定数 BOT_VERSION を使用するように修正
 def format_telegram_message(signal: Dict, context: str, current_threshold: float, trade_result: Optional[Dict] = None, exit_type: Optional[str] = None) -> str:
     """Telegram通知用のメッセージを作成する"""
     global GLOBAL_TOTAL_EQUITY, BOT_VERSION
@@ -420,8 +420,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     score = signal['score']
     
     # trade_resultから値を取得する場合があるため、get()を使用
-    # 指値(Entry)にはシグナルで決定した価格 (分析時の終値) を使用
-    entry_price_ref = signal.get('entry_price', 0.0) 
+    entry_price = signal.get('entry_price', trade_result.get('entry_price', 0.0) if trade_result else 0.0)
     stop_loss = signal.get('stop_loss', trade_result.get('stop_loss', 0.0) if trade_result else 0.0)
     take_profit = signal.get('take_profit', trade_result.get('take_profit', 0.0) if trade_result else 0.0)
     rr_ratio = signal.get('rr_ratio', 0.0)
@@ -477,19 +476,15 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             )
 
         elif trade_result.get('status') == 'ok':
-            # 💡 成功メッセージを「成行買い」に変更
-            trade_status_line = "✅ **自動売買 成功**: 現物成行買い注文が約定しました。"
+            trade_status_line = "✅ **自動売買 成功**: 現物指値買い注文が即時約定しました。"
             
             filled_amount = trade_result.get('filled_amount', 0.0) 
             filled_usdt = trade_result.get('filled_usdt', 0.0)
-            avg_entry_price = trade_result.get('entry_price', 0.0) # 実際の約定価格
             
             trade_section = (
                 f"💰 **取引実行結果**\n"
-                # 注文タイプを「成行買い」に変更
-                f"  - **注文タイプ**: <code>現物 (Spot) / 成行買い (Market)</code>\n" 
+                f"  - **注文タイプ**: <code>現物 (Spot) / 指値買い (IOC)</code>\n" # ★ IOCに変更
                 f"  - **動的ロット**: {lot_info} (目標)\n" 
-                f"  - **約定価格**: <code>{format_price_precision(avg_entry_price)}</code>\n" # 実際の約定価格を表示
                 f"  - **約定数量**: <code>{filled_amount:.4f}</code> {symbol.split('/')[0]}\n"
                 f"  - **平均約定額**: <code>{format_usdt(filled_usdt)}</code> USDT\n"
                 f"  - **SL注文ID**: <code>{trade_result.get('sl_order_id', 'N/A')}</code>\n"
@@ -539,13 +534,13 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **取引閾値**: <code>{current_threshold * 100:.2f}</code> 点\n"
         f"  - **推定勝率**: <code>{estimated_wr}</code>\n"
         f"  - **リスクリワード比率 (RRR)**: <code>1:{rr_ratio:.2f}</code>\n"
-        # ★ 指値 (Entry) はシグナルが決定した価格 (分析時の終値)
-        f"  - **指値 (Entry)**: <code>{format_price_precision(entry_price_ref)}</code>\n" 
+        # ★ここから価格表示をformat_price_precisionに変更
+        f"  - **指値 (Entry)**: <code>{format_price_precision(entry_price)}</code>\n"
         f"  - **ストップロス (SL)**: <code>{format_price_precision(stop_loss)}</code>\n"
         f"  - **テイクプロフィット (TP)**: <code>{format_price_precision(take_profit)}</code>\n"
         # リスク・リワード幅（金額）はformat_usdtを維持
-        f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price_ref - stop_loss)}</code> USDT\n"
-        f"  - **リワード幅 (TP)**: <code>{format_usdt(take_profit - entry_price_ref)}</code> USDT\n"
+        f"  - **リスク幅 (SL)**: <code>{format_usdt(entry_price - stop_loss)}</code> USDT\n"
+        f"  - **リワード幅 (TP)**: <code>{format_usdt(take_profit - entry_price)}</code> USDT\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
     )
     
@@ -564,7 +559,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    # ★ v19.0.49 修正点: BOT_VERSION を使用
+    # ★ v19.0.47 修正点: BOT_VERSION を使用
     message += (f"<i>Bot Ver: {BOT_VERSION} - Full Analysis & Async Refactoring</i>")
     return message
 
@@ -951,7 +946,7 @@ def generate_signal_and_score(
     
     # 2. SL/TPの計算
     
-    # Entry Price: 指値はローソク足の終値 (last_close) を基準価格とする
+    # Entry Price: 指値はローソク足の終値 (last_close)
     entry_price = last_close
     
     # SL: Entry Priceから2.5 ATR下の価格
@@ -1119,10 +1114,9 @@ def calculate_dynamic_lot_size(score: float, account_status: Dict) -> float:
     
     return final_lot
 
-async def adjust_order_amount(symbol: str, usdt_amount: float, price_ref: float) -> Tuple[float, float]:
+async def adjust_order_amount(symbol: str, usdt_amount: float, price: float) -> Tuple[float, float]:
     """
     取引所の最小数量、最小ロットサイズ、数量の精度に従って注文数量を調整する。
-    price_refはロットサイズ計算のための参照価格として使用されます。
     Returns: (base_amount, final_usdt_amount)
     """
     global EXCHANGE_CLIENT
@@ -1133,7 +1127,7 @@ async def adjust_order_amount(symbol: str, usdt_amount: float, price_ref: float)
     market = EXCHANGE_CLIENT.market(symbol)
     
     # 1. Base amount の計算 (購入数量)
-    base_amount_unrounded = usdt_amount / price_ref
+    base_amount_unrounded = usdt_amount / price
 
     # 2. 数量の精度 (amount_precision) と最小数量 (min_amount) の取得
     amount_precision = market['precision']['amount'] if market and market['precision'] else 4 # 精度 (小数点以下の桁数)
@@ -1149,7 +1143,7 @@ async def adjust_order_amount(symbol: str, usdt_amount: float, price_ref: float)
         logging.warning(f"⚠️ 調整後の数量 {base_amount_rounded:.8f} は最小数量 {min_amount:.8f} を下回りました。取引スキップ。")
         return 0.0, 0.0
         
-    final_usdt_amount = base_amount_rounded * price_ref
+    final_usdt_amount = base_amount_rounded * price
     
     return base_amount_rounded, final_usdt_amount
 
@@ -1275,10 +1269,9 @@ async def close_position_immediately(symbol: str, filled_amount: float) -> Dict:
         return {'status': 'error', 'error_message': f'強制クローズ失敗（APIエラー）: {e}'}
 
 
-# ★ V19.0.49 修正: Market Buy Entry に変更
 async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     """
-    シグナルに基づいて現物成行買い注文を発注し、SL/TP注文を設定する。
+    シグナルに基づいて現物指値買い注文を発注し、SL/TP注文を設定する。
     
     Args:
         signal: シグナルデータ (symbol, entry_price, stop_loss, take_profitなどを含む)
@@ -1290,40 +1283,50 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     global EXCHANGE_CLIENT
     
     symbol = signal['symbol']
-    # entry_price_ref: シグナル決定時の終値（ロットサイズ計算の基準価格として使用）
-    entry_price_ref = signal['entry_price'] 
+    entry_price = signal['entry_price']
     
     # 1. 動的ロットサイズの計算
     lot_size_usdt = calculate_dynamic_lot_size(signal['score'], account_status)
     signal['lot_size_usdt'] = lot_size_usdt # シグナルデータにロットサイズを保存
 
     # 2. 注文数量の調整
-    # 注文数量は、計算されたロットサイズと基準価格 (entry_price_ref) に基づいて決定
-    base_amount_to_buy, final_usdt_amount = await adjust_order_amount(symbol, lot_size_usdt, entry_price_ref)
+    # 注文価格: entry_price (シグナルで決定した指値価格)
+    base_amount_to_buy, final_usdt_amount = await adjust_order_amount(symbol, lot_size_usdt, entry_price)
 
     if base_amount_to_buy <= 0.0:
         return {'status': 'error', 'error_message': '調整後の数量が取引所の最小要件を満たしません。'}
     
-    # 3. 成行買い注文の発注 (Market Buy)
-    logging.info(f"⏳ 現物成行買い注文を発注中: {symbol} (目標Qty: {base_amount_to_buy:.4f})")
+    logging.info(f"⏳ 現物指値買い注文を発注中: {symbol} @ {format_price_precision(entry_price)} (Qty: {base_amount_to_buy:.4f})")
     
     try:
-        # Market Buy注文: 価格は指定せず、数量のみを指定
+        # 3. IOC指値買い注文の発注
         order = await EXCHANGE_CLIENT.create_order(
             symbol=symbol, 
-            type='market', # ★ 成行買いに変更
+            type='limit', 
             side='buy', 
             amount=base_amount_to_buy, 
-            params={}
+            price=entry_price,
+            # ★ FOKからIOCへ変更 (v19.0.45 修正点)
+            params={'timeInForce': 'IOC'} 
         )
         
-        # 4. 注文結果の確認 (Market orderなので通常はfilled, cost, averageが返される)
+        # 4. 注文結果の確認 (V19.0.48で強化 + V19.0.50でAPI遅延対策を強化)
+        order_id = order['id']
+        filled_amount = float(order.get('filled') or 0.0) 
+        order_status = order.get('status')
         
-        # V19.0.48 修正: NoneTypeエラーを防ぐため、filled, cost, averageを明示的にチェック
-        filled_amount = order.get('filled')
-        if filled_amount is None:
-            filled_amount = 0.0
-        filled_amount = float(filled_amount) 
+        # ★ V19.0.50 修正: API遅延による約定未反映に対応するため、filled=0でも statusがopen/partially_filled/new の場合は再チェック
+        if filled_amount <= 0.0 and order_status in ['open', 'partially_filled', 'new', 'limit']:
+             logging.warning(f"⚠️ {symbol} IOC注文: 即時約定量がゼロ。API遅延の可能性あり。1秒待機して再確認します。(Status: {order_status})")
+             await asyncio.sleep(1.0) 
+             
+             # fetch_orderで最新の状態を取得
+             updated_order = await EXCHANGE_CLIENT.fetch_order(order_id, symbol)
+             filled_amount = float(updated_order.get('filled') or 0.0)
+             logging.info(f"✅ {symbol} IOC注文: 再確認後の約定数量: {filled_amount:.4f}")
+             
+             # 成功時の情報源を updated_order に切り替える
+             order = updated_order
         
         if filled_amount > 0.0:
             # 即時約定成功 (部分約定または全約定)
@@ -1334,23 +1337,19 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                  # averageをまず取得
                  avg_entry_price_temp = order.get('average')
                  if avg_entry_price_temp is None:
-                      avg_entry_price_temp = entry_price_ref # averageもNoneなら基準価格を使用
+                      avg_entry_price_temp = entry_price # averageもNoneなら指値価格を使用
                  filled_usdt = filled_amount * avg_entry_price_temp
-            filled_usdt = float(filled_usdt)
+            filled_usdt = float(filled_usdt) # 安全のためにfloatにキャスト
 
-            # avg_entry_price (平均約定価格) の取得
+            # avg_entry_price (平均約定価格) の取得。Noneの場合は指値価格を使用
             avg_entry_price = order.get('average')
             if avg_entry_price is None:
-                 # averageが取得できなければ、コストと数量から計算するか、基準価格を使用
-                 if filled_amount > 0:
-                      avg_entry_price = filled_usdt / filled_amount
-                 else:
-                      avg_entry_price = entry_price_ref
-            avg_entry_price = float(avg_entry_price)
+                avg_entry_price = entry_price
+            avg_entry_price = float(avg_entry_price) # 安全のためにfloatにキャスト
             
-            logging.info(f"✅ 成行注文成功 ({symbol}): 約定価格={format_price_precision(avg_entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
+            logging.info(f"✅ IOC注文成功 ({symbol}): 約定価格={format_price_precision(avg_entry_price)}, 約定数量={filled_amount:.4f}, コスト={format_usdt(filled_usdt)} USDT")
             
-            # 5. SL/TP注文の設定
+            # SL/TP注文の設定
             sl_tp_result = await place_sl_tp_orders(
                 symbol=symbol,
                 filled_amount=filled_amount, # 約定した数量のみSL/TPを設定
@@ -1378,30 +1377,34 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
                     'status': 'ok',
                     'filled_amount': filled_amount,
                     'filled_usdt': filled_usdt,
-                    'entry_price': avg_entry_price, # 実際の約定価格を返す
+                    'entry_price': avg_entry_price,
                     'id': order['id'], # 買い注文のID
                     'sl_order_id': sl_tp_result['sl_order_id'],
                     'tp_order_id': sl_tp_result['tp_order_id'],
-                    'message': f"現物成行買い注文が約定しました。SL/TP注文を設定済み (ID: {order['id']})"
+                    'message': f"現物指値買い注文が即時約定しました。SL/TP注文を設定済み (ID: {order['id']})"
                 }
             else:
                 # 🔴 SL/TP注文設定に失敗した場合
-                logging.error("❌ 成行約定後のSL/TP注文設定に失敗しました。リスク回避のためポジションを即時クローズします。")
+                logging.error("❌ IOC約定後のSL/TP注文設定に失敗しました。リスク回避のためポジションを即時クローズします。")
                 
                 # SL/TP設定に失敗した場合、リスク回避のため即座にポジションを成行でクローズする
                 close_result = await close_position_immediately(symbol, filled_amount)
                 
                 return {
                     'status': 'error', 
-                    'error_message': f'成行約定後にSL/TP設定に失敗: {sl_tp_result["error_message"]}',
+                    'error_message': f'IOC約定後にSL/TP設定に失敗: {sl_tp_result["error_message"]}',
                     'close_status': close_result['status'],
                     'closed_amount': close_result.get('closed_amount', 0.0),
                     'close_error_message': close_result.get('error_message'),
                 }
 
         else:
-            # 約定しなかった場合 (filled_amount == 0.0) -> 成行買いでこれは稀だが念のため
-            error_message = '成行買い注文で約定が発生しませんでした。' 
+            # 約定しなかった場合 (filled_amount == 0.0)
+            error_message = '指値買い注文が即時約定しなかったためキャンセルされました。' 
+            # 💡 ユーザーの報告エラーメッセージに合わせて、もしユーザーがMarket注文に変えていた場合を考慮
+            if order.get('type') == 'market':
+                 error_message = '成行買い注文で約定が発生しませんでした。（即時約定量がゼロ）'
+            
             logging.info(f"ℹ️ 取引スキップ: {error_message}")
             return {'status': 'error', 'error_message': error_message, 'close_status': 'skipped'}
             
@@ -1413,19 +1416,21 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
         error_message = f"取引所エラー: {e}"
         logging.error(f"❌ 取引実行失敗 ({symbol}): {error_message}", exc_info=True)
         
-        # CCXTエラーでも約定している可能性を考慮し、強制クローズを試みる
+        # 💡 CCXTエラーでも約定している可能性を考慮:
+        # このエラーが返された時点で購入が成功し、SL/TP設定中にエラーが発生した可能性
+        # この場合、取引所への問い合わせが必要だが、ここでは簡略化のため強制クローズを試みる
         filled_amount_unknown = base_amount_to_buy # 注文した数量を暫定として強制クローズを試みる
         close_result = await close_position_immediately(symbol, filled_amount_unknown)
 
         return {
             'status': 'error', 
-            'error_message': f'取引所エラー（Market Buy/SL/TP設定失敗）: {e}',
+            'error_message': f'取引所エラー（IOC/SL/TP設定失敗）: {e}',
             'close_status': close_result['status'],
             'closed_amount': close_result.get('closed_amount', 0.0),
             'close_error_message': close_result.get('error_message'),
         }
     except Exception as e:
-        # 予期せぬPythonエラー。
+        # v19.0.48 修正: ここに到達するのは予期せぬPythonエラー。エラーメッセージをより明確に
         error_message = f"致命的なPythonエラー: {type(e).__name__} - {e}"
         logging.critical(f"❌ 取引実行中に予期せぬエラーが発生 ({symbol}): {error_message}", exc_info=True)
         
@@ -1751,7 +1756,7 @@ async def main_bot_loop():
             # 6. Telegram通知
             if trade_result and trade_result.get('status') == 'ok':
                 # 取引成功
-                # ★ v19.0.49 修正点: BOT_VERSION を明示的に渡す
+                # ★ v19.0.47 修正点: BOT_VERSION を明示的に渡す
                 notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
                 await send_telegram_notification(notification_message)
                 log_signal(best_signal, "Signal Executed")
@@ -1759,7 +1764,7 @@ async def main_bot_loop():
                 
             elif trade_result and trade_result.get('status') == 'error':
                  # 取引失敗（API/残高不足/SLTP設定失敗/強制クローズ結果など）
-                 # ★ v19.0.49 修正点: BOT_VERSION を明示的に渡す
+                 # ★ v19.0.47 修正点: BOT_VERSION を明示的に渡す
                  notification_message = format_telegram_message(best_signal, "取引シグナル", current_threshold, trade_result)
                  await send_telegram_notification(notification_message)
                  log_signal(best_signal, "Signal Failed")
@@ -1809,7 +1814,7 @@ async def main_bot_scheduler():
             # 致命的なエラーが発生した場合でも、ループを継続するためにエラーをログに記録し、待機時間を経て再試行
             logging.critical(f"❌ メインループ実行中に致命的なエラー: {e}", exc_info=True)
             try:
-                 # ★ v19.0.49 修正点: BOT_VERSION を使用してエラー通知を強化
+                 # ★ v19.0.47 修正点: BOT_VERSION を使用してエラー通知を強化
                  await send_telegram_notification(f"🚨 **致命的なエラー**\nメインループでエラーが発生しました: `{e}`\n(Bot Ver: {BOT_VERSION})")
             except Exception as notify_e:
                  logging.error(f"❌ 致命的エラー通知の送信に失敗: {notify_e}")
@@ -1840,7 +1845,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-# ★ v19.0.49 修正点: BOT_VERSION を使用
+# ★ v19.0.47 修正点: BOT_VERSION を使用
 app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 
 @app.on_event("startup")
