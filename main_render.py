@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.50 - CRITICAL FIX: API Lag / Race Condition Handling
+# Apex BOT v19.0.51 - FEATURE: Trading Signal Threshold Update (86.00 Points)
 #
 # 改良・修正点:
-# 1. 【最重要修正】execute_trade関数内の注文結果確認ロジックを強化。
-#    - create_order後に約定数量(filled)が0だった場合、APIレイテンシーを考慮し1秒待機後、
-#      fetch_orderで注文ステータスを再確認するロジックを追加。
-# 2. BOT_VERSION を v19.0.50 に更新。
+# 1. 【取引閾値変更】市場環境に応じた動的閾値のベースラインを86.00点に引き上げ。
+#    - SIGNAL_THRESHOLD_NORMAL = 0.86 (86.00点)
+# 2. BOT_VERSION を v19.0.51 に更新。
+# 3. v19.0.50で導入したAPI遅延対策ロジックは維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -111,8 +111,8 @@ GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
-# ★ 新規追加: ボットのバージョン (v19.0.50 修正点)
-BOT_VERSION = "v19.0.50"
+# ★ 新規追加: ボットのバージョン (v19.0.51: 取引閾値86点に設定)
+BOT_VERSION = "v19.0.51"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -122,7 +122,7 @@ IS_CLIENT_READY: bool = False
 
 # 取引ルール設定
 TRADE_SIGNAL_COOLDOWN = 60 * 60 * 2 # 同一銘柄のシグナル通知クールダウン（2時間）
-SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン
+SIGNAL_THRESHOLD = 0.65             # 動的閾値のベースライン（使われていないが定数として残す）
 TOP_SIGNAL_COUNT = 3                # 通知するシグナルの最大数
 REQUIRED_OHLCV_LIMITS = {'1m': 500, '5m': 500, '15m': 500, '1h': 500, '4h': 500} # 1m, 5mを含む
 
@@ -151,12 +151,12 @@ VOLUME_INCREASE_BONUS = 0.07        # 出来高スパイク時のボーナス (�
 LIQUIDITY_BONUS_MAX = 0.07          # 流動性(板の厚み)による最大ボーナス (元: 0.10)
 FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボーナス/ペナルティ (変更なし)
 
-# 市場環境に応じた動的閾値調整のための定数 (変更なし)
+# 市場環境に応じた動的閾値調整のための定数 (★ V19.0.51 修正箇所: 閾値を86点ベースに設定)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.85       
-SIGNAL_THRESHOLD_NORMAL = 0.83      
-SIGNAL_THRESHOLD_ACTIVE = 0.80      
+SIGNAL_THRESHOLD_SLUMP = 0.88       # 88.00点 (リスクオフ時は厳しく)
+SIGNAL_THRESHOLD_NORMAL = 0.86      # 86.00点 (ベースライン)
+SIGNAL_THRESHOLD_ACTIVE = 0.83      # 83.00点 (リスクオン時は緩く)      
 
 # ====================================================================================
 # UTILITIES & FORMATTING 
@@ -449,7 +449,14 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         
         elif trade_result is None or trade_result.get('status') == 'error':
             error_message = trade_result.get('error_message', 'APIエラー') if trade_result else 'システムエラー'
-            trade_status_line = f"❌ **自動売買 失敗**: {error_message}"
+            
+            # 💡 注文タイプを自動で判断して表示 (V19.0.51ではIOC指値注文を想定)
+            if '指値買い注文' in error_message:
+                 trade_status_line = f"❌ **自動売買 失敗**: 指値買い注文が即時約定しなかったためキャンセルされました。"
+            elif '成行買い注文' in error_message:
+                 trade_status_line = f"❌ **自動売買 失敗**: 成行買い注文で約定が発生しませんでした。"
+            else:
+                 trade_status_line = f"❌ **自動売買 失敗**: {error_message}"
             
             # 💡 取引失敗詳細セクションの生成
             # SL/TP設定失敗後の強制クローズの結果を詳細に表示する
@@ -476,6 +483,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             )
 
         elif trade_result.get('status') == 'ok':
+            # ★ V19.0.45 修正: 注文タイプを明確化
             trade_status_line = "✅ **自動売買 成功**: 現物指値買い注文が即時約定しました。"
             
             filled_amount = trade_result.get('filled_amount', 0.0) 
@@ -1092,15 +1100,15 @@ def calculate_dynamic_lot_size(score: float, account_status: Dict) -> float:
     # 2. スコアに基づいた線形補間
     if score >= DYNAMIC_LOT_SCORE_MAX:
         final_lot = max_lot
-    elif score <= SIGNAL_THRESHOLD:
+    elif score <= SIGNAL_THRESHOLD_NORMAL: # SIGNAL_THRESHOLD_NORMAL (0.86)をベースラインとして使用
         final_lot = min_lot
     else:
-        # スコア範囲 (SIGNAL_THRESHOLD から DYNAMIC_LOT_SCORE_MAX) で線形に増加
-        score_range = DYNAMIC_LOT_SCORE_MAX - SIGNAL_THRESHOLD
+        # スコア範囲 (SIGNAL_THRESHOLD_NORMAL から DYNAMIC_LOT_SCORE_MAX) で線形に増加
+        score_range = DYNAMIC_LOT_SCORE_MAX - SIGNAL_THRESHOLD_NORMAL
         lot_range = max_lot - min_lot
         
         if score_range > 0:
-            final_lot = min_lot + lot_range * ((score - SIGNAL_THRESHOLD) / score_range)
+            final_lot = min_lot + lot_range * ((score - SIGNAL_THRESHOLD_NORMAL) / score_range)
         else:
             final_lot = min_lot
 
@@ -1300,17 +1308,17 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
     
     try:
         # 3. IOC指値買い注文の発注
+        # type='limit' と timeInForce: 'IOC' の組み合わせにより、指値注文（約定価格の確実性）かつ即時約定失効（未約定分を残さない）を実現
         order = await EXCHANGE_CLIENT.create_order(
             symbol=symbol, 
             type='limit', 
             side='buy', 
             amount=base_amount_to_buy, 
             price=entry_price,
-            # ★ FOKからIOCへ変更 (v19.0.45 修正点)
             params={'timeInForce': 'IOC'} 
         )
         
-        # 4. 注文結果の確認 (V19.0.48で強化 + V19.0.50でAPI遅延対策を強化)
+        # 4. 注文結果の確認 (V19.0.50でAPI遅延対策を強化)
         order_id = order['id']
         filled_amount = float(order.get('filled') or 0.0) 
         order_status = order.get('status')
@@ -1418,7 +1426,6 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
         
         # 💡 CCXTエラーでも約定している可能性を考慮:
         # このエラーが返された時点で購入が成功し、SL/TP設定中にエラーが発生した可能性
-        # この場合、取引所への問い合わせが必要だが、ここでは簡略化のため強制クローズを試みる
         filled_amount_unknown = base_amount_to_buy # 注文した数量を暫定として強制クローズを試みる
         close_result = await close_position_immediately(symbol, filled_amount_unknown)
 
@@ -1845,7 +1852,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-# ★ v19.0.47 修正点: BOT_VERSION を使用
+# ★ v19.0.51 修正点: BOT_VERSION を使用
 app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 
 @app.on_event("startup")
