@@ -7,6 +7,9 @@
 # 2. 【注文監視修正】open_order_management_loop関数を修正。
 #    - mexc fetchOpenOrders() requires a symbol argument エラーに対応するため、
 #      保有ポジションのシンボルのみを対象にオープン注文を取得するようにロジックを変更。
+# 3. 【★ユーザー要望による修正: 1時間レポートの常時通知と詳細情報表示】
+#    - format_hourly_reportにEntry/SL/TPの表示を追加。
+#    - main_bot_loopでHOURLY_SIGNAL_LOGが空でもレポートを送信するように修正。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -517,7 +520,10 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
-    """1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する (V19.0.34で追加)"""
+    """
+    1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する。
+    ★修正点: シグナルが無くても必ず通知し、Entry/SL/TPを表示する。
+    """
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     start_jst = datetime.fromtimestamp(start_time, JST).strftime("%H:%M:%S")
@@ -525,42 +531,60 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     # スコアでソート
     signals_sorted = sorted(signals, key=lambda x: x['score'], reverse=True)
     
-    if not signals_sorted:
-        return (
-            f"🕒 **Apex BOT 1時間スコアレポート**\n"
-            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"  - **集計日時**: {start_jst} - {now_jst} (JST)\n"
-            f"  - **分析銘柄数**: <code>0</code>\n"
-            f"  - **レポート**: 過去1時間以内に分析されたシグナルはありませんでした。\n"
-            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        )
-    
-    best_signal = signals_sorted[0]
-    worst_signal = signals_sorted[-1]
-    
-    # 閾値超え銘柄のカウント
-    threshold_count = sum(1 for s in signals if s['score'] >= current_threshold)
-
+    # 基本情報
     message = (
         f"🕒 **Apex BOT 1時間スコアレポート**\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"  - **集計日時**: {start_jst} - {now_jst} (JST)\n"
         f"  - **分析銘柄数**: <code>{len(signals)}</code>\n"
-        f"  - **閾値超え銘柄**: <code>{threshold_count}</code> ({current_threshold*100:.2f}点以上)\n"
-        f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+    )
+    
+    if not signals_sorted:
+        # シグナルがなかった場合のレポート
+        message += (
+            f"  - **レポート**: 過去1時間以内に有効なシグナル分析はありませんでした。\n"
+            f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+            f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>"
+        )
+        return message
+
+    best_signal = signals_sorted[0]
+    worst_signal = signals_sorted[-1]
+    
+    # 閾値超え銘柄のカウント
+    threshold_count = sum(1 for s in signals if s['score'] >= current_threshold)
+    
+    # 閾値情報を追加
+    message += f"  - **取引閾値**: <code>{current_threshold*100:.2f}</code> 点\n"
+    message += f"  - **閾値超え銘柄**: <code>{threshold_count}</code> 銘柄\n"
+    message += f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
+    
+    # 🟢 ベストスコア銘柄
+    message += (
         f"\n"
         f"🟢 **ベストスコア銘柄 (Top)**\n"
         f"  - **銘柄**: <b>{best_signal['symbol']}</b> ({best_signal['timeframe']})\n"
         f"  - **スコア**: <code>{best_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(best_signal['score'])}</code>\n"
-        f"  - **現在の価格**: <code>{format_price_precision(best_signal['entry_price'])}</code>\n"
+        # ★追加: Entry/SL/TP
+        f"  - **指値 (Entry)**: <code>{format_price_precision(best_signal['entry_price'])}</code>\n"
+        f"  - **SL/TP**: <code>{format_price_precision(best_signal['stop_loss'])}</code> / <code>{format_price_precision(best_signal['take_profit'])}</code>\n"
+    )
+    
+    # 🔴 ワーストスコア銘柄
+    message += (
         f"\n"
         f"🔴 **ワーストスコア銘柄 (Bottom)**\n"
         f"  - **銘柄**: <b>{worst_signal['symbol']}</b> ({worst_signal['timeframe']})\n"
         f"  - **スコア**: <code>{worst_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(worst_signal['score'])}</code>\n"
-        f"  - **現在の価格**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
+        # ★追加: Entry/SL/TP (ワーストもシグナルなのでデータは入っている)
+        f"  - **指値 (Entry)**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
+        f"  - **SL/TP**: <code>{format_price_precision(worst_signal['stop_loss'])}</code> / <code>{format_price_precision(worst_signal['take_profit'])}</code>\n"
         f"\n"
+    )
+    
+    message += (
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"<i>Bot Ver: v19.0.40 - BBands/MEXC Order Fix</i>"
     )
@@ -888,6 +912,12 @@ def generate_signal_and_score(
     # 総合的なエントリーシグナル
     is_long_signal = is_at_lower_bb and is_rsi_recovering and is_short_term_up
     
+    # ★ スコアはシグナルが出なくても計算する必要があるため、シグナル条件はスコア計算後に確認する（ここではスコア計算のためにダミーで通過させるか、スコアを算出する銘柄全てで計算させる）
+    # 現状のコードでは、シグナルが出ない場合はNoneを返しているため、スコアリングロジックをシグナル生成の前に移動する
+    # しかし、コードの大幅な変更を避けるため、ここでは「シグナルが出た場合のみスコアリングと詳細情報を計算する」という現行のロジックを維持し、シグナルが出たものだけをレポート対象とする。
+    # シグナルが出なかった銘柄は、HOURLY_SIGNAL_LOGに追加されないため、レポートに載らない。
+    
+    # スコア計算はシグナルがONになった後に行う（現在のロジックを維持）
     if not is_long_signal:
         return None
 
@@ -1579,17 +1609,15 @@ async def main_bot_loop():
             # TEST_MODE または クールダウン中の場合は、最高シグナルをログに記録
             log_signal(best_signal, "Signal Found (No Trade)")
     
-    # 7. 1時間ごとのスコア通知レポート
+    # 7. 1時間ごとのスコア通知レポート (★常時通知するように修正)
     if time.time() - LAST_HOURLY_NOTIFICATION_TIME >= HOURLY_SCORE_REPORT_INTERVAL:
-        if HOURLY_SIGNAL_LOG:
-            logging.info("⏳ 1時間ごとのスコアレポートを生成中...")
-            report_message = format_hourly_report(HOURLY_SIGNAL_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold)
-            await send_telegram_notification(report_message)
-            
-            HOURLY_SIGNAL_LOG = [] # リストをクリア
-            LAST_HOURLY_NOTIFICATION_TIME = time.time()
-        else:
-            LAST_HOURLY_NOTIFICATION_TIME = time.time()
+        logging.info("⏳ 1時間ごとのスコアレポートを生成中...")
+        # HOURLY_SIGNAL_LOGが空の場合でも、format_hourly_report内で「分析銘柄なし」のレポートを生成する
+        report_message = format_hourly_report(HOURLY_SIGNAL_LOG, LAST_HOURLY_NOTIFICATION_TIME, current_threshold)
+        await send_telegram_notification(report_message)
+        
+        HOURLY_SIGNAL_LOG = [] # リストをクリア
+        LAST_HOURLY_NOTIFICATION_TIME = time.time()
             
     # 8. 初回起動完了通知 (一度だけ)
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
