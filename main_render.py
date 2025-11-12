@@ -1,13 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.41 - Win Rate Calculation Full Compliance
+# Apex BOT v19.0.43 - Full Analysis Report Mode
 #
 # 改良・修正点:
-# 1. 【BBANDSキー修正】calculate_indicators関数内のBBands列名を修正。(v19.0.40から継承)
-# 2. 【注文監視修正】open_order_management_loop関数を修正。(v19.0.40から継承)
-# 3. 【1時間レポートの常時通知と詳細情報表示】を維持。(v19.0.40から継承)
-# 4. 【★ユーザー要望による修正: 推定勝率の細分化と最低勝率0%対応】
-#    - get_estimated_win_rate関数を修正し、スコア0.60未満で勝率0%を表示し、
-#      それ以上のスコアではより細かく勝率を分割表示するように線形補間ロジックを適用。
+# 1. 【最重要修正】generate_signal_and_score関数から、基本シグナル条件(is_long_signal)を
+#    満たさない場合の早期リターン(return None)を削除。
+#    -> これにより、OHLCVデータが取得できた全ての銘柄に対してスコアリングを強制実行し、
+#    HOURLY_SIGNAL_LOGに記録するようになり、最高/最低スコアレポートが必ず銘柄を通知します。
+# 2. 【バージョン更新】v19.0.43に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -233,7 +232,6 @@ def get_estimated_win_rate(score: float) -> str:
         # 0%より大きく、30%未満
         return "1-30%"
     else:
-        # 0%以下の場合は全て0%と表示
         return "0%"
 
 def get_current_threshold(macro_context: Dict) -> float:
@@ -540,13 +538,14 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
             f"  <code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         )
         
-    message += (f"<i>Bot Ver: v19.0.41 - Win Rate Full Compliance</i>")
+    message += (f"<i>Bot Ver: v19.0.43 - Full Analysis Report Mode</i>")
     return message
 
 def format_hourly_report(signals: List[Dict], start_time: float, current_threshold: float) -> str:
     """
     1時間ごとの最高・最低スコア銘柄の通知メッセージを作成する。
-    ★修正点: シグナルが無くても必ず通知し、Entry/SL/TPを表示する。
+    ★この関数は、渡されたシグナルリスト（HOURLY_SIGNAL_LOG）全体から、
+    ★閾値に関わらず最高・最低スコアを選出するように実装されています。(ユーザー要望を満たしています)
     """
     
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
@@ -565,11 +564,12 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     
     if not signals_sorted:
         # シグナルがなかった場合のレポート
+        # ★ V19.0.43では、データ取得が失敗しない限り、分析銘柄数は0にならない
         message += (
-            f"  - **レポート**: 過去1時間以内に有効なシグナル分析はありませんでした。\n"
+            f"  - **レポート**: 過去1時間以内に有効な分析データが取得できませんでした。\n"
             f"  - **取引閾値**: <code>{current_threshold*100:.2f}</code> 点\n"
             f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-            f"<i>Bot Ver: v19.0.41 - Win Rate Full Compliance</i>"
+            f"<i>Bot Ver: v19.0.43 - Full Analysis Report Mode</i>"
         )
         return message
 
@@ -585,13 +585,13 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     message += f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
     
     # 🟢 ベストスコア銘柄
+    # ★ 95点未満でも最高スコアであればここに表示されます。
     message += (
         f"\n"
         f"🟢 **ベストスコア銘柄 (Top)**\n"
         f"  - **銘柄**: <b>{best_signal['symbol']}</b> ({best_signal['timeframe']})\n"
         f"  - **スコア**: <code>{best_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(best_signal['score'])}</code>\n"
-        # ★追加: Entry/SL/TP
         f"  - **指値 (Entry)**: <code>{format_price_precision(best_signal['entry_price'])}</code>\n"
         f"  - **SL/TP**: <code>{format_price_precision(best_signal['stop_loss'])}</code> / <code>{format_price_precision(best_signal['take_profit'])}</code>\n"
     )
@@ -603,7 +603,6 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
         f"  - **銘柄**: <b>{worst_signal['symbol']}</b> ({worst_signal['timeframe']})\n"
         f"  - **スコア**: <code>{worst_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(worst_signal['score'])}</code>\n"
-        # ★追加: Entry/SL/TP (ワーストもシグナルなのでデータは入っている)
         f"  - **指値 (Entry)**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
         f"  - **SL/TP**: <code>{format_price_precision(worst_signal['stop_loss'])}</code> / <code>{format_price_precision(worst_signal['take_profit'])}</code>\n"
         f"\n"
@@ -611,7 +610,7 @@ def format_hourly_report(signals: List[Dict], start_time: float, current_thresho
     
     message += (
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"<i>Bot Ver: v19.0.41 - Win Rate Full Compliance</i>"
+        f"<i>Bot Ver: v19.0.43 - Full Analysis Report Mode</i>"
     )
     
     return message
@@ -895,15 +894,7 @@ def generate_signal_and_score(
 ) -> Optional[Dict]:
     """
     指定されたデータフレームからロングシグナルを生成し、スコアリングする。
-    Args:
-        df: OHLCVとテクニカル指標を含むDataFrame
-        timeframe: 時間足 ('1m', '5m', '1h'など)
-        market_ticker: 最新の市場価格情報
-        macro_context: FGIなどのマクロ環境情報
-        required_ohlcv_limit: 必要な最小データポイント数
-        
-    Returns:
-        シグナルデータ辞書、またはNone
+    ★ V19.0.43: 基本シグナル条件に関わらず、OHLCVデータが存在する限りスコアリングを強制実行します。
     """
     
     if len(df) < required_ohlcv_limit or df.isnull().values.any():
@@ -922,7 +913,7 @@ def generate_signal_and_score(
     last_low = last_candle['low']
     last_high = last_candle['high']
     
-    # 2. シグナル生成 (簡易的なロングエントリー条件)
+    # 2. シグナル生成 (簡易的なロングエントリー条件 - V19.0.43ではスコアリングのボーナス/ペナルティに利用するのみ)
     
     # 【条件1】価格がBBの下限線付近にある (リバーサル/押し目狙い)
     is_at_lower_bb = last_low <= last_candle['BBL']
@@ -934,12 +925,12 @@ def generate_signal_and_score(
     # 【条件3】短期移動平均線が中期移動平均線を上回る（簡易的なゴールデンクロス/短期トレンド）
     is_short_term_up = last_close > last_candle['BBM'] # Close > BB Middle (SMA20)
 
-    # 総合的なエントリーシグナル
+    # 総合的なエントリーシグナル (※スコアのベースラインとするが、ここでreturnしない)
     is_long_signal = is_at_lower_bb and is_rsi_recovering and is_short_term_up
     
-    # スコア計算はシグナルがONになった後に行う（現在のロジックを維持）
-    if not is_long_signal:
-        return None
+    # ★★★ V19.0.43 修正ポイント: ここで return None しない ★★★
+    # if not is_long_signal:
+    #     return None
 
     # 3. スコアリング
     
@@ -1045,6 +1036,7 @@ def generate_signal_and_score(
     
     # SL/TPの幅: ATR (Average True Range) を使用
     atr_data = df.ta.atr(length=14, append=False)
+    # ATRデータが計算できない場合 (例えばデータ不足) はシグナルを返さない
     if atr_data.empty: return None
 
     # 最新のATR値
@@ -1549,6 +1541,7 @@ async def main_bot_loop():
                 ohlcv_data[tf] = calculate_indicators(ohlcv_data[tf].copy())
                 
                 # シグナルとスコアを生成
+                # ★ V19.0.43: 基本シグナル条件に関わらずスコアリングを実行
                 signal = generate_signal_and_score(
                     df=ohlcv_data[tf],
                     timeframe=tf,
@@ -1556,6 +1549,8 @@ async def main_bot_loop():
                     macro_context=GLOBAL_MACRO_CONTEXT
                 )
                 
+                # generate_signal_and_scoreは、ATRやデータ不足の場合にNoneを返す可能性はあるが、
+                # 基本シグナル条件不成立ではNoneを返さなくなった。
                 if signal:
                     # ログと通知用のデータにロットサイズを計算して追加
                     signal['lot_size_usdt'] = calculate_dynamic_lot_size(signal['score'], account_status)
@@ -1572,7 +1567,10 @@ async def main_bot_loop():
     all_signals.sort(key=lambda x: x['score'], reverse=True)
     
     LAST_ANALYSIS_SIGNALS = all_signals.copy()
-    HOURLY_SIGNAL_LOG.extend(all_signals) # 1時間レポート用に記録
+    
+    # HOURLY_SIGNAL_LOGに、スコアリングされた全てのシグナル（閾値未満も含む）を記録します。
+    # ★ V19.0.43では、all_signalsは「データ取得・テクニカル計算が成功した全銘柄」を含む
+    HOURLY_SIGNAL_LOG.extend(all_signals) 
 
     if all_signals:
         best_signal = all_signals[0]
@@ -1627,7 +1625,7 @@ async def main_bot_loop():
             # TEST_MODE または クールダウン中の場合は、最高シグナルをログに記録
             log_signal(best_signal, "Signal Found (No Trade)")
     
-    # 7. 1時間ごとのスコア通知レポート (★常時通知するように修正)
+    # 7. 1時間ごとのスコア通知レポート (★閾値に関わらず最高・最低スコアを報告します)
     if time.time() - LAST_HOURLY_NOTIFICATION_TIME >= HOURLY_SCORE_REPORT_INTERVAL:
         logging.info("⏳ 1時間ごとのスコアレポートを生成中...")
         # HOURLY_SIGNAL_LOGが空の場合でも、format_hourly_report内で「分析銘柄なし」のレポートを生成する
@@ -1640,7 +1638,7 @@ async def main_bot_loop():
     # 8. 初回起動完了通知 (一度だけ)
     if not IS_FIRST_MAIN_LOOP_COMPLETED:
         # 初回起動通知
-        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.41")
+        startup_message = format_startup_message(account_status, GLOBAL_MACRO_CONTEXT, len(CURRENT_MONITOR_SYMBOLS), current_threshold, "v19.0.43")
         await send_telegram_notification(startup_message)
         IS_FIRST_MAIN_LOOP_COMPLETED = True
         
@@ -1693,7 +1691,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-app = FastAPI(title="Apex BOT API", version="v19.0.41")
+app = FastAPI(title="Apex BOT API", version="v19.0.43")
 
 @app.on_event("startup")
 async def startup_event():
