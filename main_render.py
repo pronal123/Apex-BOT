@@ -1,11 +1,11 @@
 # ====================================================================================
-# Apex BOT v19.0.51 - FEATURE: Trading Signal Threshold Update (86.00 Points)
+# Apex BOT v19.0.53 - FEATURE: Periodic SL/TP Re-Placing for Unmanaged Orders
 #
 # 改良・修正点:
-# 1. 【取引閾値変更】市場環境に応じた動的閾値のベースラインを86.00点に引き上げ。
-#    - SIGNAL_THRESHOLD_NORMAL = 0.86 (86.00点)
-# 2. BOT_VERSION を v19.0.51 に更新。
-# 3. v19.0.50で導入したAPI遅延対策ロジックは維持。
+# 1. 【SL/TP再設定】open_order_management_loop関数内に、SLまたはTPの注文が片方または両方欠けている場合に、
+#    残っている注文をキャンセルし、SL/TP注文を再設定するロジックを追加。
+# 2. 【IOC失敗診断維持】v19.0.52で追加したIOC失敗時診断ログを維持。
+# 3. BOT_VERSION を v19.0.53 に更新。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -111,8 +111,8 @@ GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
-# ★ 新規追加: ボットのバージョン (v19.0.51: 取引閾値86点に設定)
-BOT_VERSION = "v19.0.51"
+# ★ 新規追加: ボットのバージョン (v19.0.53: 定期SL/TP再設定機能)
+BOT_VERSION = "v19.0.53"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -942,7 +942,7 @@ def generate_signal_and_score(
     last_close = last_candle['close']
     last_low = last_candle['low']
     
-    # ATR (Average True Range) を使用したSL/TPの計算のために、まずATRを計算する
+    # ATR (Average True Range) を使用したSL/TPの計算のために、まず ATRを計算する
     atr_data = df.ta.atr(length=14, append=False)
     
     # ATRが計算できない場合 (例えばデータ不足) はシグナルを返さない
@@ -1231,7 +1231,8 @@ async def place_sl_tp_orders(
         # SL設定失敗時は、TP注文をキャンセルし、即座にポジションをクローズ（リスクを負わない）
         if tp_order_id:
             try:
-                await EXCHANGE_CLIENT.cancel_order(tp_order_id, symbol)
+                # ★ v19.0.53 修正: cancel_single_orderを使用
+                await cancel_single_order(tp_order_id, symbol)
                 logging.warning(f"⚠️ SL失敗のため、TP注文 (ID: {tp_order_id}) をキャンセルしました。")
             except Exception as cancel_e:
                  logging.error(f"❌ TPキャンセル失敗: {cancel_e}")
@@ -1335,6 +1336,8 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
              
              # 成功時の情報源を updated_order に切り替える
              order = updated_order
+             # 再チェック後のステータスを取得（次のステップの診断ログのために）
+             order_status = order.get('status')
         
         if filled_amount > 0.0:
             # 即時約定成功 (部分約定または全約定)
@@ -1409,6 +1412,10 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
         else:
             # 約定しなかった場合 (filled_amount == 0.0)
             error_message = '指値買い注文が即時約定しなかったためキャンセルされました。' 
+            # 💡 V19.0.52 修正: 失敗時の最終注文ステータスをログに記録
+            final_status = order.get('status', 'N/A')
+            logging.error(f"❌ 最終的なIOC注文ステータス: ID={order_id}, Status={final_status}, Filled={filled_amount:.4f}")
+            
             # 💡 ユーザーの報告エラーメッセージに合わせて、もしユーザーがMarket注文に変えていた場合を考慮
             if order.get('type') == 'market':
                  error_message = '成行買い注文で約定が発生しませんでした。（即時約定量がゼロ）'
@@ -1453,6 +1460,19 @@ async def execute_trade(signal: Dict, account_status: Dict) -> Dict:
             'close_error_message': close_result.get('error_message'),
         }
 
+async def cancel_single_order(order_id: str, symbol: str) -> bool:
+    """単一の注文をキャンセルするヘルパー関数"""
+    global EXCHANGE_CLIENT
+    if not order_id or not EXCHANGE_CLIENT:
+        return False
+    try:
+        await EXCHANGE_CLIENT.cancel_order(order_id, symbol)
+        logging.info(f"✅ 注文をキャンセルしました: {symbol} (ID: {order_id})")
+        return True
+    except Exception as e:
+        logging.warning(f"⚠️ 注文のキャンセルに失敗 (ID: {order_id}, Symbol: {symbol}): {e}")
+        return False
+
 
 async def cancel_all_related_orders(position: Dict, open_order_ids: List[str]):
     """特定のポジションに関連するすべてのオープン注文をキャンセルする"""
@@ -1468,12 +1488,9 @@ async def cancel_all_related_orders(position: Dict, open_order_ids: List[str]):
         orders_to_cancel.append(position['tp_order_id'])
         
     for order_id in orders_to_cancel:
-        try:
-            await EXCHANGE_CLIENT.cancel_order(order_id, symbol)
-            logging.info(f"✅ 関連注文をキャンセルしました: {symbol} (ID: {order_id})")
-        except Exception as e:
-            # すでに約定/キャンセルされている可能性あり
-            logging.warning(f"⚠️ 注文のキャンセルに失敗 (ID: {order_id}, Symbol: {symbol}): {e}")
+        # ★ v19.0.53 修正: cancel_single_orderを使用
+        await cancel_single_order(order_id, symbol)
+
 
 async def open_order_management_loop():
     """オープン注文とポジションの状態を監視するループ (10秒ごと)"""
@@ -1515,22 +1532,47 @@ async def open_order_management_loop():
             is_closed = False
             exit_type = None
             
+            # ボットが認識しているSL/TP注文IDが、取引所のオープン注文リストに存在するかチェック
             sl_open = position['sl_order_id'] in open_order_ids
             tp_open = position['tp_order_id'] in open_order_ids
             
-            # SL/TP注文が両方ともオープン注文リストから消えているかチェック
+            # 1. 両方の決済注文が消滅 -> 決済完了と見なす
             if not sl_open and not tp_open:
                 is_closed = True
                 exit_type = "取引所決済完了"
                 logging.info(f"🔴 決済検出: {position['symbol']} - SL/TP注文が取引所から消滅。決済完了と見なします。")
 
-            elif sl_open and tp_open:
-                # 決済注文が両方とも残っている = ポジションオープン中
-                logging.debug(f"ℹ️ {position['symbol']} は引き続きオープン中 (SL: {sl_open}, TP: {tp_open})")
-                pass
+            # 💡 V19.0.53 修正: 決済注文の不完全検出と再設定
+            elif not sl_open or not tp_open:
+                # 2. 片方の決済注文が消滅または未設定 (再設定が必要なケース)
+                
+                logging.warning(f"⚠️ {position['symbol']} の決済注文が不完全です (SL Open:{sl_open}, TP Open:{tp_open})。再設定を試みます。")
+
+                # A. 残っている注文をキャンセルする (二重注文を防ぐため)
+                if sl_open:
+                    await cancel_single_order(position['sl_order_id'], position['symbol'])
+                if tp_open:
+                    await cancel_single_order(position['tp_order_id'], position['symbol'])
+                    
+                # B. SL/TPを再設定
+                re_place_result = await place_sl_tp_orders(
+                    symbol=position['symbol'],
+                    filled_amount=position['filled_amount'],
+                    stop_loss=position['stop_loss'],
+                    take_profit=position['take_profit']
+                )
+
+                if re_place_result['status'] == 'ok':
+                    # 新しい注文IDでポジション情報を更新
+                    position['sl_order_id'] = re_place_result['sl_order_id']
+                    position['tp_order_id'] = re_place_result['tp_order_id']
+                    logging.info(f"✅ {position['symbol']} のSL/TP注文を再設定しました。新しいIDを登録しました。")
+                else:
+                    logging.critical(f"🚨 {position['symbol']} のSL/TP再設定に失敗しました: {re_place_result['error_message']}。手動で確認してください。")
+                    
             else:
-                # 片方のみが残っている場合（取引所の自動キャンセルに失敗）は、一旦オープン中として扱う
-                logging.warning(f"⚠️ {position['symbol']} は片方の決済注文が消滅 (SL:{sl_open}, TP:{tp_open})。自動キャンセル失敗の可能性あり。")
+                # 3. 両方の決済注文が残っている -> ポジションオープン中
+                logging.debug(f"ℹ️ {position['symbol']} は引き続きオープン中 (SL: {sl_open}, TP: {tp_open})")
                 pass
                 
             if is_closed:
@@ -1852,7 +1894,7 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-# ★ v19.0.51 修正点: BOT_VERSION を使用
+# ★ v19.0.53 修正点: BOT_VERSION を使用
 app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 
 @app.on_event("startup")
