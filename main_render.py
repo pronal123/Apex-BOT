@@ -155,9 +155,9 @@ FGI_PROXY_BONUS_MAX = 0.05          # 恐怖・貪欲指数による最大ボー
 # 市場環境に応じた動的閾値調整のための定数 (★ V19.0.51 修正箇所: 閾値を86点ベースに設定)
 FGI_SLUMP_THRESHOLD = -0.02         
 FGI_ACTIVE_THRESHOLD = 0.02         
-SIGNAL_THRESHOLD_SLUMP = 0.88       # 88.00点 (リスクオフ時は厳しく)
-SIGNAL_THRESHOLD_NORMAL = 0.86      # 86.00点 (ベースライン)
-SIGNAL_THRESHOLD_ACTIVE = 0.83      # 83.00点 (リスクオン時は緩く)      
+SIGNAL_THRESHOLD_SLUMP = 0.86       # 88.00点 (リスクオフ時は厳しく)
+SIGNAL_THRESHOLD_NORMAL = 0.84      # 86.00点 (ベースライン)
+SIGNAL_THRESHOLD_ACTIVE = 0.80      # 83.00点 (リスクオン時は緩く)      
 
 # ====================================================================================
 # UTILITIES & FORMATTING 
