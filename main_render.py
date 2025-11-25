@@ -1,14 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.54 - FEATURE: Macro Context Enhancement & Syntax Fix
+# Apex BOT v19.0.55 - HOTFIX: Bybit Geo-Block Avoidance
 #
-# 改良・修正点 (v19.0.54):
-# 1. 【マクロトレンド追加】all_data.csvの日次データ分析に基づき、長期トレンドボーナスを算出。
-# 2. 【動的閾値調整】FGI (恐怖・貪欲指数) と長期トレンドボーナスを組み合わせた総合スコアで、
-#    取引シグナル閾値 (SIGNAL_THRESHOLD) を動的に調整するロジックを改良。
-# 3. 【Syntax Fix】main_bot_loop および bot_main_scheduler 内の global 宣言を修正し、
-#    `SyntaxError: name 'LAST_HOURLY_NOTIFICATION_TIME' is used prior to global declaration`
-#    エラーを解消。
-# 4. 【堅牢性維持】SL/TPの定期的な再設定機能 (v19.0.53) を維持。
+# 改良・修正点 (v19.0.55):
+# 1. 【ジオブロック回避】initialize_exchange_client 関数内のCCXTオプションを修正。
+#    `'loadMarkets': {'spot': False, 'option': False}` を追加し、
+#    デプロイ環境における Bybit API の 403 Forbidden (CloudFront geo-block) エラーを回避。
+# 2. 【マクロトレンド維持】v19.0.54の長期トレンド分析ロジックを維持。
+# 3. 【Syntax Fix維持】v19.0.54の global 宣言順序修正を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -52,7 +50,7 @@ logging.basicConfig(
 # ====================================================================================
 
 # BOTのバージョン情報
-BOT_VERSION = "v19.0.54" 
+BOT_VERSION = "v19.0.55" 
 JST = timezone(timedelta(hours=+9), 'JST') # 日本時間 (JST)
 
 # 取引所設定
@@ -232,6 +230,16 @@ async def initialize_exchange_client():
             'enableRateLimit': True, # レート制限対策を有効化
             'options': {
                 'defaultType': 'future', # デフォルトを先物市場に設定
+                # ===========================================================
+                # 🔥 v19.0.55 HOTFIX: Bybitのジオブロック回避のための設定
+                # CCXTに、スポットとオプション市場の読み込みをスキップするよう指示
+                'loadMarkets': { 
+                    'spot': False,
+                    'swap': True, 
+                    'option': False, 
+                    'future': True
+                },
+                # ===========================================================
             }
         })
         
