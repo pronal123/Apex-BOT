@@ -1,11 +1,12 @@
 # ====================================================================================
-# Apex BOT v19.0.53 - FEATURE: Periodic SL/TP Re-Placing for Unmanaged Orders
+# Apex BOT v19.0.53 (Patched) - FEATURE: Periodic SL/TP Re-Placing for Unmanaged Orders
 #
 # 改良・修正点:
 # 1. 【SL/TP再設定】open_order_management_loop関数内に、SLまたはTPの注文が片方または両方欠けている場合に、
 #    残っている注文をキャンセルし、SL/TP注文を再設定するロジックを追加。
 # 2. 【IOC失敗診断維持】v19.0.52で追加したIOC失敗時診断ログを維持。
-# 3. BOT_VERSION を v19.0.53 に更新。
+# 3. 【レポート表示修正】Hourly Reportの分析対象数計算ロジックを修正 (v19.0.53-p1)
+# 4. 【通知強化】取引シグナル通知に推定損益(USDT)を表示する機能を追加 (v19.0.53-p1)
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -111,8 +112,8 @@ GLOBAL_TOTAL_EQUITY: float = 0.0 # 総資産額を格納するグローバル変
 HOURLY_SIGNAL_LOG: List[Dict] = [] # ★ 1時間内のシグナルを一時的に保持するリスト (V19.0.34で追加)
 HOURLY_ATTEMPT_LOG: Dict[str, str] = {} # ★ 1時間内の分析試行を保持するリスト (Symbol: Reason)
 
-# ★ 新規追加: ボットのバージョン (v19.0.53: 定期SL/TP再設定機能)
-BOT_VERSION = "v19.0.53"
+# ★ 新規追加: ボットのバージョン (v19.0.53-p1: レポート修正＆推定損益表示版)
+BOT_VERSION = "v19.0.53-p1"
 
 if TEST_MODE:
     logging.warning("⚠️ WARNING: TEST_MODE is active. Trading is disabled.")
@@ -434,6 +435,25 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
     trade_status_line = ""
     failure_section = "" # 💡 取引失敗詳細セクションの追加
 
+    # 💡 【追加】推定損益の計算ロジック
+    est_pnl_line = ""
+    if context == "取引シグナル" and entry_price > 0:
+        # 数量(Amount)の確定: 約定していればその数量、なければシグナルの想定数量を使用
+        calc_amount = 0.0
+        if trade_result and trade_result.get('filled_amount', 0.0) > 0:
+            calc_amount = trade_result['filled_amount']
+        else:
+            # まだ約定していない、またはテストモードの場合は想定ロットサイズから計算
+            lot_usdt = signal.get('lot_size_usdt', BASE_TRADE_SIZE_USDT)
+            calc_amount = lot_usdt / entry_price
+
+        # SL/TPにかかった場合のUSDT差額を計算
+        est_loss_usdt = (stop_loss - entry_price) * calc_amount
+        est_profit_usdt = (take_profit - entry_price) * calc_amount
+        
+        # 表示用フォーマット
+        est_pnl_line = f"  - **推定損益**: 🔴{format_usdt(est_loss_usdt)} / 🟢+{format_usdt(est_profit_usdt)} USDT\n"
+
     if context == "取引シグナル":
         lot_size = signal.get('lot_size_usdt', BASE_TRADE_SIZE_USDT)
         
@@ -529,6 +549,7 @@ def format_telegram_message(signal: Dict, context: str, current_threshold: float
         f"  - **エントリー (指値)**: <code>{format_price_precision(entry_price)}</code>\n"
         f"  - **リスクリワード (R:R)**: <code>1:{rr_ratio:.2f}</code>\n"
         f"  - **SL/TP**: <code>{format_price_precision(stop_loss)}</code> / <code>{format_price_precision(take_profit)}</code>\n"
+        f"{est_pnl_line}" # ★ここで推定損益の行を追加
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
         f"**{trade_status_line}**\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
@@ -565,16 +586,15 @@ def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start
     # スコアでソート
     signals_sorted = sorted(signals, key=lambda x: x['score'], reverse=True)
     
+    # 💡【修正】分析対象とスキップの計算ロジック
     analyzed_count = len(signals)
-    attempt_count = len(attempt_log)
-    
-    # 分析試行されたが、クールダウンなどでスキップされた銘柄
-    skipped_count = attempt_count - analyzed_count
+    skipped_count = len(attempt_log) # attempt_log はスキップされたもののみ
+    total_attempted = analyzed_count + skipped_count # 総試行数
     
     message = (
         f"📈 **【Hourly Report】** - {start_jst} から {now_jst} (JST)\n"
         f"<code>- - - - - - - - - - - - - - - - - - - - -</code>\n"
-        f"  - **分析対象**: <code>{attempt_count}</code> 銘柄 / <code>{len(DEFAULT_SYMBOLS) * len(TARGET_TIMEFRAMES)}</code> タイムフレーム\n"
+        f"  - **分析対象**: <code>{total_attempted}</code> 銘柄 / <code>{len(DEFAULT_SYMBOLS) * len(TARGET_TIMEFRAMES)}</code> タイムフレーム\n"
         f"  - **有効シグナル**: <code>{analyzed_count}</code> 件 (スコア > {0.50*100:.0f})\n" # ベーススコア以上
         f"  - **スキップ**: <code>{skipped_count}</code> 銘柄 ({'、'.join(attempt_log.values()) if attempt_log else 'なし'})\n"
         f"  - **現在の取引閾値**: <code>{current_threshold*100:.0f} / 100</code>\n"
