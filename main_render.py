@@ -851,6 +851,29 @@ async def fetch_fgi_data() -> Dict:
     fgi_raw_value = 'N/A'
     fgi_proxy = 0.0
     forex_bonus = 0.0
+
+async def fetch_ohlcv_with_retry(symbol: str, timeframe: str, limit: int = 500, retries: int = 3) -> pd.DataFrame:
+    """ OHLCVデータの取得をエラー時に再試行するラッパー関数 """
+    global EXCHANGE_CLIENT
+    
+    for attempt in range(retries):
+        try:
+            # 実際のデータ取得処理
+            ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(
+                symbol=symbol, 
+                timeframe=timeframe, 
+                limit=limit
+            )
+            # 成功したらDataFrameにして返す
+            return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        except Exception as e:
+            logging.warning(f"⚠️ {symbol}/{timeframe} - OHLCV取得試行 {attempt + 1}/{retries} 失敗: {e}")
+            if attempt < retries - 1:
+                # 最後の試行でなければ、ランダムな時間待機
+                await asyncio.sleep(random.randint(2, 5)) # 2〜5秒ランダムに待機
+            else:
+                # 最終試行も失敗
+                raise Exception(f"OHLCV Fetch Error: {e}") # 呼び出し元にエラーを再スロー (analyze_symbolでキャッチされる)
     
     # 外部APIからFGIを取得するロジック（実際には、ここでAPIコールを行う）
     try:
