@@ -1,11 +1,14 @@
 # ====================================================================================
-# Apex BOT v19.0.53 - FEATURE: Periodic SL/TP Re-Placing for Unmanaged Orders
+# Apex BOT v19.0.54 - FEATURE: Macro Context Enhancement & Syntax Fix
 #
 # 改良・修正点 (v19.0.54):
 # 1. 【マクロトレンド追加】all_data.csvの日次データ分析に基づき、長期トレンドボーナスを算出。
 # 2. 【動的閾値調整】FGI (恐怖・貪欲指数) と長期トレンドボーナスを組み合わせた総合スコアで、
 #    取引シグナル閾値 (SIGNAL_THRESHOLD) を動的に調整するロジックを改良。
-# 3. 関数名を fetch_fgi_data から fetch_macro_context に変更。
+# 3. 【Syntax Fix】main_bot_loop および bot_main_scheduler 内の global 宣言を修正し、
+#    `SyntaxError: name 'LAST_HOURLY_NOTIFICATION_TIME' is used prior to global declaration`
+#    エラーを解消。
+# 4. 【堅牢性維持】SL/TPの定期的な再設定機能 (v19.0.53) を維持。
 # ====================================================================================
 
 # 1. 必要なライブラリをインポート
@@ -239,7 +242,6 @@ async def initialize_exchange_client():
     except Exception as e:
         logging.critical(f"❌ {EXCHANGE_ID} の初期化に失敗しました。BOTを終了します。エラー: {e}")
         # 致命的なエラーのため、FastAPIをシャットダウン
-        # uvicorn.server.Server の shutdown メソッドを呼び出すのが理想だが、ここでは sys.exit で代替
         sys.exit(1)
 
 
@@ -532,13 +534,6 @@ async def execute_trade(symbol: str, side: str, amount_usdt: float, current_pric
         # レバレッジ設定
         await EXCHANGE_CLIENT.set_leverage(LEVERAGE, symbol)
         
-        # USDT金額から取引量 (コントラクトサイズ) を計算
-        # amount = amount_usdt / current_price * LEVERAGE 
-        # BybitのUSDT無期限契約の場合、amountはUSDT建ての価値で直接渡せる場合が多い。
-        # CCXTは `create_order` の `amount` をベース通貨建て (BTC, ETHなど) で期待する。
-        # amount_in_base = amount_usdt * LEVERAGE / current_price # 概算のベース通貨量
-        # ここではシンプルに、`params` で quoteOrderQty を指定するなど、取引所固有の方法を使う
-        
         # シンプルにベース通貨での取引量を計算 (レバレッジ適用前のサイズを現在の価格で割る)
         amount_in_base = amount_usdt / current_price 
         
@@ -711,7 +706,6 @@ def analyze_indicator(df: pd.DataFrame, timeframe: str) -> Tuple[int, Optional[s
     return int(total_score), final_signal
 
 
-# 修正箇所: fetch_fgi_data -> fetch_macro_context に名称変更
 async def fetch_macro_context() -> Dict: 
     """
     Crypto Fear & Greed Index (FGI) と all_data.csv からのマクロ環境コンテキストを返す。
@@ -802,11 +796,6 @@ async def open_order_management_loop():
             if RE_ADJUST_SL_TP_ENABLED and (not has_sl or not has_tp):
                 logging.warning(f"⚠️ {symbol} ポジション ({position_side}) のSL/TP注文が不足しています (SL:{has_sl}, TP:{has_tp})。再設定します。")
                 
-                # a. 既存のSL/TP注文をキャンセル
-                # 誤って他の注文をキャンセルしないように、STOP/LIMITタイプのみをターゲットにキャンセルするロジックが理想的
-                # CCXTの cancel_all_orders は全キャンセルなので、ここではそのまま使用
-                # await cancel_all_orders(symbol) # これは危険なため、慎重に
-                
                 # b. ATRに基づいて新しいSL/TP価格を計算
                 ohlcv_data = await fetch_ohlcv_data(symbol, timeframe='1h') # 1hのデータでATRを計算
                 if ohlcv_data.empty or not entry_price:
@@ -858,14 +847,14 @@ async def open_order_management_loop():
 
 async def main_bot_loop():
     """BOTのメイン処理ループ"""
-    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT
+    # 修正: すべての global 変数を関数の冒頭で宣言
+    global LAST_SUCCESS_TIME, LAST_SIGNAL_TIME, LAST_ANALYSIS_SIGNALS, IS_FIRST_MAIN_LOOP_COMPLETED, GLOBAL_MACRO_CONTEXT, LAST_HOURLY_NOTIFICATION_TIME
     now_ts = time.time()
     now_jst = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
     
     logging.info(f"--- 💡 {now_jst} - BOT LOOP START (M1 Frequency) ---")
 
     # 1. FGIデータを取得し、グローバルマクロコンテキストを更新
-    # 修正箇所: fetch_fgi_data -> fetch_macro_context に変更
     GLOBAL_MACRO_CONTEXT = await fetch_macro_context() 
     
     # マクロ影響スコアの計算に long_term_trend_bonus を追加
@@ -884,7 +873,7 @@ async def main_bot_loop():
         balance = await get_account_balance('USDT')
         message = format_startup_message(current_threshold, GLOBAL_MACRO_CONTEXT, balance)
         await send_notification(message)
-        global LAST_HOURLY_NOTIFICATION_TIME
+        # 修正済み: global宣言は上部で行われているため、ここでは代入のみ
         LAST_HOURLY_NOTIFICATION_TIME = now_ts
         logging.info("🔔 定期通知を送信しました。")
 
@@ -994,13 +983,15 @@ async def bot_main_scheduler():
             await main_bot_loop()
             
             # 初回起動完了通知 (一度だけ)
-            global IS_FIRST_MAIN_LOOP_COMPLETED
+            # 修正: global宣言は上部で行う
+            global IS_FIRST_MAIN_LOOP_COMPLETED, LAST_HOURLY_NOTIFICATION_TIME
+            
             if IS_FIRST_MAIN_LOOP_COMPLETED and LAST_HOURLY_NOTIFICATION_TIME == 0.0:
                 balance = await get_account_balance('USDT')
                 current_threshold = get_current_threshold(GLOBAL_MACRO_CONTEXT)
                 message = format_startup_message(current_threshold, GLOBAL_MACRO_CONTEXT, balance)
                 await send_notification(message)
-                global LAST_HOURLY_NOTIFICATION_TIME
+                
                 LAST_HOURLY_NOTIFICATION_TIME = time.time() # 初回通知時刻を記録
                 
         except Exception as e:
@@ -1046,7 +1037,6 @@ async def open_order_management_scheduler():
 # ====================================================================================
 
 # FastAPIアプリケーションの初期化
-# ★ v19.0.53 修正点: BOT_VERSION を使用
 app = FastAPI(title="Apex BOT API", version=BOT_VERSION)
 
 @app.on_event("startup")
