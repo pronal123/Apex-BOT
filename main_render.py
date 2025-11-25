@@ -858,14 +858,14 @@ async def fetch_ohlcv_with_retry(symbol: str, timeframe: str, limit: int = 500, 
     
     for attempt in range(retries):
         try:
-            # 実際のデータ取得処理
-            ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(
-                symbol=symbol, 
-                timeframe=timeframe, 
-                limit=limit
-            )
-            # 成功したらDataFrameにして返す
-            return pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    # リトライ機能付きの新しいOHLCVデータ取得処理
+    df = await fetch_ohlcv_with_retry(
+        symbol=symbol, 
+        timeframe=tf, 
+        limit=limit,
+        retries=3 # 必要に応じてリトライ回数を変更
+    )
+    # df は既に DataFrame に変換されています
         except Exception as e:
             logging.warning(f"⚠️ {symbol}/{timeframe} - OHLCV取得試行 {attempt + 1}/{retries} 失敗: {e}")
             if attempt < retries - 1:
