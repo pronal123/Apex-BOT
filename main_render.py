@@ -635,7 +635,7 @@ def format_hourly_report(signals: List[Dict], attempt_log: Dict[str, str], start
         f"  - **スコア**: <code>{worst_signal['score'] * 100:.2f} / 100</code>\n"
         f"  - **推定勝率**: <code>{get_estimated_win_rate(worst_signal['score'])}</code>\n"
         f"  - **指値 (Entry)**: <code>{format_price_precision(worst_signal['entry_price'])}</code>\n"
-        f"  - **SL/TP**: <code>{format_price_precision(worst_signal['stop_loss']}</code> / <code>{format_price_precision(worst_signal['take_profit']}</code>\n"
+        f"  - **SL/TP**: <code>{format_price_precision(worst_signal['stop_loss'])}</code> / <code>{format_price_precision(worst_signal['take_profit'])}</code>\n"
         f"\n"
     )
 
