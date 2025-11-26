@@ -38,7 +38,7 @@ load_dotenv()
 
 # 💡 【ログ確認対応】ロギング設定を明示的に定義
 logging.basicConfig(
-    level=logging.INFO, # INFOレベル以上のメッセージを出力
+    level=logging.DEBUG, # INFOレベル以上のメッセージを出力
     format='%(asctime)s - %(levelname)s - (%(funcName)s) - (%(threadName)s) - %(message)s' 
 )
 
