@@ -1614,6 +1614,7 @@ async def execute_trade(signal: Dict, lot_size_usdt: float) -> Dict:
         Dict: 取引結果 (成功/失敗、約定価格、SL/TP注文IDなど)
     """
     global EXCHANGE_CLIENT
+    global OPEN_POSITIONS # <--- この行を追加！
     
     symbol = signal['symbol']
     entry_price = signal['entry_price']
