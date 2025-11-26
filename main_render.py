@@ -1232,7 +1232,7 @@ def score_long_entry(df: pd.DataFrame, timeframe: str, market_ticker: Dict, macr
     
     return signal
 
-async def fetch_ohlcv_and_analyze(symbol: str, timeframe: str, limit: int, market_ticker: Dict, macro_context: Dict) -> Optional[Dict]:
+async def fetch_ohlcv_and_analyze(symbol: str, tf: str, limit: int, market_ticker: dict, macro_context: str) -> pd.DataFrame:
     """
     OHLCVデータを取得し、テクニカル分析とスコアリングを実行する
     """
@@ -1847,7 +1847,7 @@ async def open_order_management_loop():
 # MAIN BOT LOGIC
 # ====================================================================================
 
-async def analyze_symbol(symbol: str, market_ticker: Dict, macro_context: Dict) -> List[Dict]:
+async def analyze_symbol(symbol: str, tf: str, market_ticker: dict, macro_context: str):
     """特定のシンボルの全タイムフレームを分析する"""
     signals = []
     
