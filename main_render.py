@@ -1962,7 +1962,7 @@ async def main_bot_loop():
             market_ticker = tickers.get(symbol)
             if market_ticker:
                 # ティック価格が取得できない、または有効な市場でない場合はスキップ
-                if market_ticker['last'] is None or market_ticker['last'] <= 0 or not market_ticker['active']:
+                if market_ticker['last'] is None or market_ticker['last'] <= 0:
                     HOURLY_ATTEMPT_LOG[symbol] = "価格/市場無効"
                     continue
                     
