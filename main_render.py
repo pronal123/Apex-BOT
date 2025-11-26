@@ -1243,7 +1243,7 @@ async def fetch_ohlcv_and_analyze(symbol: str, timeframe: str, limit: int, marke
 
     try:
         # OHLCVデータを取得
-        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, timeframe, limit=limit)
+        ohlcv = await EXCHANGE_CLIENT.fetch_ohlcv(symbol, tf, limit=limit)
         
         if len(ohlcv) < limit:
             logging.warning(f"⚠️ {symbol} ({timeframe}): 必要なデータ数 ({limit}) を取得できませんでした ({len(ohlcv)})。")
@@ -1870,7 +1870,7 @@ async def analyze_symbol(symbol: str, market_ticker: Dict, macro_context: Dict) 
                 signals.append(signal)
                 
         except Exception as e:
-            logging.error(f"❌ {symbol} ({timeframe}) の分析中にエラーが発生: {e}")
+            logging.error(f"❌ {symbol} ({tf}) の分析中にエラーが発生: {e}")
             
     return signals
 
