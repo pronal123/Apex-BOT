@@ -856,15 +856,14 @@ async def fetch_ohlcv_with_retry(symbol: str, timeframe: str, limit: int = 500, 
     """ OHLCVデータの取得をエラー時に再試行するラッパー関数 """
     global EXCHANGE_CLIENT
     
-    for attempt in range(retries):
-    try:
-    # リトライ機能付きの新しいOHLCVデータ取得処理
-        df = await fetch_ohlcv_with_retry(
-            symbol=symbol, 
-            timeframe=tf, 
-            limit=limit,
-            retries=3 # 必要に応じてリトライ回数を変更
-        )
+for tf in timeframes:
+        # ↓ 修正: forループのブロック全体を1段階インデント
+        try:
+            df = await fetch_ohlcv_with_retry(
+                symbol=symbol,
+                timeframe=tf,
+                limit=REQUIRED_OHLCV_LIMITS[tf]
+            )
     # df は既に DataFrame に変換されています
         except Exception as e:
             logging.warning(f"⚠️ {symbol}/{timeframe} - OHLCV取得試行 {attempt + 1}/{retries} 失敗: {e}")
