@@ -2134,7 +2134,12 @@ async def startup_event():
     asyncio.create_task(main_loop_wrapper())
     asyncio.create_task(monitor_loop_wrapper())
 
-# 疎通確認用エンドポイント
+# 疎通確認用エンドポイント (Renderのヘルスチェック対応)
+# ヘルスチェックは通常、このエンドポイントを見てサービスが生きているかを判断します。
+@app.get("/health", include_in_schema=False)
+def health_check():
+    """Renderのヘルスチェック用エンドポイント。BOTの稼働状態とアップタイムを返す。"""
+    
 @app.get("/health", response_class=JSONResponse)
 def health_check():
     """ボットの稼働状態チェック"""
