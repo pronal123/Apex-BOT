@@ -1878,7 +1878,6 @@ async def open_order_management_loop():
                 logging.critical(f"🚨 {symbol}: SL/TP注文の再設定に失敗しました。ポジション ({position['id']}) の監視を継続しますが、手動での確認が必要です。")
 
     # ループ終了後、決済済みポジションをリストから削除
-    global OPEN_POSITIONS
     OPEN_POSITIONS = [p for p in OPEN_POSITIONS if p['id'] not in closed_position_ids]
     
 
