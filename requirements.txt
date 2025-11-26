@@ -15,8 +15,8 @@ numpy
 # テクニカル分析ライブラリ
 pandas-ta
 
-# 仮想通貨取引所API (非同期サポートを有効化)
-ccxt[async]
+# 仮想通貨取引所API (非同期サポートを有効化 - aiohttpを明示的に含める)
+ccxt[async,aiohttp]
 
 # HTTPクライアント (Telegram通知、Coinglass API用)
 requests
