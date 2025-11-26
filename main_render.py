@@ -36,11 +36,15 @@ import math
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
-# 💡 【ログ確認対応】ロギング設定を明示的に定義
-logging.basicConfig(
-    level=logging.DEBUG, # INFOレベル以上のメッセージを出力
-    format='%(asctime)s - %(levelname)s - (%(funcName)s) - (%(threadName)s) - %(message)s' 
-)
+# 💡 【ログ確認対応】ロギング設定 (DEBUGレベル維持)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - (%(funcName)s) - (%(threadName)s) - %(message)s')
+logger = logging.getLogger(__name__)
+logger.info("BOT Starting...")
+
+# 2. 定数・グローバル変数の設定
+# 実行間隔を大幅に延長 (例: 15秒から45秒へ)
+# 🚨 処理の分散とRenderのCPUスパイク対策のため、間隔を長くします。
+SLEEP_SECONDS_BEFORE_RESTART = int(os.environ.get("SLEEP_SECONDS_BEFORE_RESTART", 45)) # 15 -> 45
 
 # ====================================================================================
 # CONFIG & CONSTANTS
