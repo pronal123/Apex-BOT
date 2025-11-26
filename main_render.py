@@ -44,6 +44,10 @@ except ImportError:
     logging.warning("⚠️ yfinanceライブラリが見つかりません。為替ボーナス機能は無効になります。")
     yf = None
 
+# 💡 【NameError修正箇所】 FastAPIアプリケーションインスタンスの作成
+# uvicornから参照される 'app' オブジェクトをここで定義します。
+app = FastAPI() # <--- 🌟 この行を追加 🌟
+
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
